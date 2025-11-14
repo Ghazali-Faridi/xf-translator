@@ -1,0 +1,245 @@
+<?php
+/**
+ * Settings Management Class
+ *
+ * Handles all plugin settings using WordPress options API
+ *
+ * @package API_Translator
+ */
+
+class Settings {
+    
+    /**
+     * Option name
+     *
+     * @var string
+     */
+    private $option_name = 'api_translator_settings';
+    
+    /**
+     * Default settings
+     *
+     * @var array
+     */
+    private $defaults = array(
+        'api_key' => '',
+        'deepseek_api_key' => '',
+        'selected_model' => 'gpt-4o',
+        'languages' => array(),
+        'brand_tone' => '',
+        'exclude_paths' => array(),
+        'glossary_terms' => array()
+    );
+    
+    /**
+     * Get all settings
+     *
+     * @return array
+     */
+    public function get_all() {
+        $settings = get_option($this->option_name, $this->defaults);
+        return wp_parse_args($settings, $this->defaults);
+    }
+    
+    /**
+     * Get a specific setting
+     *
+     * @param string $key Setting key
+     * @param mixed $default Default value
+     * @return mixed
+     */
+    public function get($key, $default = null) {
+        $settings = $this->get_all();
+        
+        if (isset($settings[$key])) {
+            return $settings[$key];
+        }
+        
+        return $default !== null ? $default : (isset($this->defaults[$key]) ? $this->defaults[$key] : null);
+    }
+    
+    /**
+     * Update a setting
+     *
+     * @param string $key Setting key
+     * @param mixed $value Setting value
+     * @return bool
+     */
+    public function update($key, $value) {
+        $settings = $this->get_all();
+        $settings[$key] = $value;
+        return update_option($this->option_name, $settings);
+    }
+    
+    /**
+     * Update all settings
+     *
+     * @param array $settings Settings array
+     * @return bool
+     */
+    public function update_all($settings) {
+        $current = $this->get_all();
+        $merged = wp_parse_args($settings, $current);
+        return update_option($this->option_name, $merged);
+    }
+    
+    /**
+     * Add a language
+     *
+     * @param string $name Language name
+     * @param string $prefix Language prefix (e.g., 'en', 'es')
+     * @return bool
+     */
+    public function add_language($name, $prefix) {
+        $languages = $this->get('languages', array());
+        
+        // Check if language already exists
+        foreach ($languages as $lang) {
+            if ($lang['prefix'] === $prefix) {
+                return false; // Language already exists
+            }
+        }
+        
+        $languages[] = array(
+            'name' => sanitize_text_field($name),
+            'prefix' => sanitize_text_field($prefix)
+        );
+        
+        return $this->update('languages', $languages);
+    }
+    
+    /**
+     * Update a language
+     *
+     * @param int $index Language index
+     * @param string $name Language name
+     * @param string $prefix Language prefix
+     * @return bool
+     */
+    public function update_language($index, $name, $prefix) {
+        $languages = $this->get('languages', array());
+        
+        if (!isset($languages[$index])) {
+            return false;
+        }
+        
+        $languages[$index] = array(
+            'name' => sanitize_text_field($name),
+            'prefix' => sanitize_text_field($prefix)
+        );
+        
+        return $this->update('languages', $languages);
+    }
+    
+    /**
+     * Remove a language
+     *
+     * @param int $index Language index
+     * @return bool
+     */
+    public function remove_language($index) {
+        $languages = $this->get('languages', array());
+        
+        if (!isset($languages[$index])) {
+            return false;
+        }
+        
+        unset($languages[$index]);
+        $languages = array_values($languages); // Re-index array
+        
+        return $this->update('languages', $languages);
+    }
+    
+    /**
+     * Add exclude path
+     *
+     * @param string $path URL path to exclude
+     * @return bool
+     */
+    public function add_exclude_path($path) {
+        $paths = $this->get('exclude_paths', array());
+        
+        $path = sanitize_text_field($path);
+        if (in_array($path, $paths)) {
+            return false; // Path already exists
+        }
+        
+        $paths[] = $path;
+        return $this->update('exclude_paths', $paths);
+    }
+    
+    /**
+     * Remove exclude path
+     *
+     * @param int $index Path index
+     * @return bool
+     */
+    public function remove_exclude_path($index) {
+        $paths = $this->get('exclude_paths', array());
+        
+        if (!isset($paths[$index])) {
+            return false;
+        }
+        
+        unset($paths[$index]);
+        $paths = array_values($paths);
+        
+        return $this->update('exclude_paths', $paths);
+    }
+    
+    /**
+     * Add glossary term
+     *
+     * @param string $term Term to add
+     * @param string $context Optional context
+     * @return bool
+     */
+    public function add_glossary_term($term, $context = '') {
+        $terms = $this->get('glossary_terms', array());
+        
+        $term_data = array(
+            'term' => sanitize_text_field($term),
+            'context' => sanitize_text_field($context)
+        );
+        
+        // Check if term already exists
+        foreach ($terms as $existing) {
+            if ($existing['term'] === $term_data['term'] && $existing['context'] === $term_data['context']) {
+                return false; // Term already exists
+            }
+        }
+        
+        $terms[] = $term_data;
+        return $this->update('glossary_terms', $terms);
+    }
+    
+    /**
+     * Remove glossary term
+     *
+     * @param int $index Term index
+     * @return bool
+     */
+    public function remove_glossary_term($index) {
+        $terms = $this->get('glossary_terms', array());
+        
+        if (!isset($terms[$index])) {
+            return false;
+        }
+        
+        unset($terms[$index]);
+        $terms = array_values($terms);
+        
+        return $this->update('glossary_terms', $terms);
+    }
+    
+    /**
+     * Update brand tone
+     *
+     * @param string $tone Tone prompt
+     * @return bool
+     */
+    public function update_brand_tone($tone) {
+        return $this->update('brand_tone', sanitize_textarea_field($tone));
+    }
+}
+
