@@ -22,8 +22,7 @@ $failed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 
 // Get pending jobs (only NEW and EDIT types)
 $pending_jobs = $wpdb->get_results(
     "SELECT * FROM $table_name 
-     WHERE status = 'pending' 
-     AND type IN ('NEW', 'EDIT')
+     WHERE  type IN ('NEW', 'EDIT')
      ORDER BY id ASC 
      LIMIT 50",
     ARRAY_A
@@ -131,7 +130,24 @@ $recent_jobs = $wpdb->get_results(
                             </span>
                         </td>
                         <td>
-                            <span style="padding: 3px 8px; background: #f0ad4e; color: #fff; border-radius: 3px; font-size: 11px;">
+
+                           <?php 
+                            $color="#f0ad4e";
+                            if($job['status']=="pending"){
+                                $color="#f0ad4e";
+                            }
+
+                             if($job['status']=="completed"){
+                                $color="green";
+                            }
+
+                             if($job['status']=="failed"){
+                                $color="red";
+                            }
+
+
+                                ?>
+                            <span style="padding: 3px 8px; background: <?php echo $color; ?>; color: #fff; border-radius: 3px; font-size: 11px;">
                                 <?php echo esc_html(ucfirst($job['status'])); ?>
                             </span>
                         </td>
@@ -145,7 +161,7 @@ $recent_jobs = $wpdb->get_results(
     <?php endif; ?>
 </div>
 
-<div class="api-translator-section">
+<!-- <div class="api-translator-section">
     <h2><?php _e('Recent Queue Activity', 'xf-translator'); ?></h2>
     
     <?php if (empty($recent_jobs)) : ?>
@@ -360,5 +376,5 @@ $recent_jobs = $wpdb->get_results(
             </tbody>
         </table>
     <?php endif; ?>
-</div>
+</div> -->
 

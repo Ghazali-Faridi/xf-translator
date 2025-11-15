@@ -741,7 +741,7 @@ class Xf_Translator_Admin {
         } else {
             $this->add_notice(
                 sprintf(
-                    __('Analysis complete. Analyzed: %s. Total: %d missing translations added to the queue.', 'xf-translator'),
+                    __('Analysis complete.', 'xf-translator'),
                     implode(', ', $message_parts),
                     $total_added
                 ),

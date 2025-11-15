@@ -22,7 +22,7 @@ $failed_old_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
 // Get pending OLD jobs
 $pending_old_jobs = $wpdb->get_results(
     "SELECT * FROM $table_name 
-     WHERE status = 'pending' AND type = 'OLD'
+     WHERE type = 'OLD'
      ORDER BY id ASC 
      LIMIT 50",
     ARRAY_A
@@ -39,7 +39,7 @@ $recent_old_jobs = $wpdb->get_results(
 ?>
 
 <div class="api-translator-section">
-    <h2><?php _e('Analyze Existing Posts & Pages', 'xf-translator'); ?></h2>
+    <h2><?php _e('Analyze Existing', 'xf-translator'); ?></h2>
     
     <div style="margin: 20px 0; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
         <h3 style="margin-top: 0;"><?php _e('Analyze English Posts & Pages', 'xf-translator'); ?></h3>
@@ -125,7 +125,7 @@ $recent_old_jobs = $wpdb->get_results(
 </div>
 
 <div class="api-translator-section">
-    <h2><?php _e('Pending Translation Jobs (OLD Posts)', 'xf-translator'); ?></h2>
+    <h2><?php _e('Translation Jobs (OLD Posts)', 'xf-translator'); ?></h2>
     
     <?php if (empty($pending_old_jobs)) : ?>
         <p><?php _e('No pending jobs in the queue.', 'xf-translator'); ?></p>
@@ -174,7 +174,24 @@ $recent_old_jobs = $wpdb->get_results(
                             </span>
                         </td>
                         <td>
-                            <span style="padding: 3px 8px; background: #f0ad4e; color: #fff; border-radius: 3px; font-size: 11px;">
+
+                            <?php 
+                            $color="#f0ad4e";
+                            if($job['status']=="pending"){
+                                $color="#f0ad4e";
+                            }
+
+                             if($job['status']=="completed"){
+                                $color="green";
+                            }
+
+                             if($job['status']=="failed"){
+                                $color="red";
+                            }
+
+
+                                ?>
+                            <span style="padding: 3px 8px; background: <?php echo $color ?>; color: #fff; border-radius: 3px; font-size: 11px;">
                                 <?php echo esc_html(ucfirst($job['status'])); ?>
                             </span>
                         </td>
@@ -188,7 +205,7 @@ $recent_old_jobs = $wpdb->get_results(
     <?php endif; ?>
 </div>
 
-<div class="api-translator-section">
+<!-- <div class="api-translator-section">
     <h2><?php _e('Recent Queue Activity (OLD Posts)', 'xf-translator'); ?></h2>
     
     <?php if (empty($recent_old_jobs)) : ?>
@@ -394,7 +411,7 @@ $recent_old_jobs = $wpdb->get_results(
             </tbody>
         </table>
     <?php endif; ?>
-</div>
+</div> -->
 
 
 

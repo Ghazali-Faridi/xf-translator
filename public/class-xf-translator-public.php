@@ -132,6 +132,9 @@ class Xf_Translator_Public {
 		
 		// Add query var for language prefix
 		add_rewrite_tag('%xf_lang_prefix%', '(' . $prefix_pattern . ')');
+		// Register as public query var so it's accessible
+		global $wp;
+		$wp->add_query_var('xf_lang_prefix');
 		
 		// Create pattern that matches slugs but excludes asset file extensions
 		// Match any characters except /, but ensure it doesn't end with asset extensions
@@ -228,36 +231,58 @@ class Xf_Translator_Public {
 			return;
 		}
 		
-		// Find translated post with this slug and language prefix
-		$args = array(
-			'name' => $post_name,
-			'post_type' => 'any',
-			'posts_per_page' => 1,
-			'meta_query' => array(
-				'relation' => 'AND',
-				array(
-					'key' => '_xf_translator_language',
-					'value' => $lang_prefix,
-					'compare' => '='
-				),
-				array(
-					'relation' => 'OR',
-					array(
-						'key' => '_xf_translator_original_post_id',
-						'compare' => 'EXISTS'
-					),
-					array(
-						'key' => '_api_translator_original_post_id',
-						'compare' => 'EXISTS'
-					)
-				)
-			)
-		);
+		// Find translated post with this slug and language prefix using direct SQL
+		// This handles cases where WordPress added suffixes like -2, -3, -4, etc.
+		global $wpdb;
 		
-		$translated_posts = get_posts($args);
-		if (!empty($translated_posts)) {
-			$query->set('p', $translated_posts[0]->ID);
+		// First try exact match
+		$translated_post_id = $wpdb->get_var($wpdb->prepare(
+			"SELECT p.ID FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+				AND pm1.meta_key = '_xf_translator_language' 
+				AND pm1.meta_value = %s
+			INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+				AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+			WHERE p.post_name = %s
+			AND p.post_status = 'publish'
+			AND p.post_type != 'revision'
+			LIMIT 1",
+			$lang_prefix,
+			$post_name
+		));
+		
+		// If not found by exact match, try to find by slug that starts with the post_name
+		// This handles cases where WordPress added a suffix like -2, -3, -4, etc.
+		if (!$translated_post_id) {
+			$translated_post_id = $wpdb->get_var($wpdb->prepare(
+				"SELECT p.ID FROM {$wpdb->posts} p
+				INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+					AND pm1.meta_key = '_xf_translator_language' 
+					AND pm1.meta_value = %s
+				INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+					AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+				WHERE p.post_name LIKE %s
+				AND p.post_status = 'publish'
+				AND p.post_type != 'revision'
+				ORDER BY 
+					CASE 
+						WHEN p.post_name = %s THEN 1
+						ELSE 2
+					END,
+					p.post_name ASC
+				LIMIT 1",
+				$lang_prefix,
+				$wpdb->esc_like($post_name) . '%',
+				$post_name
+			));
+		}
+		
+		if ($translated_post_id) {
+			$query->set('p', $translated_post_id);
 			$query->set('name', ''); // Clear name query to use ID instead
+			$query->is_404 = false; // Prevent 404
+			$query->is_singular = true; // Mark as singular
+			$query->is_single = true; // Mark as single post
 		}
 	}
 	
