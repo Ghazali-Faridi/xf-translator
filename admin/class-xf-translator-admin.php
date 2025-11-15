@@ -101,6 +101,12 @@ class Xf_Translator_Admin {
 		 */
 
 		wp_enqueue_script( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'js/xf-translator-admin.js', array( 'jquery' ), $this->version, false );
+		
+		// Localize script for AJAX
+		wp_localize_script( $this->plugin_name, 'xfTranslator', array(
+			'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+			'nonce' => wp_create_nonce( 'xf_translator_ajax' )
+		) );
 
 	}
 
@@ -128,11 +134,16 @@ class Xf_Translator_Admin {
         $api_translator_admin = $this;
         
         $current_tab = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'general';
+        
+        // Redirect if someone tries to access the removed translations tab
+        if ($current_tab === 'translations') {
+            $current_tab = 'general';
+        }
+        
         $tabs = array(
             'general' => __('Settings', 'api-translator'),
             'queue' => __('Translation Queue', 'api-translator'),
             'existing-queue' => __('Existing Post Queue', 'api-translator'),
-            'translations' => __('Translations', 'api-translator'),
             'translation-rules' => __('Translation Rules', 'api-translator')
         );
         
@@ -508,23 +519,30 @@ class Xf_Translator_Admin {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
         
-        // Get selected post type from form
-        $selected_post_type = isset($_POST['analyze_post_type']) ? sanitize_text_field($_POST['analyze_post_type']) : 'post';
-        
-        // Validate post type exists and is not attachment (media can't be translated)
-        if (!post_type_exists($selected_post_type)) {
-            $this->add_notice(__('Invalid post type selected.', 'xf-translator'), 'error');
-            return;
+        // Get selected post types from form (support both single and multiple)
+        $selected_post_types = array();
+        if (isset($_POST['analyze_post_type'])) {
+            if (is_array($_POST['analyze_post_type'])) {
+                $selected_post_types = array_map('sanitize_text_field', $_POST['analyze_post_type']);
+            } else {
+                $selected_post_types = array(sanitize_text_field($_POST['analyze_post_type']));
+            }
         }
         
-        if ($selected_post_type === 'attachment') {
-            $this->add_notice(__('Media files (attachments) cannot be translated and are excluded from analysis.', 'xf-translator'), 'error');
-            return;
+        // Default to 'post' if nothing selected
+        if (empty($selected_post_types)) {
+            $selected_post_types = array('post');
         }
         
-        // Get post type object for display name
-        $post_type_obj = get_post_type_object($selected_post_type);
-        $post_type_label = $post_type_obj ? $post_type_obj->label : $selected_post_type;
+        // Filter out invalid post types and attachments
+        $selected_post_types = array_filter($selected_post_types, function($type) {
+            return post_type_exists($type) && $type !== 'attachment';
+        });
+        
+        if (empty($selected_post_types)) {
+            $this->add_notice(__('Invalid post type(s) selected.', 'xf-translator'), 'error');
+            return;
+        }
         
         // Get all languages from settings
         $languages = $this->settings->get('languages', array());
@@ -534,12 +552,386 @@ class Xf_Translator_Admin {
             return;
         }
         
-        // Get all published posts of selected type that are NOT translations (English posts/pages)
-        // Posts that have _xf_translator_original_post_id are translations, so we exclude them
+        // Process each selected post type
+        $total_added = 0;
+        $total_posts_analyzed = 0;
+        $results_by_type = array();
+        
+        foreach ($selected_post_types as $selected_post_type) {
+            // Get post type object for display name
+            $post_type_obj = get_post_type_object($selected_post_type);
+            $post_type_label = $post_type_obj ? $post_type_obj->label : $selected_post_type;
+            
+            // Get all published posts of selected type that are NOT translations (English posts/pages)
+            // Posts that have _xf_translator_original_post_id are translations, so we exclude them
+            $args = array(
+                'post_type' => $selected_post_type,
+                'post_status' => 'publish',
+                'posts_per_page' => -1,
+                'meta_query' => array(
+                    'relation' => 'OR',
+                    array(
+                        'key' => '_xf_translator_original_post_id',
+                        'compare' => 'NOT EXISTS'
+                    ),
+                    array(
+                        'key' => '_api_translator_original_post_id',
+                        'compare' => 'NOT EXISTS'
+                    )
+                )
+            );
+            
+            $english_posts = get_posts($args);
+            
+            if (empty($english_posts)) {
+                $results_by_type[$selected_post_type] = array(
+                    'label' => $post_type_label,
+                    'analyzed' => 0,
+                    'added' => 0
+                );
+                continue;
+            }
+            
+            $posts_analyzed = 0;
+            $added_for_type = 0;
+            
+            foreach ($english_posts as $post) {
+                $posts_analyzed++;
+                $missing_languages = array();
+                
+                // Check which languages have translations for this post
+                foreach ($languages as $language) {
+                    $language_prefix = $language['prefix'];
+                    $has_translation = false;
+                    
+                    // Method 1: Check meta key on original post (forward link)
+                    $translated_post_id = get_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, true);
+                    if (!empty($translated_post_id) && get_post($translated_post_id)) {
+                        $has_translation = true;
+                    }
+                    
+                    // Method 2: Reverse lookup - check if any translated post exists with this as original
+                    // This catches cases where the forward meta key might not be set
+                    if (!$has_translation) {
+                        $translated_posts = get_posts(array(
+                            'post_type' => $post->post_type,
+                            'post_status' => 'publish',
+                            'posts_per_page' => 1,
+                            'meta_query' => array(
+                                'relation' => 'AND',
+                                array(
+                                    'key' => '_xf_translator_original_post_id',
+                                    'value' => $post->ID,
+                                    'compare' => '='
+                                ),
+                                array(
+                                    'key' => '_xf_translator_language',
+                                    'value' => $language_prefix,
+                                    'compare' => '='
+                                )
+                            )
+                        ));
+                        
+                        if (!empty($translated_posts)) {
+                            $has_translation = true;
+                            // Optionally, set the forward link for future reference
+                            update_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, $translated_posts[0]->ID);
+                        }
+                    }
+                    
+                    // Also check for old meta key format (_api_translator_original_post_id)
+                    if (!$has_translation) {
+                        $translated_posts = get_posts(array(
+                            'post_type' => $post->post_type,
+                            'post_status' => 'publish',
+                            'posts_per_page' => 1,
+                            'meta_query' => array(
+                                'relation' => 'AND',
+                                array(
+                                    'key' => '_api_translator_original_post_id',
+                                    'value' => $post->ID,
+                                    'compare' => '='
+                                ),
+                                array(
+                                    'key' => '_xf_translator_language',
+                                    'value' => $language_prefix,
+                                    'compare' => '='
+                                )
+                            )
+                        ));
+                        
+                        if (!empty($translated_posts)) {
+                            $has_translation = true;
+                            // Optionally, set the forward link for future reference
+                            update_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, $translated_posts[0]->ID);
+                        }
+                    }
+                    
+                    // If no translation exists, add to missing languages
+                    if (!$has_translation) {
+                        $missing_languages[] = $language;
+                    }
+                }
+                
+                // Add missing languages to queue with type 'OLD'
+                foreach ($missing_languages as $language) {
+                    // Check if queue entry already exists for this post and language (any type)
+                    // This prevents duplicates if the post already has 'NEW' or 'OLD' entries
+                    $existing_entry = $wpdb->get_var($wpdb->prepare(
+                        "SELECT COUNT(*) FROM $table_name 
+                         WHERE parent_post_id = %d 
+                         AND lng = %s",
+                        $post->ID,
+                        $language['name']
+                    ));
+                    
+                    // Only add if it doesn't already exist (regardless of type)
+                    if ($existing_entry == 0) {
+                        $result = $wpdb->insert(
+                            $table_name,
+                            array(
+                                'parent_post_id' => $post->ID,
+                                'translated_post_id' => null,
+                                'lng' => $language['name'],
+                                'status' => 'pending',
+                                'type' => 'OLD',
+                                'created' => current_time('mysql')
+                            ),
+                            array('%d', '%d', '%s', '%s', '%s', '%s')
+                        );
+                        
+                        if ($result !== false) {
+                            $total_added++;
+                            $added_for_type++;
+                        } else {
+                            error_log('XF Translator: Failed to insert queue entry for post ' . $post->ID . ', language: ' . $language['name']);
+                        }
+                    }
+                }
+            } // End foreach post
+            
+            // Store results for this post type
+            $results_by_type[$selected_post_type] = array(
+                'label' => $post_type_label,
+                'analyzed' => $posts_analyzed,
+                'added' => $added_for_type
+            );
+            
+            $total_posts_analyzed += $posts_analyzed;
+        } // End foreach post type
+        
+        // Build success message
+        $message_parts = array();
+        foreach ($results_by_type as $post_type => $result) {
+            if ($result['analyzed'] > 0) {
+                $message_parts[] = sprintf(
+                    '%d %s (%d added)',
+                    $result['analyzed'],
+                    strtolower($result['label']),
+                    $result['added']
+                );
+            }
+        }
+        
+        if (empty($message_parts)) {
+            $this->add_notice(
+                __('No English posts found to analyze in the selected post types.', 'xf-translator'),
+                'info'
+            );
+        } else {
+            $this->add_notice(
+                sprintf(
+                    __('Analysis complete. Analyzed: %s. Total: %d missing translations added to the queue.', 'xf-translator'),
+                    implode(', ', $message_parts),
+                    $total_added
+                ),
+                'success'
+            );
+        }
+    }
+    
+    /**
+     * AJAX handler: Get batch info and start processing
+     */
+    public function ajax_get_analyze_batch() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        $batch_id = get_transient('xf_analyze_current_batch');
+        
+        if (!$batch_id) {
+            wp_send_json_error(array('message' => __('No active batch found.', 'xf-translator')));
+            return;
+        }
+        
+        $batch_data = get_transient('xf_analyze_batch_' . $batch_id);
+        
+        if (!$batch_data) {
+            wp_send_json_error(array('message' => __('Batch data not found.', 'xf-translator')));
+            return;
+        }
+        
+        wp_send_json_success(array(
+            'batch_id' => $batch_id,
+            'total_posts' => $batch_data['total_posts'],
+            'processed' => $batch_data['processed'],
+            'added' => $batch_data['added'],
+            'post_type_label' => $batch_data['post_type_label']
+        ));
+    }
+    
+    /**
+     * AJAX handler: Process a batch of posts (for real-time updates when user is on page)
+     */
+    public function ajax_process_analyze_batch() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        $batch_id = isset($_POST['batch_id']) ? sanitize_text_field($_POST['batch_id']) : '';
+        $offset = isset($_POST['offset']) ? intval($_POST['offset']) : 0;
+        
+        if (empty($batch_id)) {
+            wp_send_json_error(array('message' => __('Batch ID is required.', 'xf-translator')));
+            return;
+        }
+        
+        // Get batch data
+        $batch_data = get_transient('xf_analyze_batch_' . $batch_id);
+        
+        if (!$batch_data) {
+            wp_send_json_error(array('message' => __('Batch data not found.', 'xf-translator')));
+            return;
+        }
+        
+        // Process one batch and return status
+        $result = $this->process_single_analyze_batch($batch_id, $offset);
+        
+        if ($result['completed']) {
+            wp_send_json_success(array(
+                'processed' => $result['processed'],
+                'total' => $result['total'],
+                'added' => $result['added'],
+                'completed' => true,
+                'message' => $result['message']
+            ));
+        } else {
+            wp_send_json_success(array(
+                'processed' => $result['processed'],
+                'total' => $result['total'],
+                'added' => $result['added'],
+                'completed' => false,
+                'batch_size' => $result['batch_size']
+            ));
+        }
+    }
+    
+    /**
+     * Process a single batch of posts (public method for standalone processor)
+     * Returns result array with status information
+     * 
+     * @param string $batch_id The batch ID
+     * @param int $offset Optional offset (if not provided, uses current processed count)
+     * @return array Result array with status information
+     */
+    public function process_single_analyze_batch($batch_id, $offset = null) {
+        $batch_size = 50; // Process 50 posts at a time
+        
+        // Get batch data
+        $batch_data = get_transient('xf_analyze_batch_' . $batch_id);
+        
+        if (!$batch_data) {
+            return array(
+                'completed' => true,
+                'processed' => 0,
+                'total' => 0,
+                'added' => 0,
+                'message' => __('Batch data not found.', 'xf-translator')
+            );
+        }
+        
+        // Use provided offset or current processed count
+        if ($offset === null) {
+            $offset = $batch_data['processed'];
+        }
+        
+        // Check if already completed
+        if ($batch_data['processed'] >= $batch_data['total_posts']) {
+            // Completed, clean up
+            delete_transient('xf_analyze_batch_' . $batch_id);
+            delete_transient('xf_analyze_current_batch');
+            return array(
+                'completed' => true,
+                'processed' => $batch_data['processed'],
+                'total' => $batch_data['total_posts'],
+                'added' => $batch_data['added'],
+                'message' => sprintf(
+                    __('Analysis complete! Analyzed %d %s and added %d missing translations to the queue.', 'xf-translator'),
+                    $batch_data['processed'],
+                    strtolower($batch_data['post_type_label']),
+                    $batch_data['added']
+                )
+            );
+        }
+        
+        // Get posts for this batch
+        $posts = $this->get_posts_batch($batch_data['post_type'], $offset, $batch_size);
+        
+        if (empty($posts)) {
+            // No more posts to process
+            delete_transient('xf_analyze_batch_' . $batch_id);
+            delete_transient('xf_analyze_current_batch');
+            return array(
+                'completed' => true,
+                'processed' => $batch_data['processed'],
+                'total' => $batch_data['total_posts'],
+                'added' => $batch_data['added'],
+                'message' => sprintf(
+                    __('Analysis complete! Analyzed %d %s and added %d missing translations to the queue.', 'xf-translator'),
+                    $batch_data['processed'],
+                    strtolower($batch_data['post_type_label']),
+                    $batch_data['added']
+                )
+            );
+        }
+        
+        // Process this batch
+        $result = $this->process_analyze_batch($posts, $batch_data);
+        
+        // Update batch data
+        $batch_data['processed'] += count($posts);
+        $batch_data['added'] += $result['added'];
+        set_transient('xf_analyze_batch_' . $batch_id, $batch_data, 2 * HOUR_IN_SECONDS);
+        
+        // Clean up if completed
+        if ($batch_data['processed'] >= $batch_data['total_posts']) {
+            delete_transient('xf_analyze_batch_' . $batch_id);
+            delete_transient('xf_analyze_current_batch');
+        }
+        
+        return array(
+            'completed' => $batch_data['processed'] >= $batch_data['total_posts'],
+            'processed' => $batch_data['processed'],
+            'total' => $batch_data['total_posts'],
+            'added' => $batch_data['added'],
+            'batch_size' => count($posts),
+            'message' => sprintf(
+                __('Processed batch: %d/%d posts analyzed, %d added to queue.', 'xf-translator'),
+                $batch_data['processed'],
+                $batch_data['total_posts'],
+                $batch_data['added']
+            )
+        );
+    }
+    
+    /**
+     * Get a batch of posts to process
+     */
+    private function get_posts_batch($post_type, $offset, $batch_size) {
         $args = array(
-            'post_type' => $selected_post_type,
+            'post_type' => $post_type,
             'post_status' => 'publish',
-            'posts_per_page' => -1,
+            'posts_per_page' => $batch_size,
+            'offset' => $offset,
+            'orderby' => 'ID',
+            'order' => 'ASC',
             'meta_query' => array(
                 'relation' => 'OR',
                 array(
@@ -553,79 +945,169 @@ class Xf_Translator_Admin {
             )
         );
         
-        $english_posts = get_posts($args);
+        return get_posts($args);
+    }
+    
+    /**
+     * Process a batch of posts with optimized bulk queries
+     */
+    private function process_analyze_batch($posts, $batch_data) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
         
-        if (empty($english_posts)) {
-            $this->add_notice(
-                sprintf(__('No English %s found to analyze.', 'xf-translator'), strtolower($post_type_label)),
-                'info'
-            );
-            return;
+        if (empty($posts)) {
+            return array('added' => 0);
         }
         
-        $total_added = 0;
-        $posts_analyzed = 0;
+        $post_ids = array_map(function($post) { return $post->ID; }, $posts);
+        $languages = $batch_data['languages'];
         
-        foreach ($english_posts as $post) {
-            $posts_analyzed++;
-            $missing_languages = array();
-            
-            // Check which languages have translations for this post
+        // Bulk fetch all translation meta in one query per language
+        $translation_meta = $this->bulk_get_translation_meta($post_ids, $languages);
+        
+        // Bulk check existing queue entries
+        $existing_entries = $this->bulk_check_existing_entries($post_ids, $languages);
+        
+        // Prepare bulk insert values
+        $values = array();
+        $placeholders = array();
+        
+        foreach ($posts as $post) {
             foreach ($languages as $language) {
-                $language_prefix = $language['prefix'];
-                $translated_post_id = get_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, true);
+                $key = $post->ID . '_' . $language['name'];
                 
-                // If no translation exists, add to missing languages
-                if (empty($translated_post_id) || !get_post($translated_post_id)) {
-                    $missing_languages[] = $language;
-                }
-            }
-            
-            // Add missing languages to queue with type 'OLD'
-            foreach ($missing_languages as $language) {
-                // Check if queue entry already exists for this post and language (any type)
-                // This prevents duplicates if the post already has 'NEW' or 'OLD' entries
-                $existing_entry = $wpdb->get_var($wpdb->prepare(
-                    "SELECT COUNT(*) FROM $table_name 
-                     WHERE parent_post_id = %d 
-                     AND lng = %s",
-                    $post->ID,
-                    $language['name']
-                ));
+                // Check if translation exists
+                $has_translation = isset($translation_meta[$key]) && !empty($translation_meta[$key]);
                 
-                // Only add if it doesn't already exist (regardless of type)
-                if ($existing_entry == 0) {
-                    $result = $wpdb->insert(
-                        $table_name,
-                        array(
-                            'parent_post_id' => $post->ID,
-                            'translated_post_id' => null,
-                            'lng' => $language['name'],
-                            'status' => 'pending',
-                            'type' => 'OLD',
-                            'created' => current_time('mysql')
-                        ),
-                        array('%d', '%d', '%s', '%s', '%s', '%s')
+                // Check if queue entry already exists
+                $has_queue_entry = isset($existing_entries[$key]);
+                
+                // Only add if translation doesn't exist and queue entry doesn't exist
+                if (!$has_translation && !$has_queue_entry) {
+                    $values[] = $wpdb->prepare(
+                        "(%d, NULL, %s, 'pending', 'OLD', %s)",
+                        $post->ID,
+                        $language['name'],
+                        current_time('mysql')
                     );
-                    
-                    if ($result !== false) {
-                        $total_added++;
-                    } else {
-                        error_log('XF Translator: Failed to insert queue entry for post ' . $post->ID . ', language: ' . $language['name']);
-                    }
                 }
             }
         }
         
-        $this->add_notice(
-            sprintf(
-                __('Analysis complete. Analyzed %d %s and added %d missing translations to the queue.', 'xf-translator'),
-                $posts_analyzed,
-                strtolower($post_type_label),
-                $total_added
-            ),
-            'success'
-        );
+        // Bulk insert if we have values
+        $added = 0;
+        if (!empty($values)) {
+            $query = "INSERT INTO $table_name (parent_post_id, translated_post_id, lng, status, type, created) VALUES " . implode(', ', $values);
+            $result = $wpdb->query($query);
+            
+            if ($result !== false) {
+                $added = count($values);
+            } else {
+                error_log('XF Translator: Bulk insert failed: ' . $wpdb->last_error);
+            }
+        }
+        
+        return array('added' => $added);
+    }
+    
+    /**
+     * Bulk fetch translation meta for multiple posts and languages
+     */
+    private function bulk_get_translation_meta($post_ids, $languages) {
+        if (empty($post_ids) || empty($languages)) {
+            return array();
+        }
+        
+        global $wpdb;
+        $meta_keys = array();
+        
+        // Build meta keys for all language prefixes
+        foreach ($languages as $language) {
+            $meta_keys[] = '_xf_translator_translated_post_' . $language['prefix'];
+        }
+        
+        // Sanitize post IDs and meta keys
+        $post_ids = array_map('intval', $post_ids);
+        $post_ids = array_filter($post_ids);
+        $post_ids_escaped = implode(',', $post_ids);
+        
+        $meta_keys_escaped = array();
+        foreach ($meta_keys as $key) {
+            $meta_keys_escaped[] = $wpdb->prepare('%s', $key);
+        }
+        $meta_keys_escaped = implode(',', $meta_keys_escaped);
+        
+        // Build query to get all translation meta in one go
+        // Using esc_sql for safety since we've already sanitized
+        $query = "SELECT post_id, meta_key, meta_value 
+                  FROM {$wpdb->postmeta} 
+                  WHERE post_id IN ($post_ids_escaped) 
+                  AND meta_key IN ($meta_keys_escaped)";
+        
+        $results = $wpdb->get_results($query, ARRAY_A);
+        
+        // Build result map: post_id_language_name => translated_post_id
+        $translation_meta = array();
+        foreach ($results as $row) {
+            // Extract language prefix from meta key
+            $meta_key = $row['meta_key'];
+            foreach ($languages as $language) {
+                if ($meta_key === '_xf_translator_translated_post_' . $language['prefix']) {
+                    $key = $row['post_id'] . '_' . $language['name'];
+                    $translated_post_id = intval($row['meta_value']);
+                    
+                    // Verify the translated post exists
+                    if ($translated_post_id > 0 && get_post($translated_post_id)) {
+                        $translation_meta[$key] = $translated_post_id;
+                    }
+                    break;
+                }
+            }
+        }
+        
+        return $translation_meta;
+    }
+    
+    /**
+     * Bulk check existing queue entries for multiple posts and languages
+     */
+    private function bulk_check_existing_entries($post_ids, $languages) {
+        if (empty($post_ids) || empty($languages)) {
+            return array();
+        }
+        
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        // Sanitize post IDs
+        $post_ids = array_map('intval', $post_ids);
+        $post_ids = array_filter($post_ids);
+        $post_ids_escaped = implode(',', $post_ids);
+        
+        // Sanitize language names
+        $language_names = array_map(function($lang) { return sanitize_text_field($lang['name']); }, $languages);
+        $language_names_escaped = array();
+        foreach ($language_names as $name) {
+            $language_names_escaped[] = $wpdb->prepare('%s', $name);
+        }
+        $language_names_escaped = implode(',', $language_names_escaped);
+        
+        // Build query
+        $query = "SELECT parent_post_id, lng 
+                  FROM $table_name 
+                  WHERE parent_post_id IN ($post_ids_escaped) 
+                  AND lng IN ($language_names_escaped)";
+        
+        $results = $wpdb->get_results($query, ARRAY_A);
+        
+        // Build result map: post_id_language_name => true
+        $existing_entries = array();
+        foreach ($results as $row) {
+            $key = $row['parent_post_id'] . '_' . $row['lng'];
+            $existing_entries[$key] = true;
+        }
+        
+        return $existing_entries;
     }
     
     /**
@@ -753,11 +1235,16 @@ class Xf_Translator_Admin {
                     
                     // Get previous value from stored meta
                     $previous_value = get_post_meta($post_id, '_xf_translator_prev_acf_' . $field_key, true);
-                    $current_value = is_array($field_value) ? serialize($field_value) : (string)$field_value;
                     
-                    // Compare values
-                    if ($previous_value !== $current_value) {
+                    // Normalize both values for consistent comparison
+                    $previous_normalized = $this->normalize_value_for_comparison($previous_value);
+                    $current_normalized = $this->normalize_value_for_comparison($field_value);
+                    
+                    // Compare normalized values
+                    if ($previous_normalized !== $current_normalized) {
                         $edited_fields[] = 'acf_' . $field_key;
+                        // Update stored value for next comparison (store normalized version)
+                        update_post_meta($post_id, '_xf_translator_prev_acf_' . $field_key, $current_normalized);
                     }
                 }
             }
@@ -874,7 +1361,8 @@ class Xf_Translator_Admin {
         }
         
         if ($current_value !== '' && $current_value !== false) {
-            $value_to_store = is_array($current_value) ? serialize($current_value) : (string)$current_value;
+            // Store normalized value for consistent comparison
+            $value_to_store = $this->normalize_value_for_comparison($current_value);
             update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $value_to_store);
             error_log('XF Translator: Stored previous value for custom field ' . $meta_key . ' on post ' . $post_id . ': ' . substr($value_to_store, 0, 50));
         }
@@ -903,9 +1391,9 @@ class Xf_Translator_Admin {
                     continue;
                 }
                 
-                // Store the value for comparison
+                // Store normalized value for comparison
                 $meta_value = isset($meta_values[0]) ? $meta_values[0] : '';
-                $value_to_store = is_array($meta_value) ? serialize($meta_value) : (string)$meta_value;
+                $value_to_store = $this->normalize_value_for_comparison($meta_value);
                 update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $value_to_store);
             }
         }
@@ -940,7 +1428,8 @@ class Xf_Translator_Admin {
                         continue;
                     }
                     
-                    $value_to_store = is_array($field_value) ? serialize($field_value) : (string)$field_value;
+                    // Store normalized value for consistent comparison
+                    $value_to_store = $this->normalize_value_for_comparison($field_value);
                     update_post_meta($post_id, '_xf_translator_prev_acf_' . $field_key, $value_to_store);
                 }
             }
@@ -998,14 +1487,17 @@ class Xf_Translator_Admin {
                     
                     // Get previous value from stored meta
                     $previous_value = get_post_meta($post_id, '_xf_translator_prev_acf_' . $field_key, true);
-                    $current_value = is_array($field_value) ? serialize($field_value) : (string)$field_value;
                     
-                    // Compare values
-                    if ($previous_value !== $current_value) {
+                    // Normalize both values for consistent comparison
+                    $previous_normalized = $this->normalize_value_for_comparison($previous_value);
+                    $current_normalized = $this->normalize_value_for_comparison($field_value);
+                    
+                    // Compare normalized values
+                    if ($previous_normalized !== $current_normalized) {
                         $edited_fields[] = 'acf_' . $field_key;
                         
-                        // Update stored value for next comparison
-                        update_post_meta($post_id, '_xf_translator_prev_acf_' . $field_key, $current_value);
+                        // Update stored value for next comparison (store normalized version)
+                        update_post_meta($post_id, '_xf_translator_prev_acf_' . $field_key, $current_normalized);
                     }
                 }
             }
@@ -1070,25 +1562,28 @@ class Xf_Translator_Admin {
         // Get previous value (check both ACF and native custom fields)
         $prev_meta_key = $is_acf_field ? '_xf_translator_prev_acf_' . $meta_key : '_xf_translator_prev_meta_' . $meta_key;
         $previous_value = get_post_meta($post_id, $prev_meta_key, true);
-        $current_value = is_array($meta_value) ? serialize($meta_value) : (string)$meta_value;
+        
+        // Normalize both values for consistent comparison
+        $previous_normalized = $this->normalize_value_for_comparison($previous_value);
+        $current_normalized = $this->normalize_value_for_comparison($meta_value);
         
         // If no previous value stored, this might be first time tracking
         // Store current value for next time and skip (we need a baseline to compare against)
-        if ($previous_value === '') {
-            update_post_meta($post_id, $prev_meta_key, $current_value);
+        if ($previous_normalized === '') {
+            update_post_meta($post_id, $prev_meta_key, $current_normalized);
             error_log('XF Translator: First time tracking ' . ($is_acf_field ? 'ACF' : 'custom') . ' field ' . $meta_key . ' for post ' . $post_id . ', storing value for next comparison');
             return;
         }
         
-        // Compare values
-        if ($previous_value !== $current_value) {
-            // Update stored value for next comparison
-            update_post_meta($post_id, $prev_meta_key, $current_value);
+        // Compare normalized values
+        if ($previous_normalized !== $current_normalized) {
+            // Update stored value for next comparison (store normalized version)
+            update_post_meta($post_id, $prev_meta_key, $current_normalized);
             
             // Determine field prefix
             $field_prefix = $is_acf_field ? 'acf_' : 'meta_';
             
-            error_log('XF Translator: Detected ' . ($is_acf_field ? 'ACF' : 'custom') . ' field change: ' . $meta_key . ' for post ' . $post_id . ' (prev: ' . substr($previous_value, 0, 50) . ' -> new: ' . substr($current_value, 0, 50) . ')');
+            error_log('XF Translator: Detected ' . ($is_acf_field ? 'ACF' : 'custom') . ' field change: ' . $meta_key . ' for post ' . $post_id . ' (prev: ' . substr($previous_normalized, 0, 50) . ' -> new: ' . substr($current_normalized, 0, 50) . ')');
             
             // Create EDIT queue entries immediately (don't batch for native custom fields to ensure they're processed)
             $edited_fields = array($field_prefix . $meta_key);
@@ -1150,17 +1645,20 @@ class Xf_Translator_Admin {
                 // Get previous value from stored meta
                 $previous_value = get_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, true);
                 $current_value = isset($meta_values[0]) ? $meta_values[0] : '';
-                $current_value = is_array($current_value) ? serialize($current_value) : (string)$current_value;
                 
-                // Compare values
-                if ($previous_value !== $current_value && $previous_value !== '') {
+                // Normalize both values for consistent comparison
+                $previous_normalized = $this->normalize_value_for_comparison($previous_value);
+                $current_normalized = $this->normalize_value_for_comparison($current_value);
+                
+                // Compare normalized values
+                if ($previous_normalized !== $current_normalized && $previous_normalized !== '') {
                     $edited_fields[] = 'meta_' . $meta_key;
                     
-                    // Update stored value for next comparison
-                    update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $current_value);
-                } elseif ($previous_value === '' && !empty($current_value)) {
+                    // Update stored value for next comparison (store normalized version)
+                    update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $current_normalized);
+                } elseif ($previous_normalized === '' && !empty($current_normalized)) {
                     // First time tracking this field - store it for next time
-                    update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $current_value);
+                    update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $current_normalized);
                 }
             }
         }
@@ -1191,6 +1689,53 @@ class Xf_Translator_Admin {
             // Clear the transient
             delete_transient('_xf_translator_pending_fields_' . $post_id);
         }
+    }
+    
+    /**
+     * Normalize value for comparison to ensure consistent comparison
+     * Handles arrays, strings, and edge cases
+     *
+     * @param mixed $value The value to normalize
+     * @return string Normalized string value for comparison
+     */
+    private function normalize_value_for_comparison($value) {
+        // Handle null/empty
+        if ($value === null || $value === false) {
+            return '';
+        }
+        
+        // Handle arrays - sort keys for consistent serialization
+        if (is_array($value)) {
+            // Recursively sort array keys
+            $this->recursive_ksort($value);
+            return serialize($value);
+        }
+        
+        // Handle objects - serialize them
+        if (is_object($value)) {
+            return serialize($value);
+        }
+        
+        // Handle strings - trim whitespace and normalize line endings
+        $normalized = trim((string)$value);
+        // Normalize line endings (Windows \r\n, Mac \r, Unix \n -> all to \n)
+        $normalized = str_replace(array("\r\n", "\r"), "\n", $normalized);
+        
+        return $normalized;
+    }
+    
+    /**
+     * Recursively sort array keys for consistent serialization
+     *
+     * @param array $array Array to sort
+     */
+    private function recursive_ksort(&$array) {
+        foreach ($array as $key => &$value) {
+            if (is_array($value)) {
+                $this->recursive_ksort($value);
+            }
+        }
+        ksort($array);
     }
     
     /**

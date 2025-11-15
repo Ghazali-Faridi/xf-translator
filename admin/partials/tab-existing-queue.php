@@ -55,38 +55,46 @@ $recent_old_jobs = $wpdb->get_results(
             if (isset($post_types['attachment'])) {
                 unset($post_types['attachment']);
             }
-            // Get selected post type from POST (form submission) or GET (after redirect) or default to 'post'
-            $selected_post_type = 'post';
-            if (isset($_POST['analyze_post_type'])) {
-                $selected_post_type = sanitize_text_field($_POST['analyze_post_type']);
+            // Get selected post types from POST (form submission) or GET (after redirect) or default to 'post'
+            $selected_post_types = array('post');
+            if (isset($_POST['analyze_post_type']) && is_array($_POST['analyze_post_type'])) {
+                $selected_post_types = array_map('sanitize_text_field', $_POST['analyze_post_type']);
+                // Filter out invalid post types
+                $selected_post_types = array_filter($selected_post_types, function($type) {
+                    return post_type_exists($type) && $type !== 'attachment';
+                });
+                if (empty($selected_post_types)) {
+                    $selected_post_types = array('post');
+                }
+            } elseif (isset($_POST['analyze_post_type'])) {
+                // Handle single value (backward compatibility)
+                $selected_post_types = array(sanitize_text_field($_POST['analyze_post_type']));
             } elseif (isset($_GET['post_type'])) {
-                $selected_post_type = sanitize_text_field($_GET['post_type']);
-            }
-            // Validate post type exists and is not attachment
-            if (!post_type_exists($selected_post_type) || $selected_post_type === 'attachment') {
-                $selected_post_type = 'post';
+                $selected_post_types = array(sanitize_text_field($_GET['post_type']));
             }
             ?>
             
             <table class="form-table">
                 <tr>
                     <th scope="row">
-                        <label for="analyze_post_type"><?php _e('Post Type', 'xf-translator'); ?></label>
+                        <label for="analyze_post_type"><?php _e('Post Types', 'xf-translator'); ?></label>
                     </th>
                     <td>
-                        <select name="analyze_post_type" id="analyze_post_type" style="min-width: 200px;">
+                        <select name="analyze_post_type[]" id="analyze_post_type" multiple style="min-width: 200px; height: 150px;">
                             <?php foreach ($post_types as $post_type_key => $post_type_obj) : ?>
-                                <option value="<?php echo esc_attr($post_type_key); ?>" <?php selected($selected_post_type, $post_type_key); ?>>
+                                <option value="<?php echo esc_attr($post_type_key); ?>" <?php selected(in_array($post_type_key, $selected_post_types), true); ?>>
                                     <?php echo esc_html($post_type_obj->label); ?> (<?php echo esc_html($post_type_key); ?>)
                                 </option>
                             <?php endforeach; ?>
                         </select>
-                        <p class="description"><?php _e('Select which post type you want to analyze.', 'xf-translator'); ?></p>
+                        <p class="description">
+                            <?php _e('Hold Ctrl (Windows) or Cmd (Mac) to select multiple post types. Select which post types you want to analyze.', 'xf-translator'); ?>
+                        </p>
                     </td>
                 </tr>
             </table>
             
-            <?php submit_button(__('Analyze Selected Post Type', 'xf-translator'), 'primary', 'submit', false); ?>
+            <?php submit_button(__('Analyze Selected Post Types', 'xf-translator'), 'primary', 'submit', false); ?>
         </form>
     </div>
     

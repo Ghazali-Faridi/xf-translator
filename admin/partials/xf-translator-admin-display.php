@@ -41,8 +41,6 @@ $selected_model = $settings->get('selected_model', 'gpt-4o');
             <?php include plugin_dir_path( __FILE__ ) . 'tab-queue.php'; ?>
         <?php elseif ($current_tab === 'existing-queue') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-existing-queue.php'; ?>
-        <?php elseif ($current_tab === 'translations') : ?>
-            <?php include plugin_dir_path( __FILE__ ) . 'tab-translations.php'; ?>
         <?php elseif ($current_tab === 'translation-rules') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-translation-rules.php'; ?>
         <?php endif; ?>
