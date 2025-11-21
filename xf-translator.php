@@ -65,6 +65,16 @@ register_deactivation_hook( __FILE__, 'deactivate_xf_translator' );
 require plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator.php';
 
 /**
+ * Increase HTTP request timeout for translation API calls
+ * This ensures large translation requests don't timeout
+ *
+ * @since    1.0.0
+ */
+add_filter('http_request_timeout', function() {
+	return 620; // seconds (10 minutes 20 seconds)
+});
+
+/**
  * Begins execution of the plugin.
  *
  * Since everything within the plugin is registered via hooks,

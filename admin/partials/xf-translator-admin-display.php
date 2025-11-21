@@ -37,12 +37,18 @@ $selected_model = $settings->get('selected_model', 'gpt-4o');
     <div class="api-translator-content">
         <?php if ($current_tab === 'general') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-general.php'; ?>
+        <?php elseif ($current_tab === 'test-translation') : ?>
+            <?php include plugin_dir_path( __FILE__ ) . 'tab-test-translation.php'; ?>
         <?php elseif ($current_tab === 'queue') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-queue.php'; ?>
         <?php elseif ($current_tab === 'existing-queue') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-existing-queue.php'; ?>
         <?php elseif ($current_tab === 'translation-rules') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-translation-rules.php'; ?>
+        <?php elseif ($current_tab === 'menu-translation') : ?>
+            <?php include plugin_dir_path( __FILE__ ) . 'tab-menu-translation.php'; ?>
+        <?php elseif ($current_tab === 'taxonomy-translation') : ?>
+            <?php include plugin_dir_path( __FILE__ ) . 'tab-taxonomy-translation.php'; ?>
         <?php endif; ?>
     </div>
 </div>

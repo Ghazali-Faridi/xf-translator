@@ -142,9 +142,12 @@ class Xf_Translator_Admin {
         
         $tabs = array(
             'general' => __('Settings', 'api-translator'),
+            'test-translation' => __('Test Translation', 'api-translator'),
             'queue' => __('Translation Queue', 'api-translator'),
             'existing-queue' => __('Existing Post Queue', 'api-translator'),
-            'translation-rules' => __('Translation Rules', 'api-translator')
+            'translation-rules' => __('Translation Rules', 'api-translator'),
+            'menu-translation' => __('Menu Translation', 'api-translator'),
+            'taxonomy-translation' => __('Taxonomy Translation', 'api-translator')
         );
         
         include plugin_dir_path( __FILE__ ) . 'partials/xf-translator-admin-display.php';
@@ -200,6 +203,22 @@ class Xf_Translator_Admin {
                 
             case 'process_queue':
                 $this->handle_process_queue();
+                break;
+                
+            case 'translate_menu':
+                $this->handle_translate_menu();
+                break;
+                
+            case 'translate_menu_item':
+                $this->handle_translate_menu_item();
+                break;
+                
+            case 'translate_taxonomy':
+                $this->handle_translate_taxonomy();
+                break;
+                
+            case 'translate_term':
+                $this->handle_translate_term();
                 break;
                 
             case 'analyze_posts':
@@ -1803,7 +1822,296 @@ class Xf_Translator_Admin {
         }
     }
 
-   
+    /**
+     * Handle menu translation request
+     */
+    private function handle_translate_menu() {
+        if (!isset($_POST['menu_id']) || !isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'menu_translation_error', __('Menu ID and target language are required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $menu_id = intval($_POST['menu_id']);
+        $target_language = sanitize_text_field($_POST['target_language']);
+        
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-menu-translation-processor.php';
+        $processor = new Xf_Translator_Menu_Processor();
+        
+        $result = $processor->translate_menu($menu_id, $target_language);
+        
+        if ($result && !is_wp_error($result)) {
+            add_settings_error('api_translator_messages', 'menu_translation_success', __('Menu translated successfully!', 'xf-translator'), 'success');
+        } else {
+            $error_message = is_wp_error($result) ? $result->get_error_message() : __('Failed to translate menu.', 'xf-translator');
+            add_settings_error('api_translator_messages', 'menu_translation_error', $error_message, 'error');
+        }
+    }
+    
+    /**
+     * Handle individual menu item translation request
+     */
+    private function handle_translate_menu_item() {
+        if (!isset($_POST['menu_item_id']) || !isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'menu_item_translation_error', __('Menu item ID and target language are required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $menu_item_id = intval($_POST['menu_item_id']);
+        $target_language = sanitize_text_field($_POST['target_language']);
+        
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-menu-translation-processor.php';
+        $processor = new Xf_Translator_Menu_Processor();
+        
+        $result = $processor->translate_menu_item($menu_item_id, $target_language);
+        
+        if ($result && !is_wp_error($result)) {
+            add_settings_error('api_translator_messages', 'menu_item_translation_success', __('Menu item translated successfully!', 'xf-translator'), 'success');
+        } else {
+            $error_message = is_wp_error($result) ? $result->get_error_message() : __('Failed to translate menu item.', 'xf-translator');
+            add_settings_error('api_translator_messages', 'menu_item_translation_error', $error_message, 'error');
+        }
+    }
+    
+    /**
+     * Handle taxonomy translation request
+     */
+    private function handle_translate_taxonomy() {
+        if (!isset($_POST['taxonomy']) || !isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'taxonomy_translation_error', __('Taxonomy and target language are required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $taxonomy = sanitize_text_field($_POST['taxonomy']);
+        $target_language = sanitize_text_field($_POST['target_language']);
+        
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-taxonomy-translation-processor.php';
+        $processor = new Xf_Translator_Taxonomy_Processor();
+        
+        $result = $processor->translate_taxonomy($taxonomy, $target_language);
+        
+        if ($result && !is_wp_error($result)) {
+            $translated_count = is_array($result) ? count($result) : 0;
+            add_settings_error('api_translator_messages', 'taxonomy_translation_success', sprintf(__('Taxonomy translated successfully! %d terms translated.', 'xf-translator'), $translated_count), 'success');
+        } else {
+            $error_message = is_wp_error($result) ? $result->get_error_message() : __('Failed to translate taxonomy.', 'xf-translator');
+            add_settings_error('api_translator_messages', 'taxonomy_translation_error', $error_message, 'error');
+        }
+    }
+    
+    /**
+     * Handle individual term translation request
+     */
+    private function handle_translate_term() {
+        if (!isset($_POST['term_id']) || !isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'term_translation_error', __('Term ID and target language are required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $term_id = intval($_POST['term_id']);
+        $target_language = sanitize_text_field($_POST['target_language']);
+        
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-taxonomy-translation-processor.php';
+        $processor = new Xf_Translator_Taxonomy_Processor();
+        
+        $result = $processor->translate_term($term_id, $target_language);
+        
+        if ($result && !is_wp_error($result)) {
+            add_settings_error('api_translator_messages', 'term_translation_success', __('Term translated successfully!', 'xf-translator'), 'success');
+        } else {
+            $error_message = is_wp_error($result) ? $result->get_error_message() : __('Failed to translate term.', 'xf-translator');
+            add_settings_error('api_translator_messages', 'term_translation_error', $error_message, 'error');
+        }
+    }
+    
+    /**
+     * AJAX handler to get post content
+     */
+    public function ajax_get_post_content() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
+            return;
+        }
+        
+        $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+        
+        if (!$post_id) {
+            wp_send_json_error(array('message' => __('Invalid post ID', 'xf-translator')));
+            return;
+        }
+        
+        $post = get_post($post_id);
+        
+        if (!$post) {
+            wp_send_json_error(array('message' => __('Post not found', 'xf-translator')));
+            return;
+        }
+        
+        wp_send_json_success(array(
+            'title' => $post->post_title,
+            'content' => $post->post_content,
+            'excerpt' => $post->post_excerpt
+        ));
+    }
+    
+    /**
+     * AJAX handler to test translation
+     */
+    public function ajax_test_translation() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
+            return;
+        }
+        
+        $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+        $target_language = isset($_POST['target_language']) ? sanitize_text_field($_POST['target_language']) : '';
+        $model = isset($_POST['model']) ? sanitize_text_field($_POST['model']) : '';
+        $prompt_template = isset($_POST['prompt_template']) ? sanitize_text_field($_POST['prompt_template']) : 'current';
+        $custom_prompt = isset($_POST['custom_prompt']) ? sanitize_textarea_field($_POST['custom_prompt']) : '';
+        
+        if (!$post_id || !$target_language || !$model) {
+            wp_send_json_error(array('message' => __('Missing required parameters', 'xf-translator')));
+            return;
+        }
+        
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        $processor = new Xf_Translator_Processor();
+        
+        $start_time = microtime(true);
+        
+        // Test translation (doesn't create posts)
+        $result = $processor->test_translation($post_id, $target_language, $model, $prompt_template, $custom_prompt);
+        
+        $end_time = microtime(true);
+        $response_time = round($end_time - $start_time, 2);
+        
+        if (is_wp_error($result)) {
+            wp_send_json_error(array('message' => $result->get_error_message()));
+            return;
+        }
+        
+        if (!$result) {
+            wp_send_json_error(array('message' => __('Translation failed', 'xf-translator')));
+            return;
+        }
+        
+        wp_send_json_success(array(
+            'translated_title' => $result['title'] ?? '',
+            'translated_content' => $result['content'] ?? '',
+            'translated_excerpt' => $result['excerpt'] ?? '',
+            'tokens_used' => $result['tokens_used'] ?? 0,
+            'response_time' => $response_time
+        ));
+    }
+    
+    /**
+     * AJAX handler to save default model
+     */
+    public function ajax_save_default_model() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
+            return;
+        }
+        
+        $model = isset($_POST['model']) ? sanitize_text_field($_POST['model']) : '';
+        
+        if (!$model) {
+            wp_send_json_error(array('message' => __('Invalid model', 'xf-translator')));
+            return;
+        }
+        
+        $this->settings->update('selected_model', $model);
+        
+        wp_send_json_success(array('message' => __('Default model saved successfully', 'xf-translator')));
+    }
+
+    /**
+     * Add language filter dropdown to posts/pages list
+     */
+    public function add_language_filter_dropdown($post_type) {
+        if (!in_array($post_type, array('post', 'page'), true)) {
+            return;
+        }
+        
+        $languages = $this->settings->get('languages', array());
+        if (empty($languages)) {
+            return;
+        }
+        
+        $selected = isset($_GET['xf_language_filter']) ? sanitize_text_field($_GET['xf_language_filter']) : '';
+        
+        echo '<label for="xf-language-filter" class="screen-reader-text">' . esc_html__('Filter by language', 'xf-translator') . '</label>';
+        echo '<select name="xf_language_filter" id="xf-language-filter" class="postform">';
+        echo '<option value="">' . esc_html__('All Languages', 'xf-translator') . '</option>';
+        echo '<option value="original"' . selected($selected, 'original', false) . '>' . esc_html__('Original (No Translation)', 'xf-translator') . '</option>';
+        
+        foreach ($languages as $language) {
+            if (empty($language['prefix'])) {
+                continue;
+            }
+            $label = isset($language['name']) ? $language['name'] : $language['prefix'];
+            echo '<option value="' . esc_attr($language['prefix']) . '"' . selected($selected, $language['prefix'], false) . '>' . esc_html($label) . '</option>';
+        }
+        
+        echo '</select>';
+    }
+    
+    /**
+     * Filter posts/pages list by language
+     */
+    public function filter_posts_by_language($query) {
+        if (!is_admin() || !$query->is_main_query()) {
+            return;
+        }
+        
+        global $pagenow;
+        if ($pagenow !== 'edit.php') {
+            return;
+        }
+        
+        $post_type = $query->get('post_type');
+        if (empty($post_type)) {
+            $post_type = 'post';
+        }
+        
+        if (!in_array($post_type, array('post', 'page'), true)) {
+            return;
+        }
+        
+        if (!isset($_GET['xf_language_filter'])) {
+            return;
+        }
+        
+        $filter = sanitize_text_field($_GET['xf_language_filter']);
+        if ($filter === '') {
+            return;
+        }
+        
+        $meta_query = $query->get('meta_query');
+        if (!is_array($meta_query)) {
+            $meta_query = array();
+        }
+        
+        if ($filter === 'original') {
+            $meta_query[] = array(
+                'key' => '_xf_translator_language',
+                'compare' => 'NOT EXISTS'
+            );
+        } else {
+            $meta_query[] = array(
+                'key' => '_xf_translator_language',
+                'value' => $filter,
+                'compare' => '='
+            );
+        }
+        
+        $query->set('meta_query', $meta_query);
+    }
 
 }
 

@@ -54,6 +54,17 @@ class Xf_Translator_Public {
 		
 		// Add rewrite rules on init
 		add_action('init', array($this, 'add_rewrite_rules'));
+		
+		// Filter menus to show translated versions
+		add_filter('wp_nav_menu_args', array($this, 'filter_nav_menu_args'), 10, 1);
+		
+		// Filter taxonomies to show translated terms
+		add_filter('get_terms', array($this, 'filter_get_terms'), 10, 4);
+		add_filter('term_link', array($this, 'filter_term_link'), 10, 3);
+		add_filter('get_term', array($this, 'filter_get_term'), 10, 2);
+		
+		// Filter taxonomy archive queries to show translated posts
+		add_action('pre_get_posts', array($this, 'filter_taxonomy_archive_query'), 10, 1);
 
 	}
 
@@ -136,6 +147,9 @@ class Xf_Translator_Public {
 		global $wp;
 		$wp->add_query_var('xf_lang_prefix');
 		
+		// Get all public taxonomies for rewrite rules
+		$taxonomies = get_taxonomies(array('public' => true, 'publicly_queryable' => true), 'objects');
+		
 		// Create pattern that matches slugs but excludes asset file extensions
 		// Match any characters except /, but ensure it doesn't end with asset extensions
 		// Using a pattern that explicitly excludes common asset extensions
@@ -162,6 +176,30 @@ class Xf_Translator_Public {
 			'index.php?name=$matches[2]&paged=$matches[3]&xf_lang_prefix=$matches[1]',
 			'top'
 		);
+		
+		// Add rewrite rules for taxonomy archives with language prefix
+		// Category archives: /fr/category/category-slug/
+		// Tag archives: /fr/tag/tag-slug/
+		// Custom taxonomy: /fr/taxonomy/term-slug/
+		foreach ($taxonomies as $taxonomy) {
+			if ($taxonomy->public && $taxonomy->publicly_queryable) {
+				$taxonomy_slug = $taxonomy->rewrite['slug'] ?? $taxonomy->name;
+				
+				// Add rewrite rule for taxonomy archive
+				add_rewrite_rule(
+					'^(' . $prefix_pattern . ')/' . $taxonomy_slug . '/([^/]+)/?$',
+					'index.php?' . $taxonomy->query_var . '=$matches[2]&xf_lang_prefix=$matches[1]',
+					'top'
+				);
+				
+				// Add rewrite rule for paginated taxonomy archive
+				add_rewrite_rule(
+					'^(' . $prefix_pattern . ')/' . $taxonomy_slug . '/([^/]+)/page/([0-9]+)/?$',
+					'index.php?' . $taxonomy->query_var . '=$matches[2]&paged=$matches[3]&xf_lang_prefix=$matches[1]',
+					'top'
+				);
+			}
+		}
 	}
 	
 	/**
@@ -366,6 +404,282 @@ class Xf_Translator_Public {
 		}
 		
 		return $new_permalink;
+	}
+	
+	/**
+	 * Filter nav menu arguments to show translated menu
+	 *
+	 * @param array $args Nav menu arguments
+	 * @return array Modified arguments
+	 */
+	public function filter_nav_menu_args($args) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return $args;
+		}
+		
+		// Get current language prefix from URL
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// If no language prefix in URL, check if we're on a translated post
+		if (empty($lang_prefix)) {
+			global $post;
+			if ($post) {
+				$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+			}
+		}
+		
+		// If still no language prefix, use default (no translation)
+		if (empty($lang_prefix)) {
+			return $args;
+		}
+		
+		// Get the menu ID from args
+		if (!isset($args['menu']) || empty($args['menu'])) {
+			return $args;
+		}
+		
+		$menu = $args['menu'];
+		
+		// If menu is an ID, get the menu object
+		if (is_numeric($menu)) {
+			$menu_obj = wp_get_nav_menu_object($menu);
+			if (!$menu_obj) {
+				return $args;
+			}
+			$menu_id = $menu_obj->term_id;
+		} elseif (is_object($menu)) {
+			$menu_id = $menu->term_id;
+		} else {
+			// Menu is a slug or name
+			$menu_obj = wp_get_nav_menu_object($menu);
+			if (!$menu_obj) {
+				return $args;
+			}
+			$menu_id = $menu_obj->term_id;
+		}
+		
+		// Get translated menu ID
+		$translated_menu_id = get_term_meta($menu_id, '_xf_translator_menu_' . $lang_prefix, true);
+		
+		if ($translated_menu_id) {
+			$translated_menu = wp_get_nav_menu_object($translated_menu_id);
+			if ($translated_menu) {
+				// Replace menu with translated version
+				$args['menu'] = $translated_menu_id;
+			}
+		}
+		
+		return $args;
+	}
+	
+	/**
+	 * Filter get_terms to show translated terms
+	 *
+	 * @param array $terms Array of term objects
+	 * @param array $taxonomies Array of taxonomies
+	 * @param array $args Query arguments
+	 * @param WP_Term_Query $term_query Term query object
+	 * @return array Filtered terms
+	 */
+	public function filter_get_terms($terms, $taxonomies, $args, $term_query) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return $terms;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// If no language prefix in URL, check if we're on a translated post
+		if (empty($lang_prefix)) {
+			global $post;
+			if ($post) {
+				$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+			}
+		}
+		
+		// If still no language prefix, use default (no translation)
+		if (empty($lang_prefix)) {
+			return $terms;
+		}
+		
+		// Replace terms with their translations
+		$translated_terms = array();
+		foreach ($terms as $term) {
+			if (!is_object($term)) {
+				continue;
+			}
+			
+			$translated_term_id = get_term_meta($term->term_id, '_xf_translator_term_' . $lang_prefix, true);
+			
+			if ($translated_term_id) {
+				$translated_term = get_term($translated_term_id);
+				if ($translated_term && !is_wp_error($translated_term)) {
+					$translated_terms[] = $translated_term;
+				} else {
+					$translated_terms[] = $term; // Fallback to original
+				}
+			} else {
+				$translated_terms[] = $term; // No translation available
+			}
+		}
+		
+		return $translated_terms;
+	}
+	
+	/**
+	 * Filter term link to add language prefix
+	 *
+	 * @param string $termlink Term link URL
+	 * @param WP_Term $term Term object
+	 * @param string $taxonomy Taxonomy name
+	 * @return string Modified term link
+	 */
+	public function filter_term_link($termlink, $term, $taxonomy) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return $termlink;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// If no language prefix in URL, check if we're on a translated post
+		if (empty($lang_prefix)) {
+			global $post;
+			if ($post) {
+				$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+			}
+		}
+		
+		// If still no language prefix, use default (no translation)
+		if (empty($lang_prefix)) {
+			return $termlink;
+		}
+		
+		// Check if this is a translated term
+		$original_term_id = get_term_meta($term->term_id, '_xf_translator_original_term_id', true);
+		$term_language = get_term_meta($term->term_id, '_xf_translator_language', true);
+		
+		// If this is a translated term for the current language, add prefix to URL
+		if ($term_language === $lang_prefix) {
+			$parsed_url = parse_url($termlink);
+			$scheme = isset($parsed_url['scheme']) ? $parsed_url['scheme'] . '://' : '';
+			$host = isset($parsed_url['host']) ? $parsed_url['host'] : '';
+			$port = isset($parsed_url['port']) ? ':' . $parsed_url['port'] : '';
+			$path = isset($parsed_url['path']) ? $parsed_url['path'] : '';
+			
+			// Check if prefix is already in the URL
+			if (strpos($path, '/' . $lang_prefix . '/') === false) {
+				$path = ltrim($path, '/');
+				$new_path = '/' . $lang_prefix . '/' . $path;
+				
+				$new_termlink = $scheme . $host . $port . $new_path;
+				if (isset($parsed_url['query'])) {
+					$new_termlink .= '?' . $parsed_url['query'];
+				}
+				if (isset($parsed_url['fragment'])) {
+					$new_termlink .= '#' . $parsed_url['fragment'];
+				}
+				
+				return $new_termlink;
+			}
+		}
+		
+		return $termlink;
+	}
+	
+	/**
+	 * Filter get_term to return translated term when appropriate
+	 *
+	 * @param WP_Term|array $term Term object or array
+	 * @param string $taxonomy Taxonomy name
+	 * @return WP_Term|array Filtered term
+	 */
+	public function filter_get_term($term, $taxonomy) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return $term;
+		}
+		
+		if (!is_object($term)) {
+			return $term;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// If no language prefix in URL, check if we're on a translated post
+		if (empty($lang_prefix)) {
+			global $post;
+			if ($post) {
+				$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+			}
+		}
+		
+		// If still no language prefix, use default (no translation)
+		if (empty($lang_prefix)) {
+			return $term;
+		}
+		
+		// Check if this term has a translation
+		$translated_term_id = get_term_meta($term->term_id, '_xf_translator_term_' . $lang_prefix, true);
+		
+		if ($translated_term_id) {
+			$translated_term = get_term($translated_term_id);
+			if ($translated_term && !is_wp_error($translated_term)) {
+				return $translated_term;
+			}
+		}
+		
+		return $term;
+	}
+	
+	/**
+	 * Filter taxonomy archive queries to show translated posts
+	 *
+	 * @param WP_Query $query Query object
+	 */
+	public function filter_taxonomy_archive_query($query) {
+		// Only filter on frontend, main query, and taxonomy archives
+		if (is_admin() || !$query->is_main_query() || !$query->is_tax()) {
+			return;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// If no language prefix in URL, use default (no translation)
+		if (empty($lang_prefix)) {
+			return;
+		}
+		
+		// Get the queried term
+		$queried_object = $query->get_queried_object();
+		if (!$queried_object || !isset($queried_object->term_id)) {
+			return;
+		}
+		
+		// Check if this is a translated term
+		$term_language = get_term_meta($queried_object->term_id, '_xf_translator_language', true);
+		
+		// If this is a translated term, filter posts to show only translated posts
+		if ($term_language === $lang_prefix) {
+			$meta_query = $query->get('meta_query');
+			if (!is_array($meta_query)) {
+				$meta_query = array();
+			}
+			
+			// Add meta query to only show translated posts for this language
+			$meta_query[] = array(
+				'key' => '_xf_translator_language',
+				'value' => $lang_prefix,
+				'compare' => '='
+			);
+			
+			$query->set('meta_query', $meta_query);
+		}
 	}
 
 }

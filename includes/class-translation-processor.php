@@ -12,59 +12,69 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class Xf_Translator_Processor {
-    
+class Xf_Translator_Processor
+{
+
     /**
      * Settings instance
      *
      * @var Settings
      */
     private $settings;
-    
+
     /**
      * Flag to prevent translated posts from triggering queue creation
      *
      * @var bool
      */
     private static $creating_translated_post = false;
-    
+
     /**
      * Last error message
      *
      * @var string
      */
     private $last_error = '';
-    
+
+    /**
+     * Last test tokens used (for test translation)
+     *
+     * @var int
+     */
+    private $last_test_tokens = 0;
+
     /**
      * Constructor
      */
-    public function __construct() {
+    public function __construct()
+    {
         $this->settings = new Settings();
     }
-    
+
     /**
      * Process the next pending translation in queue
      *
      * @param string $type Optional. Filter by type ('NEW' or 'OLD'). If empty, processes any type.
      * @return array|false Processing result or false on failure
      */
-    public function process_next_translation($type = '') {
+    public function process_next_translation($type = '')
+    {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
-        
+
         // Build query with optional type filter
         $query = "SELECT * FROM $table_name 
                   WHERE status = 'pending'";
-        
+
         if (!empty($type)) {
             $query .= $wpdb->prepare(" AND type = %s", $type);
         }
-        
+
         $query .= " ORDER BY id ASC LIMIT 1";
-        
+
         // Get the latest pending entry
         $queue_entry = $wpdb->get_row($query, ARRAY_A);
-        
+
         if (!$queue_entry) {
             if (!empty($type)) {
                 $this->last_error = "No pending entries found in queue with type '{$type}'";
@@ -73,7 +83,7 @@ class Xf_Translator_Processor {
             }
             return false; // No pending entries
         }
-        
+
         // Update status to processing
         $wpdb->update(
             $table_name,
@@ -82,10 +92,10 @@ class Xf_Translator_Processor {
             array('%s'),
             array('%d')
         );
-        
+
         $post_id = intval($queue_entry['parent_post_id']);
         $target_language_name = $queue_entry['lng']; // This is now the language name
-        
+
         // Get language prefix from name
         $languages = $this->settings->get('languages', array());
         $target_language_prefix = '';
@@ -95,7 +105,7 @@ class Xf_Translator_Processor {
                 break;
             }
         }
-        
+
         if (empty($target_language_prefix)) {
             $this->last_error = "Language prefix not found for language name: {$target_language_name}";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -112,15 +122,15 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Check if this is an EDIT type entry
         if (isset($queue_entry['type']) && $queue_entry['type'] === 'EDIT') {
             return $this->process_edit_translation($queue_entry);
         }
-        
+
         // Get post data
         $post_data = $this->get_post_data($post_id);
-        
+
         if (!$post_data) {
             $this->last_error = "Post data not found for post ID: {$post_id}";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -137,15 +147,15 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Build prompt (pass language name for display, but we'll use prefix for API if needed)
         $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
         $prompt = $prompt_data['prompt'];
         $placeholders_map = $prompt_data['placeholders_map'];
-        
+
         // Call API (use prefix for API calls) - API logging is handled inside the function
         $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id);
-        
+
         if ($translation_result === false) {
             // Get the detailed error from the API call
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
@@ -163,10 +173,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Parse the structured translation response
         $parsed_translation = $this->parse_translation_response($translation_result, $post_data);
-        
+
         // Restore HTML tags and URLs from placeholders
         if (!empty($parsed_translation) && !empty($placeholders_map)) {
             foreach ($parsed_translation as $field => $value) {
@@ -175,17 +185,17 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         if (!$parsed_translation) {
             $this->last_error = "Failed to parse translation response. Response format may be incorrect.";
             error_log('XF Translator Error: ' . $this->last_error);
             error_log('XF Translator: Full translation response length: ' . strlen($translation_result));
             error_log('XF Translator: Translation response (first 1000 chars): ' . substr($translation_result, 0, 1000));
             error_log('XF Translator: Original post data fields: ' . implode(', ', array_keys($post_data)));
-            
+
             // Save the raw response for manual inspection
             update_post_meta($post_id, '_xf_translator_raw_response_' . $queue_entry['id'], $translation_result);
-            
+
             // Update status to failed with error message
             $wpdb->update(
                 $table_name,
@@ -199,10 +209,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Create translated post (pass language name)
         $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
-        
+
         if ($translated_post_id === false) {
             $this->last_error = "Failed to create translated post. Check WordPress permissions and post data.";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -219,7 +229,7 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Update status to completed and store translated post ID
         $wpdb->update(
             $table_name,
@@ -231,7 +241,7 @@ class Xf_Translator_Processor {
             array('%s', '%d'),
             array('%d')
         );
-        
+
         return array(
             'queue_id' => $queue_entry['id'],
             'post_id' => $post_id,
@@ -240,26 +250,27 @@ class Xf_Translator_Processor {
             'translated_content' => $parsed_translation
         );
     }
-    
+
     /**
      * Get post data including title, content, excerpt, and ACF fields
      *
      * @param int $post_id Post ID
      * @return array|false Post data or false on failure
      */
-    private function get_post_data($post_id) {
+    private function get_post_data($post_id)
+    {
         $post = get_post($post_id);
-        
+
         if (!$post) {
             return false;
         }
-        
+
         $data = array(
             'title' => $post->post_title,
             'content' => $post->post_content,
             'excerpt' => $post->post_excerpt
         );
-        
+
         // Get ACF fields if ACF is active
         if (function_exists('get_fields')) {
             $acf_fields = get_fields($post_id);
@@ -278,7 +289,7 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         // Also get custom fields (post meta) that might be ACF fields or other custom fields
         $custom_fields = get_post_meta($post_id);
         foreach ($custom_fields as $key => $values) {
@@ -286,15 +297,15 @@ class Xf_Translator_Processor {
             if (strpos($key, '_') === 0) {
                 continue;
             }
-            
+
             // Skip if already added as ACF field
             if (isset($data['acf_' . $key])) {
                 continue;
             }
-            
+
             // Get the first value (most custom fields have single values)
             $value = is_array($values) ? $values[0] : $values;
-            
+
             // Handle different value types
             if (is_string($value) || is_numeric($value)) {
                 $data['meta_' . $key] = $value;
@@ -302,17 +313,18 @@ class Xf_Translator_Processor {
                 $data['meta_' . $key] = $this->format_field_value($value);
             }
         }
-        
+
         return $data;
     }
-    
+
     /**
      * Format field value for translation
      *
      * @param mixed $value Field value
      * @return string Formatted value
      */
-    private function format_field_value($value) {
+    private function format_field_value($value)
+    {
         if (is_array($value)) {
             // Handle array values - convert to readable format
             $formatted = array();
@@ -327,35 +339,25 @@ class Xf_Translator_Processor {
         }
         return (string) $value;
     }
-    
+
+    // (chunked translation helpers removed)
+
     /**
-     * Extract and replace HTML tags, URLs, and images with placeholders
-     * This preserves them so they won't be translated
+     * Extract and replace URLs with placeholders
+     * HTML tags are kept as-is in the content
      *
      * @param string $content Content to process
      * @return array Array with 'content' (processed) and 'placeholders' (map to restore)
      */
-    private function protect_html_and_urls($content) {
+    private function protect_urls($content)
+    {
         $placeholders = array();
         $placeholder_index = 0;
-        
-        // Protect full HTML tags (including attributes) - this includes img tags, links, etc.
-        // Pattern matches: <tag attributes>content</tag> or <self-closing-tag />
-        $content = preg_replace_callback(
-            '/<[^>]+>/i',
-            function($matches) use (&$placeholders, &$placeholder_index) {
-                $placeholder = '{{HTML_TAG_' . $placeholder_index . '}}';
-                $placeholders[$placeholder] = $matches[0];
-                $placeholder_index++;
-                return $placeholder;
-            },
-            $content
-        );
-        
+
         // Protect URLs (http://, https://, www.)
         $content = preg_replace_callback(
             '/(https?:\/\/[^\s<>"\'\)]+|www\.[^\s<>"\'\)]+)/i',
-            function($matches) use (&$placeholders, &$placeholder_index) {
+            function ($matches) use (&$placeholders, &$placeholder_index) {
                 $placeholder = '{{URL_' . $placeholder_index . '}}';
                 $placeholders[$placeholder] = $matches[0];
                 $placeholder_index++;
@@ -363,28 +365,45 @@ class Xf_Translator_Processor {
             },
             $content
         );
-        
+
         return array(
             'content' => $content,
             'placeholders' => $placeholders
         );
     }
-    
+
     /**
-     * Restore HTML tags and URLs from placeholders
+     * Extract and replace HTML tags, URLs, and images with placeholders
+     * This preserves them so they won't be translated
+     * DEPRECATED: Use protect_urls() instead - HTML tags are now kept as-is
+     *
+     * @param string $content Content to process
+     * @return array Array with 'content' (processed) and 'placeholders' (map to restore)
+     */
+    private function protect_html_and_urls($content)
+    {
+        // For backward compatibility, only protect URLs
+        return $this->protect_urls($content);
+    }
+
+    /**
+     * Restore URLs from placeholders
+     * HTML tags are no longer stored as placeholders, they remain in the content
      *
      * @param string $content Content with placeholders
-     * @param array $placeholders Map of placeholders to original content
+     * @param array $placeholders Map of placeholders to original content (only URLs now)
      * @return string Content with placeholders restored
      */
-    private function restore_html_and_urls($content, $placeholders) {
+    private function restore_html_and_urls($content, $placeholders)
+    {
         // Restore in reverse order to handle nested placeholders correctly
+        // Only URLs are in placeholders now, HTML tags remain in content
         foreach (array_reverse($placeholders, true) as $placeholder => $original) {
             $content = str_replace($placeholder, $original, $content);
         }
         return $content;
     }
-    
+
     /**
      * Build translation prompt from Brand Tone template
      *
@@ -392,10 +411,11 @@ class Xf_Translator_Processor {
      * @param string $target_language Target language name
      * @return array Array with 'prompt' and 'placeholders_map' (field => placeholders)
      */
-    private function build_translation_prompt($post_data, $target_language) {
+    private function build_translation_prompt($post_data, $target_language)
+    {
         // Get brand tone prompt template
         $brand_tone_template = $this->settings->get('brand_tone', '');
-        
+
         // Get glossary terms
         $glossary_terms = $this->settings->get('glossary_terms', array());
         $glossary_list = '';
@@ -406,46 +426,47 @@ class Xf_Translator_Processor {
             }
             $glossary_list = implode(', ', $glossary_items);
         }
-        
+
         // $target_language is now the language name directly
         $language_name = $target_language;
-        
-        // Build content string with all fields, protecting HTML tags and URLs
+
+        // Build content string with all fields, keeping HTML tags as-is, only protecting URLs
         $content_parts = array();
         $field_labels_list = array(); // Track field labels for example
-        $placeholders_map = array(); // Store placeholders for each field
-        
+        $placeholders_map = array(); // Store placeholders for each field (only URLs now)
+
         foreach ($post_data as $field => $value) {
             if (!empty($value)) {
                 $field_label = ucfirst(str_replace(array('acf_', 'meta_'), '', $field));
-                
-                // Protect HTML tags and URLs in the value
-                $protected = $this->protect_html_and_urls($value);
+
+                // Only protect URLs, keep HTML tags as-is
+                $protected = $this->protect_urls($value);
                 $protected_value = $protected['content'];
                 $placeholders_map[$field] = $protected['placeholders'];
-                
+
                 $content_parts[] = "{$field_label}: {$protected_value}";
                 $field_labels_list[] = $field_label;
             }
         }
         $content_string = implode("\n\n", $content_parts);
-        
+
         // If brand tone template is empty, use default
         if (empty($brand_tone_template)) {
             $brand_tone_template = "You need to translate the following {content} in {lng} but dont translate any brand name / company name you are expert content translator your tone should be professional & should seo optimized dont translate any [] square brackets and square bracket's inside content";
         }
-        
+
         // Replace placeholders
         $prompt = str_replace('{content}', $content_string, $brand_tone_template);
         $prompt = str_replace('{lng}', $language_name, $prompt);
-        
-        // Replace {glossy} placeholder
+
+        // Replace {glossy} placeholder with just the glossary list
+        // The instruction text should already be in the template around {glossy}
         if (!empty($glossary_list)) {
-            $prompt = str_replace('{glossy}', "Do not translate these terms: {$glossary_list}", $prompt);
+            $prompt = str_replace('{glossy}', $glossary_list, $prompt);
         } else {
             $prompt = str_replace('{glossy}', '', $prompt);
         }
-        
+
         // Build example format based on actual fields being translated
         $example_format = '';
         if (count($field_labels_list) === 1) {
@@ -460,16 +481,16 @@ class Xf_Translator_Processor {
             }
             $example_format = "\n\nIMPORTANT: You MUST respond in the following exact format, maintaining the same structure with field labels:\n" . implode("\n\n", $example_parts) . "\n\nEach field must be on a separate line with its label followed by a colon and space, then the translated content.";
         }
-        
+
         // Add strict formatting instructions with example
-        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. IMPORTANT: Do NOT translate any placeholders like {{HTML_TAG_0}}, {{URL_1}}, etc. Keep them exactly as they appear.\n7. Do NOT translate HTML tags, URLs, or image references. Only translate the actual text content." . $example_format;
-        
+        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. IMPORTANT: Do NOT translate any placeholders like {{URL_0}}, {{URL_1}}, etc. Keep them exactly as they appear.\n7. CRITICAL: Do NOT translate HTML tags. Keep all HTML tags exactly as they appear in the original content, including all attributes, opening tags, closing tags, and self-closing tags.\n8. CRITICAL: Do NOT translate images. Keep all image tags (<img>), image URLs, image attributes (src, alt, etc.), and any image references exactly as they appear in the original content.\n9. Only translate the actual text content that appears between HTML tags or outside of HTML tags. HTML tags and images must remain completely unchanged." . $example_format;
+
         return array(
             'prompt' => $prompt,
             'placeholders_map' => $placeholders_map
         );
     }
-    
+
     /**
      * Call translation API (OpenAI or DeepSeek)
      *
@@ -479,33 +500,52 @@ class Xf_Translator_Processor {
      * @param int $post_id Post ID for logging
      * @return string|false Translated content or false on failure
      */
-    private function call_translation_api($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0) {
+    private function call_translation_api($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0)
+    {
         $model = $this->settings->get('selected_model', 'gpt-4o');
         $is_deepseek = strpos($model, 'deepseek') !== false;
-        
+
         // Get API key
-        $api_key = $is_deepseek 
+        $api_key = $is_deepseek
             ? $this->settings->get('deepseek_api_key', '')
             : $this->settings->get('api_key', '');
-        
+
         // Determine endpoint
-        $endpoint = $is_deepseek 
+        $endpoint = $is_deepseek
             ? 'https://api.deepseek.com/v1/chat/completions'
             : 'https://api.openai.com/v1/chat/completions';
-        
+
+        // Get max_tokens based on model capabilities
+        $max_tokens = $this->get_max_tokens_for_model($model);
+
+        // Prepare messages array
+        $messages = array();
+
+        // Add system message for OpenAI to clarify context (only for OpenAI, not DeepSeek)
+        if (!$is_deepseek) {
+        }
+
+        // Add user message with translation prompt
+        $messages[] = array(
+            'role' => 'user',
+            'content' => $prompt
+        );
+
+
         // Prepare request body
         $body = array(
             'model' => $model,
-            'messages' => array(
-                array(
-                    'role' => 'user',
-                    'content' => $prompt
-                )
-            ),
+            'messages' => $messages,
             'temperature' => 0.3,
-            'max_tokens' => 8000
+            'max_tokens' => $max_tokens
         );
-        
+
+        // Calculate timeout based on content size (minimum 300 seconds, add 2 seconds per 1000 characters)
+        $content_length = strlen($prompt);
+        $calculated_timeout = max(300, 300 + intval($content_length / 1000) * 2);
+        // Cap at 900 seconds (15 minutes) to avoid extremely long waits
+        $timeout = min($calculated_timeout, 900);
+
         // Log API request to debug.log
         $request_log = array(
             'type' => 'API_REQUEST',
@@ -516,10 +556,12 @@ class Xf_Translator_Processor {
             'post_id' => $post_id,
             'queue_id' => $queue_id,
             'target_language' => $target_language_prefix,
+            'content_length' => $content_length,
+            'timeout' => $timeout,
             'request_body' => $body
         );
         error_log('XF Translator API Request: ' . json_encode($request_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        
+
         // Save API request to post meta BEFORE making the call (so we always have the request)
         if ($post_id && $queue_id) {
             $api_log = array(
@@ -529,11 +571,11 @@ class Xf_Translator_Processor {
                 'api_key_configured' => !empty($api_key),
                 'timestamp' => current_time('mysql')
             );
-            
+
             // Save initial log with request
             $log_key = '_xf_translator_api_log_' . $queue_id;
             $log_saved = update_post_meta($post_id, $log_key, json_encode($api_log, JSON_PRETTY_PRINT));
-            
+
             // Debug: Log if save failed
             if (!$log_saved) {
                 error_log('XF Translator: Failed to save API log to post meta. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id . ', Key: ' . $log_key);
@@ -543,12 +585,12 @@ class Xf_Translator_Processor {
         } else {
             error_log('XF Translator: Cannot save API log - missing post_id or queue_id. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
         }
-        
+
         if (empty($api_key)) {
             $api_type = $is_deepseek ? 'DeepSeek' : 'OpenAI';
             $this->last_error = "{$api_type} API key is not configured. Please add your API key in the plugin settings.";
             error_log('XF Translator API Error: ' . $this->last_error);
-            
+
             // Update log with error
             if ($post_id && $queue_id) {
                 $api_log['error'] = $this->last_error;
@@ -556,10 +598,10 @@ class Xf_Translator_Processor {
                 $api_log['response_body'] = '';
                 update_post_meta($post_id, '_xf_translator_api_log_' . $queue_id, json_encode($api_log, JSON_PRETTY_PRINT));
             }
-            
+
             return false;
         }
-        
+
         // Make API request
         $response = wp_remote_post($endpoint, array(
             'headers' => array(
@@ -567,13 +609,13 @@ class Xf_Translator_Processor {
                 'Authorization' => 'Bearer ' . $api_key
             ),
             'body' => json_encode($body),
-            'timeout' => 120
+            'timeout' => $timeout
         ));
-        
+
         // Get response details for logging (do this before error checks)
         $response_code = wp_remote_retrieve_response_code($response);
         $response_body = is_wp_error($response) ? '' : wp_remote_retrieve_body($response);
-        
+
         // Log API response to debug.log
         $response_log = array(
             'type' => 'API_RESPONSE',
@@ -588,19 +630,19 @@ class Xf_Translator_Processor {
             'response_body' => $response_body,
             'is_error' => is_wp_error($response)
         );
-        
+
         if (is_wp_error($response)) {
             $response_log['error'] = $response->get_error_message();
         }
-        
+
         // Try to decode response for better logging
         $decoded_response = json_decode($response_body, true);
         if ($decoded_response !== null) {
             $response_log['response_body_parsed'] = $decoded_response;
         }
-        
+
         error_log('XF Translator API Response: ' . json_encode($response_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        
+
         // Update API log with response (always save, even on error)
         if ($post_id && $queue_id) {
             // Retrieve existing log or create new one
@@ -626,27 +668,35 @@ class Xf_Translator_Processor {
                     'timestamp' => current_time('mysql')
                 );
             }
-            
+
             $api_log['response_code'] = $response_code ?: 0;
             $api_log['response_body'] = $response_body;
-            
+
             if (is_wp_error($response)) {
                 $api_log['error'] = $response->get_error_message();
             }
-            
+
             update_post_meta($post_id, $log_key, json_encode($api_log, JSON_PRETTY_PRINT));
         }
-        
+
         // Handle response
         if (is_wp_error($response)) {
             $error_message = $response->get_error_message();
-            $this->last_error = "API request error: {$error_message}";
+
+            // Check if it's a timeout error
+            if (strpos($error_message, 'timeout') !== false || strpos($error_message, 'timed out') !== false) {
+                $this->last_error = "API request timed out after {$timeout} seconds. The content may be too large for a single translation request. Consider breaking the content into smaller chunks or the API may be experiencing high load. Content length: " . number_format($content_length) . " characters.";
+            } else {
+                $this->last_error = "API request error: {$error_message}";
+            }
+
             error_log('XF Translator API Error: ' . $this->last_error);
+            error_log('XF Translator: Timeout used: ' . $timeout . ' seconds, Content length: ' . $content_length . ' characters');
             return false;
         }
-        
+
         $data = json_decode($response_body, true);
-        
+
         if ($response_code !== 200) {
             $error_message = isset($data['error']['message']) ? $data['error']['message'] : 'Unknown API error';
             $this->last_error = "API returned error code {$response_code}: {$error_message}";
@@ -654,18 +704,59 @@ class Xf_Translator_Processor {
             error_log('XF Translator API Response: ' . $response_body);
             return false;
         }
-        
+
         // Extract translation
         if (isset($data['choices'][0]['message']['content'])) {
-            return trim($data['choices'][0]['message']['content']);
+            $translation = trim($data['choices'][0]['message']['content']);
+
+            // Check for API refusal messages
+            $refusal_indicators = array(
+                "I'm sorry, I can't assist",
+                "I cannot assist",
+                "I can't help",
+                "I'm unable to",
+                "I cannot provide",
+                "I'm not able to",
+                "I apologize, but I cannot",
+                "I'm not programmed to"
+            );
+
+            $is_refusal = false;
+            foreach ($refusal_indicators as $indicator) {
+                if (stripos($translation, $indicator) !== false) {
+                    $is_refusal = true;
+                    break;
+                }
+            }
+
+            // Also check for refusal field in response
+            if (isset($data['choices'][0]['message']['refusal']) && !empty($data['choices'][0]['message']['refusal'])) {
+                $is_refusal = true;
+            }
+
+            if ($is_refusal) {
+                $this->last_error = "OpenAI API refused to translate the content due to content moderation policies. This often happens with cannabis-related content. Solutions: 1) Use DeepSeek model instead (less restrictive), 2) The system message has been added to help, but OpenAI may still refuse certain content. Consider using DeepSeek for this type of content.";
+                error_log('XF Translator API Error: ' . $this->last_error);
+                error_log('XF Translator API Refusal Response: ' . $translation);
+                return false;
+            }
+
+            // Save token usage for test translations (when post_id is set but queue_id is 0)
+            if ($post_id && $queue_id == 0 && isset($data['usage'])) {
+                update_post_meta($post_id, '_xf_translator_test_tokens_' . time(), $data['usage']['total_tokens']);
+                // Also store in a way we can retrieve it
+                $this->last_test_tokens = $data['usage']['total_tokens'];
+            }
+
+            return $translation;
         }
-        
+
         $this->last_error = "Invalid API response format. No translation content found.";
         error_log('XF Translator API Error: ' . $this->last_error);
         error_log('XF Translator API Response: ' . print_r($data, true));
         return false;
     }
-    
+
     /**
      * Parse structured translation response and extract fields
      *
@@ -673,18 +764,23 @@ class Xf_Translator_Processor {
      * @param array $original_data Original post data structure
      * @return array|false Parsed translation data or false on failure
      */
-    private function parse_translation_response($translation_response, $original_data) {
+    private function parse_translation_response($translation_response, $original_data)
+    {
         $parsed = array();
-        
+
         // Normalize line endings
         $translation_response = str_replace(array("\r\n", "\r"), "\n", $translation_response);
         $translation_response = trim($translation_response);
-        
+
+        // Log the raw response for debugging
+        error_log('XF Translator: Parsing translation response, length: ' . strlen($translation_response));
+        error_log('XF Translator: Response preview (first 500 chars): ' . substr($translation_response, 0, 500));
+
         // If response is empty, return false
         if (empty($translation_response)) {
             return false;
         }
-        
+
         // Build a mapping of original field labels to field keys
         // This is what we sent to the API, so we know the structure
         $original_labels = array();
@@ -697,52 +793,67 @@ class Xf_Translator_Processor {
                 $field_order[] = $field_key; // Track order
             }
         }
-        
+
         // SPECIAL CASE: If only one field is being translated and response doesn't have a label,
         // treat the entire response as the value for that field
         // This handles cases where API returns just the translated text without "FieldName: " prefix
         if (count($field_order) === 1 && !preg_match('/^[^\n]+:\s*/', $translation_response)) {
             $single_field_key = $field_order[0];
             $parsed[$single_field_key] = $translation_response;
-            
+
             // Validate we got something
             if (!empty($parsed[$single_field_key])) {
                 return $parsed;
             }
         }
-        
+
         // Split response by label: patterns (works with any script/encoding)
         // Pattern: any text followed by colon and optional space
-        $sections = preg_split('/(?=^[^\n]+:\s*)/m', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
-        
+        // Use a more specific pattern that matches field labels at the start of lines
+        // This ensures we don't split on colons inside HTML attributes
+        $sections = preg_split('/(?=^[A-Za-z][A-Za-z0-9_\s]*:\s)/m', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
+
         // If splitting didn't work well, try by double newlines
         if (count($sections) === 1) {
             $sections = preg_split('/\n\s*\n/', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
         }
-        
+
+        // Log sections found
+        error_log('XF Translator: Split into ' . count($sections) . ' sections');
+        foreach ($sections as $idx => $section) {
+            error_log('XF Translator: Section ' . $idx . ' preview (first 200 chars): ' . substr(trim($section), 0, 200));
+        }
+
         // Parse each section to find label: value pairs
         $found_fields = array();
         $found_labels = array(); // Track which labels we found and their order
-        
+
         foreach ($sections as $section) {
             $section = trim($section);
             if (empty($section)) {
                 continue;
             }
-            
+
             // Try to match label: value pattern (works with any encoding)
             if (preg_match('/^([^:]+):\s*(.*)$/s', $section, $matches)) {
                 $response_label = trim($matches[1]);
                 $response_value = trim($matches[2]);
-                
+
                 // Try to match this response label to an original field
                 $matched_field = $this->match_label_to_field($response_label, $original_labels);
-                
+
                 if ($matched_field && !empty($response_value)) {
                     // Remove the label from the value if it's still there
                     $response_value = preg_replace('/^' . preg_quote($response_label, '/') . '\s*:\s*/u', '', $response_value, 1);
+                    // Only trim leading/trailing whitespace, preserve all content including HTML
                     $response_value = trim($response_value);
-                    
+
+                    // Log for debugging HTML content
+                    if ($matched_field === 'content' && strpos($response_value, '<table') !== false) {
+                        error_log('XF Translator: Found table HTML in content field, length: ' . strlen($response_value));
+                        error_log('XF Translator: Table HTML preview: ' . substr($response_value, strpos($response_value, '<table'), 200));
+                    }
+
                     // If we already have this field, append (might be multi-line)
                     if (isset($found_fields[$matched_field])) {
                         $found_fields[$matched_field] .= "\n" . $response_value;
@@ -756,16 +867,16 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         // If we didn't find fields by sections, try line-by-line parsing
         if (empty($found_fields)) {
             $lines = explode("\n", $translation_response);
             $current_field = null;
             $current_value = array();
-            
+
             foreach ($lines as $line) {
                 $line = trim($line);
-                
+
                 if (empty($line)) {
                     // Empty line - save current field if exists
                     if ($current_field !== null && !empty($current_value)) {
@@ -775,25 +886,25 @@ class Xf_Translator_Processor {
                     }
                     continue;
                 }
-                
+
                 // Check if line starts with a label: pattern
                 if (preg_match('/^([^:]+):\s*(.*)$/u', $line, $matches)) {
                     $response_label = trim($matches[1]);
                     $response_value = trim($matches[2]);
-                    
+
                     // Match to original field
                     $matched_field = $this->match_label_to_field($response_label, $original_labels);
-                    
+
                     if ($matched_field) {
                         // Save previous field
                         if ($current_field !== null && !empty($current_value)) {
                             $found_fields[$current_field] = trim(implode("\n", $current_value));
                         }
-                        
+
                         // Start new field
                         $current_field = $matched_field;
                         $current_value = array();
-                        
+
                         if (!empty($response_value)) {
                             $current_value[] = $response_value;
                         }
@@ -814,13 +925,13 @@ class Xf_Translator_Processor {
                     }
                 }
             }
-            
+
             // Save last field
             if ($current_field !== null && !empty($current_value)) {
                 $found_fields[$current_field] = trim(implode("\n", $current_value));
             }
         }
-        
+
         // Positional matching fallback: if we found labels but couldn't match them,
         // match by position (first label = first field, second label = second field, etc.)
         if (count($found_labels) > 0 && count($found_labels) <= count($field_order)) {
@@ -828,22 +939,22 @@ class Xf_Translator_Processor {
             if (count($unmatched_sections) === 1) {
                 $unmatched_sections = preg_split('/\n\s*\n/', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
             }
-            
+
             foreach ($unmatched_sections as $index => $section) {
                 $section = trim($section);
                 if (empty($section)) {
                     continue;
                 }
-                
+
                 // Extract label and value
                 if (preg_match('/^([^:]+):\s*(.*)$/s', $section, $matches)) {
                     $response_label = trim($matches[1]);
                     $response_value = trim($matches[2]);
-                    
+
                     // Remove label from value
                     $response_value = preg_replace('/^' . preg_quote($response_label, '/') . '\s*:\s*/u', '', $response_value, 1);
                     $response_value = trim($response_value);
-                    
+
                     // Match by position if we haven't matched this field yet
                     if ($index < count($field_order) && !isset($found_fields[$field_order[$index]])) {
                         $found_fields[$field_order[$index]] = $response_value;
@@ -851,33 +962,57 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         // Clean up values - remove any remaining labels at the start
         foreach ($found_fields as $field_key => $value) {
             // Get the original label we sent
             $original_label = isset($original_labels[$field_key]) ? $original_labels[$field_key] : '';
-            
+
             // Remove the label if it appears at the start of the value
             if (!empty($original_label)) {
                 $value = preg_replace('/^' . preg_quote($original_label, '/') . '\s*:\s*/iu', '', $value, 1);
             }
-            
+
             // Also try to remove any label: pattern at the start (handles translated labels)
-            $value = preg_replace('/^[^:]+:\s*/u', '', $value, 1);
-            
+            // But be careful not to remove colons that are part of HTML attributes (e.g., style="color: white;")
+            // Only remove if it's at the very start and looks like a label (word characters followed by colon)
+            if (preg_match('/^[A-Za-z0-9_\s]+:\s*/u', $value, $label_match)) {
+                // Check if this looks like HTML content (starts with <) - if so, don't remove
+                $after_label = substr($value, strlen($label_match[0]));
+                if (strpos(trim($after_label), '<') !== 0) {
+                    // Not HTML, safe to remove label pattern
+                    $value = preg_replace('/^[^:]+:\s*/u', '', $value, 1);
+                }
+            }
+
             $found_fields[$field_key] = trim($value);
+
+            // Log if content field has table HTML to verify it's preserved
+            if ($field_key === 'content' && strpos($value, '<table') !== false) {
+                error_log('XF Translator: Final parsed content has table HTML, length: ' . strlen($value));
+            }
         }
-        
+
         // Use found fields as parsed result
         $parsed = $found_fields;
-        
+
+        // Log what fields were found
+        error_log('XF Translator: Parsed fields: ' . implode(', ', array_keys($parsed)));
+        foreach ($parsed as $field_key => $value) {
+            $preview = substr($value, 0, 200);
+            error_log('XF Translator: Field "' . $field_key . '" length: ' . strlen($value) . ', preview: ' . $preview);
+            if ($field_key === 'content' && strpos($value, '<table') !== false) {
+                error_log('XF Translator: Content field contains table HTML');
+            }
+        }
+
         // If no fields were found and we only sent one field, treat the entire response as that field
         // This handles cases where API returns just the translated text without labels
         if (empty($parsed) && count($original_data) === 1) {
             $single_field_key = key($original_data); // Get first key
             $parsed[$single_field_key] = trim($translation_response);
         }
-        
+
         // If still empty and we have a simple response (no colons, no newlines), try positional matching
         if (empty($parsed) && strpos($translation_response, ':') === false && strpos($translation_response, "\n") === false) {
             // Simple response - likely just one field translated
@@ -887,12 +1022,12 @@ class Xf_Translator_Processor {
                 $parsed[$first_field] = trim($translation_response);
             }
         }
-        
+
         // Ensure we have at least some content
         if (empty($parsed)) {
             return false;
         }
-        
+
         // Final validation - ensure we have at least one field with non-empty content
         // This works for any field name (title, content, excerpt, ACF fields, etc.)
         foreach ($parsed as $key => $value) {
@@ -901,11 +1036,11 @@ class Xf_Translator_Processor {
                 return $parsed;
             }
         }
-        
+
         // No valid fields found (all were empty)
         return false;
     }
-    
+
     /**
      * Match a response label to an original field key
      * Uses fuzzy matching to handle translated labels
@@ -914,57 +1049,62 @@ class Xf_Translator_Processor {
      * @param array $original_labels Array of field_key => original_label
      * @return string|null Matched field key or null
      */
-    private function match_label_to_field($response_label, $original_labels) {
+    private function match_label_to_field($response_label, $original_labels)
+    {
         $response_label_trimmed = trim($response_label);
-        
+
         // First, try exact match (case-insensitive, works with UTF-8)
         foreach ($original_labels as $field_key => $original_label) {
             if (mb_strtolower($original_label, 'UTF-8') === mb_strtolower($response_label_trimmed, 'UTF-8')) {
                 return $field_key;
             }
         }
-        
+
         // Second, try partial match (label contains original or vice versa)
         // Use mb_ functions for proper UTF-8 handling
         $response_label_lower = mb_strtolower($response_label_trimmed, 'UTF-8');
         foreach ($original_labels as $field_key => $original_label) {
             $original_label_lower = mb_strtolower($original_label, 'UTF-8');
-            
+
             // Check if labels are similar (one contains the other)
-            if (mb_strpos($response_label_lower, $original_label_lower, 0, 'UTF-8') !== false || 
-                mb_strpos($original_label_lower, $response_label_lower, 0, 'UTF-8') !== false) {
+            if (
+                mb_strpos($response_label_lower, $original_label_lower, 0, 'UTF-8') !== false ||
+                mb_strpos($original_label_lower, $response_label_lower, 0, 'UTF-8') !== false
+            ) {
                 return $field_key;
             }
         }
-        
+
         // Third, try matching by field key name (for ACF fields)
         // If response label matches the field key name (without acf_ prefix)
         foreach ($original_labels as $field_key => $original_label) {
             $field_name = str_replace(array('acf_', 'meta_'), '', $field_key);
             $field_name_lower = mb_strtolower($field_name, 'UTF-8');
-            
-            if ($response_label_lower === $field_name_lower || 
+
+            if (
+                $response_label_lower === $field_name_lower ||
                 mb_strpos($response_label_lower, $field_name_lower, 0, 'UTF-8') !== false ||
-                mb_strpos($field_name_lower, $response_label_lower, 0, 'UTF-8') !== false) {
+                mb_strpos($field_name_lower, $response_label_lower, 0, 'UTF-8') !== false
+            ) {
                 return $field_key;
             }
         }
-        
+
         // Fourth, try character similarity (for translated labels)
         // This helps when "Title" becomes "Titel" (Afrikaans), "Título" (Spanish), or "Заглавие" (Bulgarian)
         $best_match = null;
         $best_similarity = 0;
-        
+
         foreach ($original_labels as $field_key => $original_label) {
             $original_label_lower = mb_strtolower($original_label, 'UTF-8');
-            
+
             // Calculate similarity using similar_text (works with UTF-8)
             similar_text($response_label_lower, $original_label_lower, $similarity);
-            
+
             // For non-Latin scripts, similarity might be low, so we also check length
             $length_diff = abs(mb_strlen($response_label_lower, 'UTF-8') - mb_strlen($original_label_lower, 'UTF-8'));
             $max_length = max(mb_strlen($response_label_lower, 'UTF-8'), mb_strlen($original_label_lower, 'UTF-8'));
-            
+
             // If lengths are similar and similarity is reasonable, consider it a match
             if ($max_length > 0 && ($length_diff / $max_length) < 0.5 && $similarity > 40) {
                 if ($similarity > $best_similarity) {
@@ -973,15 +1113,15 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         // Lower threshold for non-Latin scripts (Cyrillic, etc.)
         if ($best_match && $best_similarity > 40) {
             return $best_match;
         }
-        
+
         return null;
     }
-    
+
     /**
      * Create a new WordPress post with translated content
      *
@@ -991,13 +1131,14 @@ class Xf_Translator_Processor {
      * @param array $original_data Original post data
      * @return int|false Translated post ID or false on failure
      */
-    private function create_translated_post($original_post_id, $target_language, $translated_data, $original_data) {
+    private function create_translated_post($original_post_id, $target_language, $translated_data, $original_data)
+    {
         $original_post = get_post($original_post_id);
-        
+
         if (!$original_post) {
             return false;
         }
-        
+
         // Get language prefix for meta key (use prefix for consistency)
         $languages = $this->settings->get('languages', array());
         $language_prefix = '';
@@ -1007,42 +1148,66 @@ class Xf_Translator_Processor {
                 break;
             }
         }
-        
+
         // Check if translated post already exists (use prefix for meta key)
         $existing_translated_post_id = get_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, true);
-        
+
+        // Store original post status - we'll create as draft first if publish to avoid featured image requirement
+        $original_post_status = $original_post->post_status;
+
         // Prepare post data
         $post_data = array(
             'post_type' => $original_post->post_type,
-            'post_status' => $original_post->post_status,
+            'post_status' => ($original_post_status === 'publish') ? 'draft' : $original_post_status,
             'post_author' => $original_post->post_author,
             'post_parent' => $original_post->post_parent,
             'menu_order' => $original_post->menu_order,
             'comment_status' => $original_post->comment_status,
             'ping_status' => $original_post->ping_status,
         );
-        
+
         // Set translated title
         if (isset($translated_data['title']) && !empty($translated_data['title'])) {
             $post_data['post_title'] = $translated_data['title'];
         } else {
             $post_data['post_title'] = $original_post->post_title . ' (' . $target_language . ')';
         }
-        
+
         // Set translated content
         if (isset($translated_data['content']) && !empty($translated_data['content'])) {
+            // Preserve HTML structure - WordPress will sanitize but we want to keep tables and other HTML
+            // Use wp_kses_post to allow standard HTML including tables, but bypass if content is already sanitized
             $post_data['post_content'] = $translated_data['content'];
+
+            // Log content length for debugging
+            error_log('XF Translator: Setting post_content, length: ' . strlen($translated_data['content']) . ' chars');
+            error_log('XF Translator: Content preview (first 500 chars): ' . substr($translated_data['content'], 0, 500));
+
+            // Check for table HTML
+            if (strpos($translated_data['content'], '<table') !== false) {
+                error_log('XF Translator: Content contains <table> tag - HTML should be preserved');
+                $table_pos = strpos($translated_data['content'], '<table');
+                error_log('XF Translator: Table starts at position: ' . $table_pos);
+                error_log('XF Translator: Table HTML preview: ' . substr($translated_data['content'], $table_pos, 300));
+            } else {
+                error_log('XF Translator: WARNING - Content does NOT contain <table> tag!');
+            }
+
+            // Check language - log first few words to verify
+            $first_words = substr(strip_tags($translated_data['content']), 0, 100);
+            error_log('XF Translator: Content first words (no HTML): ' . $first_words);
         } else {
+            error_log('XF Translator: WARNING - No translated content found, using original post content');
             $post_data['post_content'] = $original_post->post_content;
         }
-        
+
         // Set translated excerpt
         if (isset($translated_data['excerpt']) && !empty($translated_data['excerpt'])) {
             $post_data['post_excerpt'] = $translated_data['excerpt'];
         } else {
             $post_data['post_excerpt'] = $original_post->post_excerpt;
         }
-        
+
         // Generate slug: Store only original English slug (without prefix)
         // WordPress sanitizes slugs and converts slashes to dashes, so we'll use
         // a permalink filter to add the language prefix to the URL
@@ -1051,59 +1216,122 @@ class Xf_Translator_Processor {
             // Fallback: generate slug from original title if post_name is empty
             $original_slug = sanitize_title($original_post->post_title);
         }
-        
+
         // Store just the original slug (prefix will be added via permalink filter)
         $post_data['post_name'] = $original_slug;
-        
+
         // Copy categories and tags
         $categories = wp_get_post_categories($original_post_id, array('fields' => 'ids'));
         if (!empty($categories)) {
             $post_data['post_category'] = $categories;
         }
-        
+
         $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));
         if (!empty($tags)) {
             $post_data['tags_input'] = $tags;
         }
-        
+
         // Set flag to prevent post listener from processing this new translated post
         self::$creating_translated_post = true;
-        
+
         // Create or update post
         if ($existing_translated_post_id && get_post($existing_translated_post_id)) {
             // Update existing translated post
             $post_data['ID'] = $existing_translated_post_id;
+            // For updates, keep original status (don't change to draft)
+            $post_data['post_status'] = $original_post_status;
             $translated_post_id = wp_update_post($post_data, true);
         } else {
             // Create new translated post
             $translated_post_id = wp_insert_post($post_data, true);
         }
-        
+
         // Clear flag
         self::$creating_translated_post = false;
-        
+
         if (is_wp_error($translated_post_id)) {
             return false;
         }
-        
+
+        // Verify table HTML was preserved after saving
+        if (isset($translated_data['content']) && strpos($translated_data['content'], '<table') !== false) {
+            $saved_post = get_post($translated_post_id);
+            if ($saved_post) {
+                $saved_content = $saved_post->post_content;
+                if (strpos($saved_content, '<table') === false) {
+                    error_log('XF Translator: WARNING - Table HTML was stripped during save! Original had table, saved content does not.');
+                    error_log('XF Translator: Attempting to re-save with table HTML preserved...');
+
+                    // Try to re-save with the original content that has tables
+                    // Use wp_update_post with the raw content
+                    $update_data = array(
+                        'ID' => $translated_post_id,
+                        'post_content' => $translated_data['content']
+                    );
+                    wp_update_post($update_data);
+
+                    // Verify again
+                    $saved_post_after = get_post($translated_post_id);
+                    if ($saved_post_after && strpos($saved_post_after->post_content, '<table') !== false) {
+                        error_log('XF Translator: Successfully re-saved with table HTML preserved.');
+                    } else {
+                        error_log('XF Translator: ERROR - Table HTML still missing after re-save. WordPress may be stripping table tags.');
+                    }
+                } else {
+                    error_log('XF Translator: Table HTML successfully preserved in saved post.');
+                }
+            }
+        }
+
         // Link translated post to original (use prefix for meta keys)
         update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
         update_post_meta($translated_post_id, '_xf_translator_language', $language_prefix);
         update_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, $translated_post_id);
-        
+
+        // Copy featured image from original post
+        $thumbnail_id = get_post_thumbnail_id($original_post_id);
+        if ($thumbnail_id) {
+            $thumbnail_set = set_post_thumbnail($translated_post_id, $thumbnail_id);
+            if (!$thumbnail_set) {
+                error_log('XF Translator: Failed to set featured image for translated post ID: ' . $translated_post_id . ' from original post ID: ' . $original_post_id);
+            }
+        } else {
+            error_log('XF Translator: Original post ID: ' . $original_post_id . ' does not have a featured image. Translated post may fail to publish if featured image is required.');
+        }
+
+        // If original post was published, update status back to publish (after featured image is set)
+        if ($original_post_status === 'publish') {
+            // Verify featured image was set before publishing (if original had one)
+            if ($thumbnail_id) {
+                $verify_thumbnail = get_post_thumbnail_id($translated_post_id);
+                if (!$verify_thumbnail) {
+                    error_log('XF Translator: Warning - Featured image not found on translated post before publishing. Post ID: ' . $translated_post_id);
+                }
+            }
+
+            $update_result = wp_update_post(array(
+                'ID' => $translated_post_id,
+                'post_status' => 'publish'
+            ), true);
+
+            if (is_wp_error($update_result)) {
+                error_log('XF Translator: Failed to update post status to publish. Error: ' . $update_result->get_error_message());
+            }
+        }
+
         // Copy and translate custom fields/ACF fields
         foreach ($original_data as $field_key => $original_value) {
             // Skip standard WordPress fields
             if (in_array($field_key, array('title', 'content', 'excerpt'))) {
                 continue;
             }
-            
+
             // Get translated value if available
             $translated_value = isset($translated_data[$field_key]) ? $translated_data[$field_key] : $original_value;
-            
+
             // Remove prefix to get actual field name
             $actual_field_name = str_replace(array('acf_', 'meta_'), '', $field_key);
-            
+
             // Update the field
             if (strpos($field_key, 'acf_') === 0 && function_exists('update_field')) {
                 // ACF field
@@ -1113,64 +1341,86 @@ class Xf_Translator_Processor {
                 update_post_meta($translated_post_id, $actual_field_name, $translated_value);
             }
         }
-        
-        // Copy taxonomies from original post
+
+        // Copy taxonomies from original post, using translated terms if available
         $taxonomies = get_object_taxonomies($original_post->post_type);
+        require_once plugin_dir_path(__FILE__) . 'class-taxonomy-translation-processor.php';
+        $taxonomy_processor = new Xf_Translator_Taxonomy_Processor();
+
         foreach ($taxonomies as $taxonomy) {
             $terms = wp_get_post_terms($original_post_id, $taxonomy, array('fields' => 'ids'));
             if (!is_wp_error($terms) && !empty($terms)) {
-                wp_set_post_terms($translated_post_id, $terms, $taxonomy);
+                // Get translated term IDs
+                $translated_term_ids = $taxonomy_processor->get_translated_term_ids($terms, $language_prefix);
+
+                // Use translated terms if available, otherwise use original terms
+                $terms_to_assign = array();
+                foreach ($terms as $term_id) {
+                    if (isset($translated_term_ids[$term_id])) {
+                        $terms_to_assign[] = $translated_term_ids[$term_id];
+                    } else {
+                        // If no translation exists, use original term
+                        $terms_to_assign[] = $term_id;
+                    }
+                }
+
+                if (!empty($terms_to_assign)) {
+                    wp_set_post_terms($translated_post_id, $terms_to_assign, $taxonomy);
+                }
             }
         }
-        
+
         return $translated_post_id;
     }
-    
+
     /**
      * Check if we're currently creating a translated post
      *
      * @return bool
      */
-    public static function is_creating_translated_post() {
+    public static function is_creating_translated_post()
+    {
         return self::$creating_translated_post;
     }
-    
+
     /**
      * Get the last error message
      *
      * @return string
      */
-    public function get_last_error() {
+    public function get_last_error()
+    {
         return $this->last_error;
     }
-    
+
     /**
      * Process a specific queue entry by ID
      *
      * @param int $queue_entry_id Queue entry ID
      * @return array|false Processing result or false on failure
      */
-    public function process_queue_entry_by_id($queue_entry_id) {
+    public function process_queue_entry_by_id($queue_entry_id)
+    {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
-        
+
         // Get the specific queue entry
         $queue_entry = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM $table_name WHERE id = %d",
             $queue_entry_id
         ), ARRAY_A);
-        
+
         if (!$queue_entry) {
             $this->last_error = "Queue entry not found for ID: {$queue_entry_id}";
             return false;
         }
-        
+
         // Only process if status is pending or failed (for retry)
         if ($queue_entry['status'] !== 'pending' && $queue_entry['status'] !== 'failed') {
             $this->last_error = "Queue entry #{$queue_entry_id} is not in a processable state (current status: {$queue_entry['status']})";
             return false;
         }
-        
+
         // Update status to processing
         $wpdb->update(
             $table_name,
@@ -1179,10 +1429,10 @@ class Xf_Translator_Processor {
             array('%s'),
             array('%d')
         );
-        
+
         $post_id = intval($queue_entry['parent_post_id']);
         $target_language_name = $queue_entry['lng'];
-        
+
         // Get language prefix from name
         $languages = $this->settings->get('languages', array());
         $target_language_prefix = '';
@@ -1192,7 +1442,7 @@ class Xf_Translator_Processor {
                 break;
             }
         }
-        
+
         if (empty($target_language_prefix)) {
             $this->last_error = "Language prefix not found for language name: {$target_language_name}";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1208,15 +1458,15 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Check if this is an EDIT type entry
         if (isset($queue_entry['type']) && $queue_entry['type'] === 'EDIT') {
             return $this->process_edit_translation($queue_entry);
         }
-        
+
         // Get post data
         $post_data = $this->get_post_data($post_id);
-        
+
         if (!$post_data) {
             $this->last_error = "Post data not found for post ID: {$post_id}";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1232,15 +1482,15 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Build prompt
         $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
         $prompt = $prompt_data['prompt'];
         $placeholders_map = $prompt_data['placeholders_map'];
-        
+
         // Call API (use prefix for API calls) - API logging is handled inside the function
         $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry_id, $post_id);
-        
+
         if ($translation_result === false) {
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
             error_log('XF Translator Error: ' . $detailed_error);
@@ -1256,10 +1506,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Parse the structured translation response
         $parsed_translation = $this->parse_translation_response($translation_result, $post_data);
-        
+
         // Restore HTML tags and URLs from placeholders
         if (!empty($parsed_translation) && !empty($placeholders_map)) {
             foreach ($parsed_translation as $field => $value) {
@@ -1268,17 +1518,17 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         if (!$parsed_translation) {
             $this->last_error = "Failed to parse translation response. Response format may be incorrect.";
             error_log('XF Translator Error: ' . $this->last_error);
             error_log('XF Translator: Full translation response length: ' . strlen($translation_result));
             error_log('XF Translator: Translation response (first 1000 chars): ' . substr($translation_result, 0, 1000));
             error_log('XF Translator: Original post data fields: ' . implode(', ', array_keys($post_data)));
-            
+
             // Save the raw response for manual inspection
             update_post_meta($post_id, '_xf_translator_raw_response_' . $queue_entry_id, $translation_result);
-            
+
             $wpdb->update(
                 $table_name,
                 array(
@@ -1291,10 +1541,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Check if translated post already exists
         $translated_post_id = get_post_meta($post_id, '_xf_translator_translated_post_' . $target_language_prefix, true);
-        
+
         if ($translated_post_id && get_post($translated_post_id)) {
             // Update existing translated post
             $updated_post_id = $this->update_translated_post($translated_post_id, $parsed_translation, $queue_entry_id);
@@ -1302,7 +1552,7 @@ class Xf_Translator_Processor {
             // Create new translated post
             $updated_post_id = $this->create_translated_post($post_id, $parsed_translation, $target_language_prefix, $queue_entry_id);
         }
-        
+
         if (!$updated_post_id) {
             $this->last_error = "Failed to create or update translated post";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1318,7 +1568,7 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Update queue entry with translated post ID and mark as completed
         $wpdb->update(
             $table_name,
@@ -1331,7 +1581,7 @@ class Xf_Translator_Processor {
             array('%s', '%d', '%s'),
             array('%d')
         );
-        
+
         return array(
             'success' => true,
             'queue_entry_id' => $queue_entry_id,
@@ -1340,25 +1590,26 @@ class Xf_Translator_Processor {
             'language' => $target_language_name
         );
     }
-    
+
     /**
      * Process EDIT type translation - update existing translated post with only edited fields
      *
      * @param array $queue_entry Queue entry array
      * @return array|false Processing result or false on failure
      */
-    private function process_edit_translation($queue_entry) {
+    private function process_edit_translation($queue_entry)
+    {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
-        
+
         $post_id = intval($queue_entry['parent_post_id']);
         $translated_post_id = intval($queue_entry['translated_post_id']);
         $target_language_name = $queue_entry['lng'];
-        
+
         // Get edited fields from queue entry
         $edited_fields_json = isset($queue_entry['edited_fields']) ? $queue_entry['edited_fields'] : '';
         $edited_fields = !empty($edited_fields_json) ? json_decode($edited_fields_json, true) : array();
-        
+
         if (empty($edited_fields)) {
             $this->last_error = "No edited fields found in queue entry";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1374,7 +1625,7 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Get language prefix
         $languages = $this->settings->get('languages', array());
         $target_language_prefix = '';
@@ -1384,7 +1635,7 @@ class Xf_Translator_Processor {
                 break;
             }
         }
-        
+
         if (empty($target_language_prefix)) {
             $this->last_error = "Language prefix not found for language name: {$target_language_name}";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1400,10 +1651,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Get full post data
         $full_post_data = $this->get_post_data($post_id);
-        
+
         if (!$full_post_data) {
             $this->last_error = "Post data not found for post ID: {$post_id}";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1419,7 +1670,7 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Filter post data to only include edited fields
         $edited_post_data = array();
         foreach ($edited_fields as $field) {
@@ -1427,7 +1678,7 @@ class Xf_Translator_Processor {
                 $edited_post_data[$field] = $full_post_data[$field];
             }
         }
-        
+
         if (empty($edited_post_data)) {
             $this->last_error = "No matching post data found for edited fields";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1443,15 +1694,15 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Build prompt with only edited fields
         $prompt_data = $this->build_translation_prompt($edited_post_data, $target_language_name);
         $prompt = $prompt_data['prompt'];
         $placeholders_map = $prompt_data['placeholders_map'];
-        
+
         // Call API
         $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id);
-        
+
         if ($translation_result === false) {
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
             error_log('XF Translator Error: ' . $detailed_error);
@@ -1467,10 +1718,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Parse the structured translation response
         $parsed_translation = $this->parse_translation_response($translation_result, $edited_post_data);
-        
+
         // Restore HTML tags and URLs from placeholders
         if (!empty($parsed_translation) && !empty($placeholders_map)) {
             foreach ($parsed_translation as $field => $value) {
@@ -1479,7 +1730,7 @@ class Xf_Translator_Processor {
                 }
             }
         }
-        
+
         if (!$parsed_translation) {
             $this->last_error = "Failed to parse translation response. Response format may be incorrect.";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1496,10 +1747,10 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Update existing translated post (not create new)
         $update_result = $this->update_translated_post($translated_post_id, $parsed_translation, $edited_fields);
-        
+
         if ($update_result === false) {
             $this->last_error = "Failed to update translated post. Check WordPress permissions and post data.";
             error_log('XF Translator Error: ' . $this->last_error);
@@ -1515,7 +1766,7 @@ class Xf_Translator_Processor {
             );
             return false;
         }
-        
+
         // Update status to completed
         $wpdb->update(
             $table_name,
@@ -1526,7 +1777,7 @@ class Xf_Translator_Processor {
             array('%s'),
             array('%d')
         );
-        
+
         return array(
             'queue_id' => $queue_entry['id'],
             'post_id' => $post_id,
@@ -1536,7 +1787,7 @@ class Xf_Translator_Processor {
             'edited_fields' => $edited_fields
         );
     }
-    
+
     /**
      * Update existing translated post with new translated content
      *
@@ -1545,25 +1796,26 @@ class Xf_Translator_Processor {
      * @param array $edited_fields Array of field names that were edited
      * @return bool Success status
      */
-    private function update_translated_post($translated_post_id, $translated_data, $edited_fields) {
+    private function update_translated_post($translated_post_id, $translated_data, $edited_fields)
+    {
         $translated_post = get_post($translated_post_id);
-        
+
         if (!$translated_post) {
             return false;
         }
-        
+
         // Get original post ID to preserve slug format
         $original_post_id = get_post_meta($translated_post_id, '_xf_translator_original_post_id', true);
         if (!$original_post_id) {
             $original_post_id = get_post_meta($translated_post_id, '_api_translator_original_post_id', true);
         }
-        
+
         // Get language prefix
         $language_prefix = get_post_meta($translated_post_id, '_xf_translator_language', true);
-        
+
         // Prepare update data
         $update_data = array('ID' => $translated_post_id);
-        
+
         // Update only the edited fields
         foreach ($edited_fields as $field) {
             if ($field === 'title' && isset($translated_data['title'])) {
@@ -1586,7 +1838,7 @@ class Xf_Translator_Processor {
                 update_post_meta($translated_post_id, $meta_field_name, $translated_data[$field]);
             }
         }
-        
+
         // Update the post
         if (count($update_data) > 1) { // More than just ID
             $result = wp_update_post($update_data, true);
@@ -1594,8 +1846,156 @@ class Xf_Translator_Processor {
                 return false;
             }
         }
-        
+
         return true;
+    }
+
+    /**
+     * Test translation without creating posts
+     * Used for testing different models and prompts
+     *
+     * @param int $post_id Original post ID
+     * @param string $target_language Target language name
+     * @param string $model Model to use for testing
+     * @param string $prompt_template 'current' to use current brand tone, 'custom' to use custom prompt
+     * @param string $custom_prompt Custom prompt template (if prompt_template is 'custom')
+     * @return array|WP_Error Translated content array or WP_Error
+     */
+    public function test_translation($post_id, $target_language, $model, $prompt_template = 'current', $custom_prompt = '')
+    {
+        // Get post data
+        $post_data = $this->get_post_data($post_id);
+
+        if (!$post_data) {
+            return new WP_Error('no_post_data', __('Post data not found.', 'xf-translator'));
+        }
+
+        // Get language prefix
+        $languages = $this->settings->get('languages', array());
+        $target_language_prefix = '';
+        foreach ($languages as $lang) {
+            if ($lang['name'] === $target_language) {
+                $target_language_prefix = $lang['prefix'];
+                break;
+            }
+        }
+
+        if (empty($target_language_prefix)) {
+            return new WP_Error('invalid_language', __('Invalid target language.', 'xf-translator'));
+        }
+
+        // Build prompt
+        if ($prompt_template === 'custom' && !empty($custom_prompt)) {
+            // Use custom prompt
+            $prompt = str_replace('{content}', $this->build_content_string($post_data), $custom_prompt);
+            $prompt = str_replace('{lng}', $target_language, $prompt);
+
+            // Add glossary terms if configured
+            $glossary_terms = $this->settings->get('glossary_terms', array());
+            if (!empty($glossary_terms)) {
+                $glossary_items = array();
+                foreach ($glossary_terms as $term_data) {
+                    $glossary_items[] = $term_data['term'];
+                }
+                $glossary_list = implode(', ', $glossary_items);
+                // Replace {glossy} with just the glossary list
+                // The instruction text should already be in the template around {glossy}
+                $prompt = str_replace('{glossy}', $glossary_list, $prompt);
+            } else {
+                $prompt = str_replace('{glossy}', '', $prompt);
+            }
+        } else {
+            // Use current brand tone template
+            $prompt_data = $this->build_translation_prompt($post_data, $target_language);
+            $prompt = $prompt_data['prompt'];
+        }
+
+        // Temporarily override model for this test
+        $original_model = $this->settings->get('selected_model', 'gpt-4o');
+        $this->settings->update('selected_model', $model);
+
+        // Call API with test mode (no post creation, no queue)
+        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, 0, $post_id);
+
+        // Restore original model
+        $this->settings->update('selected_model', $original_model);
+
+        if ($translation_result === false) {
+            return new WP_Error('api_error', $this->last_error ?: __('Translation API call failed.', 'xf-translator'));
+        }
+
+        // Parse the translation response
+        $parsed_translation = $this->parse_translation_response($translation_result, $post_data);
+
+        if (!$parsed_translation) {
+            return new WP_Error('parse_error', __('Failed to parse translation response.', 'xf-translator'));
+        }
+
+        // Get token usage from the API call
+        $tokens_used = $this->last_test_tokens;
+
+        return array(
+            'title' => $parsed_translation['title'] ?? '',
+            'content' => $parsed_translation['content'] ?? '',
+            'excerpt' => $parsed_translation['excerpt'] ?? '',
+            'tokens_used' => $tokens_used
+        );
+    }
+
+    /**
+     * Build content string from post data for custom prompts
+     *
+     * @param array $post_data Post data array
+     * @return string Content string
+     */
+    private function build_content_string($post_data)
+    {
+        $content_parts = array();
+
+        foreach ($post_data as $field => $value) {
+            if (!empty($value)) {
+                $field_label = ucfirst(str_replace(array('acf_', 'meta_'), '', $field));
+                $content_parts[] = "{$field_label}: {$value}";
+            }
+        }
+
+        return implode("\n\n", $content_parts);
+    }
+
+    /**
+     * Get max_tokens limit for a specific model
+     *
+     * @param string $model Model name
+     * @return int Max tokens allowed
+     */
+    private function get_max_tokens_for_model($model)
+    {
+        // Model-specific max_tokens limits
+        $model_limits = array(
+            // GPT-4 models
+            'gpt-4o' => 16384,           // GPT-4o supports up to 16k output tokens
+            'gpt-4o-mini' => 16384,      // GPT-4o Mini supports up to 16k output tokens
+            'gpt-4-turbo' => 4096,       // GPT-4 Turbo supports up to 4k output tokens
+            'gpt-4' => 4096,             // GPT-4 supports up to 4k output tokens
+            'gpt-4-32k' => 32768,        // GPT-4 32k supports up to 32k output tokens
+
+            // GPT-3.5 models
+            'gpt-3.5-turbo' => 4096,     // GPT-3.5 Turbo supports up to 4k output tokens
+            'gpt-3.5-turbo-16k' => 16384, // GPT-3.5 Turbo 16k supports up to 16k output tokens
+
+            // DeepSeek models
+            'deepseek-chat' => 8192,     // DeepSeek Chat supports up to 8k output tokens
+            'deepseek-coder' => 8192,    // DeepSeek Coder supports up to 8k output tokens
+            'deepseek-chat-32k' => 32768, // DeepSeek Chat 32k supports up to 32k output tokens
+        );
+
+        // Return model-specific limit or default to 4000 for safety
+        if (isset($model_limits[$model])) {
+            return $model_limits[$model];
+        }
+
+        // Default to 4000 for unknown models (safe default)
+        return 4000;
     }
 }
 
