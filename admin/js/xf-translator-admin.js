@@ -25,6 +25,7 @@
         // Close Modal
         $('.api-translator-modal-close, .cancel-edit').on('click', function() {
             $('#edit-language-modal').fadeOut();
+            $('#error-detail-modal').fadeOut();
         });
         
         // Close modal when clicking outside
@@ -32,6 +33,24 @@
             if ($(event.target).hasClass('api-translator-modal')) {
                 $(event.target).fadeOut();
             }
+        });
+        
+        // Error Detail Modal
+        $(document).on('click', '.view-error-detail', function() {
+            var errorMessage = $(this).data('error-message');
+            var queueId = $(this).data('queue-id');
+            
+            if (!errorMessage || errorMessage.trim() === '') {
+                errorMessage = 'No error message available.';
+            }
+            
+            $('#error-detail-content').html(
+                '<div style="margin-bottom: 15px;"><strong>Queue Entry ID:</strong> #' + queueId + '</div>' +
+                '<div style="margin-bottom: 10px;"><strong>Error Message:</strong></div>' +
+                '<div>' + $('<div>').text(errorMessage).html() + '</div>'
+            );
+            
+            $('#error-detail-modal').fadeIn();
         });
         
         // Form validation

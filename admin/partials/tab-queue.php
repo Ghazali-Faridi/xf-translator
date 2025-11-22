@@ -130,7 +130,6 @@ $recent_jobs = $wpdb->get_results(
                             </span>
                         </td>
                         <td>
-
                            <?php 
                             $color="#f0ad4e";
                             if($job['status']=="pending"){
@@ -145,11 +144,30 @@ $recent_jobs = $wpdb->get_results(
                                 $color="red";
                             }
 
-
-                                ?>
-                            <span style="padding: 3px 8px; background: <?php echo $color; ?>; color: #fff; border-radius: 3px; font-size: 11px;">
+                            $error_message = isset($job['error_message']) ? $job['error_message'] : '';
+                            ?>
+                            <span style="padding: 3px 8px; background: <?php echo $color; ?>; color: #fff; border-radius: 3px; font-size: 11px; margin-right: 5px;">
                                 <?php echo esc_html(ucfirst($job['status'])); ?>
                             </span>
+                            <?php if($job['status']=="failed") : ?>
+                                <div style="margin-top: 5px;">
+                                    <button type="button" 
+                                            class="button button-small view-error-detail" 
+                                            data-error-message="<?php echo esc_attr($error_message); ?>"
+                                            data-queue-id="<?php echo esc_attr($job['id']); ?>"
+                                            style="margin-right: 5px; font-size: 11px;">
+                                        <?php _e('View Detail', 'xf-translator'); ?>
+                                    </button>
+                                    <form method="post" action="" style="display: inline-block; margin: 0;">
+                                        <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+                                        <input type="hidden" name="api_translator_action" value="retry_queue_entry">
+                                        <input type="hidden" name="queue_entry_id" value="<?php echo esc_attr($job['id']); ?>">
+                                        <button type="submit" class="button button-small" style="background: #46b450; color: #fff; border-color: #46b450; font-size: 11px;">
+                                            <?php _e('Retry', 'xf-translator'); ?>
+                                        </button>
+                                    </form>
+                                </div>
+                            <?php endif; ?>
                         </td>
                         <td>
                             <?php echo esc_html($job['created']); ?>
@@ -377,4 +395,65 @@ $recent_jobs = $wpdb->get_results(
         </table>
     <?php endif; ?>
 </div> -->
+
+<!-- Error Detail Modal -->
+<div id="error-detail-modal" class="api-translator-modal" style="display: none;">
+    <div class="api-translator-modal-content" style="max-width: 700px; max-height: 80vh; overflow-y: auto;">
+        <div class="api-translator-modal-header" style="padding: 15px 20px; background: #dc3232; color: #fff; border-bottom: 1px solid #ddd;">
+            <h2 style="margin: 0; font-size: 18px;"><?php _e('Translation Error Details', 'xf-translator'); ?></h2>
+            <span class="api-translator-modal-close" style="float: right; cursor: pointer; font-size: 24px; line-height: 1; opacity: 0.8;">&times;</span>
+        </div>
+        <div class="api-translator-modal-body" style="padding: 20px;">
+            <div id="error-detail-content">
+                <p style="margin: 0; color: #666;"><?php _e('Loading error details...', 'xf-translator'); ?></p>
+            </div>
+        </div>
+        <div class="api-translator-modal-footer" style="padding: 15px 20px; background: #f9f9f9; border-top: 1px solid #ddd; text-align: right;">
+            <button type="button" class="button api-translator-modal-close"><?php _e('Close', 'xf-translator'); ?></button>
+        </div>
+    </div>
+</div>
+
+<style>
+.api-translator-modal {
+    position: fixed;
+    z-index: 100000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.api-translator-modal-content {
+    background-color: #fff;
+    border-radius: 4px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    position: relative;
+}
+
+.api-translator-modal-close {
+    cursor: pointer;
+}
+
+.api-translator-modal-close:hover {
+    opacity: 1 !important;
+}
+
+#error-detail-content {
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #333;
+    background: #f9f9f9;
+    padding: 15px;
+    border-radius: 4px;
+    border-left: 4px solid #dc3232;
+}
+</style>
 

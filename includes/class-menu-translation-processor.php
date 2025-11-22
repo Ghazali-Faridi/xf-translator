@@ -71,11 +71,8 @@ class Xf_Translator_Menu_Processor {
         
         // Create or get translated menu
         if (!$translated_menu) {
-            // Create new menu with translated name
-            $translated_menu_name = $this->translate_menu_name($menu->name, $target_language);
-            if (is_wp_error($translated_menu_name)) {
-                return $translated_menu_name;
-            }
+            // Don't translate menu name - just use original name with language prefix
+            $translated_menu_name = $menu->name . ' (' . strtoupper($target_language_prefix) . ')';
             
             $translated_menu_result = wp_create_nav_menu($translated_menu_name);
             
@@ -102,14 +99,24 @@ class Xf_Translator_Menu_Processor {
         
         // Translate each menu item
         $parent_map = array(); // Map original menu item IDs to translated menu item IDs
+        $items_translated = 0;
+        $items_failed = 0;
         
         foreach ($menu_items as $menu_item) {
+            error_log('XF Translator: Translating menu item: ' . $menu_item->title . ' (ID: ' . $menu_item->ID . ')');
             $translated_item_id = $this->translate_menu_item_to_menu($menu_item, $translated_menu_id, $target_language, $target_language_prefix, $parent_map);
             
             if (!is_wp_error($translated_item_id)) {
                 $parent_map[$menu_item->ID] = $translated_item_id;
+                $items_translated++;
+                error_log('XF Translator: Successfully translated menu item: ' . $menu_item->title);
+            } else {
+                $items_failed++;
+                error_log('XF Translator: Failed to translate menu item: ' . $menu_item->title . ' - Error: ' . $translated_item_id->get_error_message());
             }
         }
+        
+        error_log('XF Translator: Menu translation complete. Items translated: ' . $items_translated . ', Items failed: ' . $items_failed);
         
         return $translated_menu_id;
     }
@@ -267,16 +274,7 @@ class Xf_Translator_Menu_Processor {
             return new WP_Error('invalid_language', __('Invalid target language.', 'xf-translator'));
         }
         
-        // Build simple translation prompt
-        $brand_tone_template = $this->settings->get('brand_tone', '');
-        if (empty($brand_tone_template)) {
-            $brand_tone_template = "You need to translate the following {content} in {lng} but dont translate any brand name / company name you are expert content translator your tone should be professional & should seo optimized dont translate any [] square brackets and square bracket's inside content";
-        }
-        
-        $prompt = str_replace('{content}', $text, $brand_tone_template);
-        $prompt = str_replace('{lng}', $target_language, $prompt);
-        
-        // Get glossary terms
+        // Get glossary terms for exclusion
         $glossary_terms = $this->settings->get('glossary_terms', array());
         $glossary_list = '';
         if (!empty($glossary_terms)) {
@@ -287,16 +285,15 @@ class Xf_Translator_Menu_Processor {
             $glossary_list = implode(', ', $glossary_items);
         }
         
-        // Replace {glossy} with just the glossary list
-        // The instruction text should already be in the template around {glossy}
+        // Build short, dedicated prompt for menu translation
+        $prompt = "Translate the following menu item text to {$target_language}: {$text}";
+        
+        // Add glossary exclusion if terms exist
         if (!empty($glossary_list)) {
-            $prompt = str_replace('{glossy}', $glossary_list, $prompt);
-        } else {
-            $prompt = str_replace('{glossy}', '', $prompt);
+            $prompt .= "\n\nDo not translate these words: {$glossary_list}";
         }
         
-        // Add instructions about HTML tags and images
-        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n- Do NOT translate HTML tags. Keep all HTML tags exactly as they appear, including all attributes, opening tags, closing tags, and self-closing tags.\n- Do NOT translate images. Keep all image tags (<img>), image URLs, image attributes (src, alt, etc.), and any image references exactly as they appear.\n- Only translate the actual text content that appears between HTML tags or outside of HTML tags. HTML tags and images must remain completely unchanged.";
+        $prompt .= "\n\nReturn only the translated text, nothing else.";
         
         // Call API using reflection to access private method
         $reflection = new ReflectionClass($this->translation_processor);

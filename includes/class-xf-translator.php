@@ -223,6 +223,24 @@ class Xf_Translator {
 		
 		// Filter query to find translated posts by language prefix
 		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_translated_post_query', 10, 1 );
+		
+		// Filter all queries to show only content for current language
+		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_content_by_language', 5, 1 );
+		
+		// Filter menu locations to show translated menus
+		$this->loader->add_filter( 'wp_nav_menu_args', $plugin_public, 'filter_nav_menu_args', 10, 1 );
+		$this->loader->add_filter( 'wp_get_nav_menu_object', $plugin_public, 'filter_nav_menu_object', 10, 2 );
+		$this->loader->add_filter( 'wp_get_nav_menus', $plugin_public, 'filter_nav_menus', 10, 2 );
+		$this->loader->add_filter( 'theme_mod_nav_menu_locations', $plugin_public, 'filter_nav_menu_locations', 10, 1 );
+		
+		// Filter menu item URLs to add language prefix
+		$this->loader->add_filter( 'wp_setup_nav_menu_item', $plugin_public, 'filter_nav_menu_item_url', 10, 1 );
+
+		// Output canonical + hreflang tags for translated posts
+		$this->loader->add_action( 'wp_head', $plugin_public, 'output_seo_tags', 5 );
+		
+		// Floating language switcher
+		$this->loader->add_action( 'wp_footer', $plugin_public, 'render_language_switcher' );
 
 	}
 

@@ -77,6 +77,24 @@ if (!defined('ABSPATH')) {
                     </p>
                 </td>
             </tr>
+            <tr>
+                <th scope="row">
+                    <label for="processing_delay_minutes"><?php _e('Processing Delay (Minutes)', 'api-translator'); ?></label>
+                </th>
+                <td>
+                    <input type="number" 
+                           id="processing_delay_minutes" 
+                           name="processing_delay_minutes" 
+                           value="<?php echo esc_attr($processing_delay_minutes); ?>" 
+                           class="small-text"
+                           min="0"
+                           step="1"
+                           placeholder="0">
+                    <p class="description">
+                        <?php _e('Delay before processing new translation queue entries. When a new post is created, queue entries will only be processed if they are at least this many minutes old. Set to 0 to process immediately. This helps prevent processing posts that are still being edited.', 'api-translator'); ?>
+                    </p>
+                </td>
+            </tr>
         </table>
         
         <?php submit_button(__('Save API Settings', 'api-translator'), 'primary', 'submit', false); ?>

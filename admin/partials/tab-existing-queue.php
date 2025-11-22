@@ -44,6 +44,22 @@ $recent_old_jobs = $wpdb->get_results(
     <div style="margin: 20px 0; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
         <h3 style="margin-top: 0;"><?php _e('Analyze English Posts & Pages', 'xf-translator'); ?></h3>
         <p><?php _e('Select a post type below and click the button to analyze all English content of that type and check which translations are missing. Missing translations will be added to the queue with type "OLD".', 'xf-translator'); ?></p>
+        <?php
+        $selected_start_date = '';
+        $selected_end_date = '';
+        if (isset($_POST['analyze_start_date'])) {
+            $selected_start_date = sanitize_text_field($_POST['analyze_start_date']);
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $selected_start_date)) {
+                $selected_start_date = '';
+            }
+        }
+        if (isset($_POST['analyze_end_date'])) {
+            $selected_end_date = sanitize_text_field($_POST['analyze_end_date']);
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $selected_end_date)) {
+                $selected_end_date = '';
+            }
+        }
+        ?>
         <form method="post" action="" style="margin-top: 10px;">
             <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
             <input type="hidden" name="api_translator_action" value="analyze_posts">
@@ -89,6 +105,28 @@ $recent_old_jobs = $wpdb->get_results(
                         </select>
                         <p class="description">
                             <?php _e('Hold Ctrl (Windows) or Cmd (Mac) to select multiple post types. Select which post types you want to analyze.', 'xf-translator'); ?>
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label for="analyze_start_date"><?php _e('Start date (optional)', 'xf-translator'); ?></label>
+                    </th>
+                    <td>
+                        <input type="date" id="analyze_start_date" name="analyze_start_date" value="<?php echo esc_attr($selected_start_date); ?>" style="max-width: 220px;">
+                        <p class="description">
+                            <?php _e('Only analyze posts published on or after this date.', 'xf-translator'); ?>
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label for="analyze_end_date"><?php _e('End date (optional)', 'xf-translator'); ?></label>
+                    </th>
+                    <td>
+                        <input type="date" id="analyze_end_date" name="analyze_end_date" value="<?php echo esc_attr($selected_end_date); ?>" style="max-width: 220px;">
+                        <p class="description">
+                            <?php _e('Only analyze posts published on or before this date.', 'xf-translator'); ?>
                         </p>
                     </td>
                 </tr>

@@ -13,7 +13,7 @@
  * @package           Xf_Translator
  *
  * @wordpress-plugin
- * Plugin Name:       xf translator
+ * Plugin Name:       Unite.AI Translations
  * Plugin URI:        https://xfinitive.co
  * Description:       Serverside translation multilingual plugin 
  * Version:           1.0.0
@@ -70,9 +70,37 @@ require plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator.php';
  *
  * @since    1.0.0
  */
-add_filter('http_request_timeout', function() {
-	return 620; // seconds (10 minutes 20 seconds)
+add_filter('http_request_timeout', function($timeout) {
+	return 600; // 5 minutes
 });
+
+/**
+ * Increase cURL connection timeout for translation API requests
+ * This prevents connection timeouts when the API server is slow to respond
+ * 
+ * WordPress sets both CURLOPT_CONNECTTIMEOUT and CURLOPT_TIMEOUT to the same value,
+ * but we want a longer connection timeout to allow the API server time to accept the connection
+ *
+ * @since    1.0.0
+ */
+add_filter('http_api_curl', function($handle, $r, $url) {
+	// Only apply to OpenAI or DeepSeek API endpoints
+	if (strpos($url, 'api.openai.com') !== false || strpos($url, 'api.deepseek.com') !== false) {
+		// Get the timeout from request args, or use a default
+		$request_timeout = isset($r['timeout']) ? (int) $r['timeout'] : 600;
+		
+		// Set connection timeout to 120 seconds - time to establish connection
+		// This is separate from the overall request timeout
+		curl_setopt($handle, CURLOPT_CONNECTTIMEOUT, 120);
+		
+		// Keep the overall timeout as specified in the request
+		// WordPress will also set this, but we ensure it's set correctly
+		curl_setopt($handle, CURLOPT_TIMEOUT, $request_timeout);
+		
+		error_log('XF Translator: cURL options set - CONNECTTIMEOUT: 120, TIMEOUT: ' . $request_timeout);
+	}
+	return $handle;
+}, 10, 3);
 
 /**
  * Begins execution of the plugin.

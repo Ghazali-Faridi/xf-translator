@@ -20,6 +20,7 @@ $glossary_terms = $settings->get('glossary_terms', array());
 $api_key = $settings->get('api_key', '');
 $deepseek_api_key = $settings->get('deepseek_api_key', '');
 $selected_model = $settings->get('selected_model', 'gpt-4o');
+$processing_delay_minutes = $settings->get('processing_delay_minutes', 0);
 ?>
 
 <div class="wrap api-translator-settings">

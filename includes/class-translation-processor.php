@@ -62,12 +62,23 @@ class Xf_Translator_Processor
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
 
+        // Get processing delay setting (only applies to NEW type entries)
+        $processing_delay_minutes = $this->settings->get('processing_delay_minutes', 0);
+        
         // Build query with optional type filter
         $query = "SELECT * FROM $table_name 
                   WHERE status = 'pending'";
 
         if (!empty($type)) {
             $query .= $wpdb->prepare(" AND type = %s", $type);
+        }
+        
+        // Apply delay check for NEW type entries only
+        // Only process entries that are at least X minutes old
+        if (($type === 'NEW' || empty($type)) && $processing_delay_minutes > 0) {
+            // Calculate the minimum created time (current time minus delay minutes)
+            $min_created_time = date('Y-m-d H:i:s', strtotime("-{$processing_delay_minutes} minutes"));
+            $query .= $wpdb->prepare(" AND created <= %s", $min_created_time);
         }
 
         $query .= " ORDER BY id ASC LIMIT 1";
@@ -78,6 +89,10 @@ class Xf_Translator_Processor
         if (!$queue_entry) {
             if (!empty($type)) {
                 $this->last_error = "No pending entries found in queue with type '{$type}'";
+                // If delay is set and we're looking for NEW entries, mention it might be due to delay
+                if (($type === 'NEW' || empty($type)) && $processing_delay_minutes > 0) {
+                    $this->last_error .= " (or entries are not yet {$processing_delay_minutes} minutes old)";
+                }
             } else {
                 $this->last_error = 'No pending entries found in queue';
             }
@@ -536,15 +551,22 @@ class Xf_Translator_Processor
         $body = array(
             'model' => $model,
             'messages' => $messages,
-            'temperature' => 0.3,
-            'max_tokens' => $max_tokens
+            'temperature' => 0.3
         );
+        
+        // Some newer models (like gpt-5.1) require max_completion_tokens instead of max_tokens
+        // Check if model name contains version 5 or higher
+        if (preg_match('/gpt-[5-9]|o[5-9]/i', $model)) {
+            $body['max_completion_tokens'] = $max_tokens;
+        } else {
+            $body['max_tokens'] = $max_tokens;
+        }
 
-        // Calculate timeout based on content size (minimum 300 seconds, add 2 seconds per 1000 characters)
+        // Calculate timeout based on content size (minimum 600 seconds, add 10 seconds per 1000 characters)
         $content_length = strlen($prompt);
-        $calculated_timeout = max(300, 300 + intval($content_length / 1000) * 2);
-        // Cap at 900 seconds (15 minutes) to avoid extremely long waits
-        $timeout = min($calculated_timeout, 900);
+        $calculated_timeout = max(600, 600 + intval($content_length / 1000) * 10);
+        // Cap at 1800 seconds (30 minutes) to avoid extremely long waits
+        $timeout = min($calculated_timeout, 1800);
 
         // Log API request to debug.log
         $request_log = array(
@@ -601,6 +623,19 @@ class Xf_Translator_Processor
 
             return false;
         }
+
+        // Increase PHP execution time limit to allow for long API requests
+        // Set to timeout + 60 seconds buffer to ensure the request can complete
+        $php_time_limit = $timeout + 60;
+        if (function_exists('set_time_limit')) {
+            @set_time_limit($php_time_limit);
+        }
+        if (function_exists('ini_set')) {
+            @ini_set('max_execution_time', $php_time_limit);
+        }
+
+        // Log PHP execution time settings
+        error_log('XF Translator: PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds)');
 
         // Make API request
         $response = wp_remote_post($endpoint, array(
@@ -682,16 +717,20 @@ class Xf_Translator_Processor
         // Handle response
         if (is_wp_error($response)) {
             $error_message = $response->get_error_message();
+            $error_code = $response->get_error_code();
+            $current_max_execution_time = ini_get('max_execution_time');
 
             // Check if it's a timeout error
-            if (strpos($error_message, 'timeout') !== false || strpos($error_message, 'timed out') !== false) {
+            if (strpos($error_message, 'timeout') !== false || strpos($error_message, 'timed out') !== false || $error_code === 'http_request_failed') {
                 $this->last_error = "API request timed out after {$timeout} seconds. The content may be too large for a single translation request. Consider breaking the content into smaller chunks or the API may be experiencing high load. Content length: " . number_format($content_length) . " characters.";
             } else {
-                $this->last_error = "API request error: {$error_message}";
+                $this->last_error = "API request error: {$error_message} (Error code: {$error_code})";
             }
 
             error_log('XF Translator API Error: ' . $this->last_error);
             error_log('XF Translator: Timeout used: ' . $timeout . ' seconds, Content length: ' . $content_length . ' characters');
+            error_log('XF Translator: PHP max_execution_time: ' . $current_max_execution_time . ' seconds');
+            error_log('XF Translator: Raw error message: ' . $error_message . ' (Code: ' . $error_code . ')');
             return false;
         }
 
@@ -735,7 +774,7 @@ class Xf_Translator_Processor
             }
 
             if ($is_refusal) {
-                $this->last_error = "OpenAI API refused to translate the content due to content moderation policies. This often happens with cannabis-related content. Solutions: 1) Use DeepSeek model instead (less restrictive), 2) The system message has been added to help, but OpenAI may still refuse certain content. Consider using DeepSeek for this type of content.";
+                $this->last_error = "Translation failed: The content contains restricted text that cannot be translated by the API.";
                 error_log('XF Translator API Error: ' . $this->last_error);
                 error_log('XF Translator API Refusal Response: ' . $translation);
                 return false;

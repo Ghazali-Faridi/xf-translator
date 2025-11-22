@@ -45,12 +45,24 @@ $languages = $settings->get('languages', array());
                 <?php foreach ($taxonomies as $taxonomy_name => $taxonomy_obj) : ?>
                     <?php
                     // Get all terms for this taxonomy
-                    $terms = get_terms(array(
+                    $all_terms = get_terms(array(
                         'taxonomy' => $taxonomy_name,
                         'hide_empty' => false,
                     ));
                     
-                    $term_count = is_array($terms) ? count($terms) : 0;
+                    // Filter out translated terms - only show original (English) terms
+                    $terms = array();
+                    if (is_array($all_terms) && !empty($all_terms)) {
+                        foreach ($all_terms as $term) {
+                            // Skip if this is a translated term (has original_term_id meta)
+                            $original_term_id = get_term_meta($term->term_id, '_xf_translator_original_term_id', true);
+                            if (empty($original_term_id)) {
+                                $terms[] = $term;
+                            }
+                        }
+                    }
+                    
+                    $term_count = count($terms);
                     ?>
                     <tr>
                         <td>
@@ -131,10 +143,22 @@ $languages = $settings->get('languages', array());
         $selected_taxonomy = isset($_GET['taxonomy']) ? sanitize_text_field($_GET['taxonomy']) : '';
         if ($selected_taxonomy && taxonomy_exists($selected_taxonomy)) :
             $taxonomy_obj = get_taxonomy($selected_taxonomy);
-            $terms = get_terms(array(
+            $all_terms = get_terms(array(
                 'taxonomy' => $selected_taxonomy,
                 'hide_empty' => false,
             ));
+            
+            // Filter out translated terms - only show original (English) terms
+            $terms = array();
+            if (is_array($all_terms) && !empty($all_terms)) {
+                foreach ($all_terms as $term) {
+                    // Skip if this is a translated term (has original_term_id meta)
+                    $original_term_id = get_term_meta($term->term_id, '_xf_translator_original_term_id', true);
+                    if (empty($original_term_id)) {
+                        $terms[] = $term;
+                    }
+                }
+            }
             ?>
             <div style="margin-top: 30px; padding: 20px; background: #fff; border: 1px solid #ddd;">
                 <h3><?php echo esc_html($taxonomy_obj->label); ?> - <?php _e('Terms', 'xf-translator'); ?></h3>

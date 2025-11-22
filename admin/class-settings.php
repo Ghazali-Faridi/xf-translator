@@ -28,7 +28,8 @@ class Settings {
         'languages' => array(),
         'brand_tone' => '',
         'exclude_paths' => array(),
-        'glossary_terms' => array()
+        'glossary_terms' => array(),
+        'processing_delay_minutes' => 0
     );
     
     /**

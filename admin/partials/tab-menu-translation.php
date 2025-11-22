@@ -10,8 +10,20 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Get all menus
-$menus = wp_get_nav_menus();
+// Get all menus, but filter out translated menus (only show original English menus)
+$all_menus = wp_get_nav_menus();
+$menus = array();
+
+foreach ($all_menus as $menu) {
+    // Check if this is a translated menu (has original_menu_id meta)
+    $original_menu_id = get_term_meta($menu->term_id, '_xf_translator_original_menu_id', true);
+    
+    // Only include menus that are NOT translations (original menus)
+    if (empty($original_menu_id)) {
+        $menus[] = $menu;
+    }
+}
+
 $languages = $settings->get('languages', array());
 ?>
 

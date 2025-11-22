@@ -85,10 +85,17 @@ class Xf_Translator_Taxonomy_Processor {
         
         $translated_term_ids = array();
         $parent_map = array(); // Map original term IDs to translated term IDs
+        $errors = array(); // Track errors for logging
         
         // Translate terms level by level (parents first)
-        $this->translate_terms_recursive($terms_by_parent, 0, $taxonomy, $target_language, $target_language_prefix, $parent_map, $translated_term_ids);
+        $this->translate_terms_recursive($terms_by_parent, 0, $taxonomy, $target_language, $target_language_prefix, $parent_map, $translated_term_ids, $errors);
         
+        // Log any errors that occurred
+        if (!empty($errors)) {
+            error_log('XF Translator: Taxonomy translation completed with ' . count($errors) . ' error(s). Errors: ' . implode(', ', $errors));
+        }
+        
+        // Return translated IDs even if some failed (partial success is better than total failure)
         return $translated_term_ids;
     }
     
@@ -103,7 +110,7 @@ class Xf_Translator_Taxonomy_Processor {
      * @param array $parent_map Map of original to translated term IDs
      * @param array $translated_term_ids Array to collect translated term IDs
      */
-    private function translate_terms_recursive($terms_by_parent, $parent_id, $taxonomy, $target_language, $target_language_prefix, &$parent_map, &$translated_term_ids) {
+    private function translate_terms_recursive($terms_by_parent, $parent_id, $taxonomy, $target_language, $target_language_prefix, &$parent_map, &$translated_term_ids, &$errors = array()) {
         if (!isset($terms_by_parent[$parent_id]) || empty($terms_by_parent[$parent_id])) {
             return;
         }
@@ -125,8 +132,13 @@ class Xf_Translator_Taxonomy_Processor {
                 
                 // Recursively translate children
                 if (isset($terms_by_parent[$term->term_id])) {
-                    $this->translate_terms_recursive($terms_by_parent, $term->term_id, $taxonomy, $target_language, $target_language_prefix, $parent_map, $translated_term_ids);
+                    $this->translate_terms_recursive($terms_by_parent, $term->term_id, $taxonomy, $target_language, $target_language_prefix, $parent_map, $translated_term_ids, $errors);
                 }
+            } else {
+                // Log error but continue with other terms
+                $error_msg = is_wp_error($translated_term_id) ? $translated_term_id->get_error_message() : 'Unknown error';
+                $errors[] = sprintf('Term "%s" (ID: %d): %s', $term->name, $term->term_id, $error_msg);
+                error_log('XF Translator: Failed to translate term. Term: ' . $term->name . ' (ID: ' . $term->term_id . '), Error: ' . $error_msg);
             }
         }
     }
@@ -170,7 +182,14 @@ class Xf_Translator_Taxonomy_Processor {
         // Translate term name
         $translated_name = $this->translate_text($term->name, $target_language);
         if (is_wp_error($translated_name)) {
+            error_log('XF Translator: Failed to translate term name. Term ID: ' . $term_id . ', Error: ' . $translated_name->get_error_message());
             return $translated_name;
+        }
+        
+        // Check if translation is empty
+        if (empty($translated_name)) {
+            error_log('XF Translator: Translated term name is empty. Term ID: ' . $term_id . ', Original name: ' . $term->name);
+            return new WP_Error('empty_translation', __('Translation returned empty result.', 'xf-translator'));
         }
         
         // Translate term description
@@ -185,6 +204,24 @@ class Xf_Translator_Taxonomy_Processor {
         // Generate slug from translated name
         $translated_slug = sanitize_title($translated_name);
         
+        // Check if term with this slug already exists
+        $existing_term = get_term_by('slug', $translated_slug, $term->taxonomy);
+        if ($existing_term && !is_wp_error($existing_term)) {
+            // Check if this existing term is already linked to the original term
+            $existing_original_id = get_term_meta($existing_term->term_id, '_xf_translator_original_term_id', true);
+            if ($existing_original_id == $term_id) {
+                // This is the same translation, just update the relationship and return
+                update_term_meta($term_id, '_xf_translator_term_' . $target_language_prefix, $existing_term->term_id);
+                update_term_meta($existing_term->term_id, '_xf_translator_language', $target_language_prefix);
+                // Update existing translated posts that have this term
+                $this->update_translated_posts_with_term($term_id, $existing_term->term_id, $target_language_prefix, $term->taxonomy);
+                return $existing_term->term_id;
+            }
+            
+            // Term exists but is not linked - try to create with a unique slug
+            $translated_slug = $translated_slug . '-' . $target_language_prefix;
+        }
+        
         // Create translated term
         $translated_term_result = wp_insert_term(
             $translated_name,
@@ -196,6 +233,33 @@ class Xf_Translator_Taxonomy_Processor {
         );
         
         if (is_wp_error($translated_term_result)) {
+            // If term already exists error, try to find and link it
+            if ($translated_term_result->get_error_code() === 'term_exists') {
+                $existing_term_id = $translated_term_result->get_error_data('term_exists');
+                if ($existing_term_id) {
+                    // Link the existing term
+                    update_term_meta($term_id, '_xf_translator_term_' . $target_language_prefix, $existing_term_id);
+                    update_term_meta($existing_term_id, '_xf_translator_original_term_id', $term_id);
+                    update_term_meta($existing_term_id, '_xf_translator_language', $target_language_prefix);
+                    // Update existing translated posts that have this term
+                    $this->update_translated_posts_with_term($term_id, $existing_term_id, $target_language_prefix, $term->taxonomy);
+                    error_log('XF Translator: Linked existing term. Original: ' . $term_id . ' (' . $term->name . '), Translated: ' . $existing_term_id . ' (' . $translated_name . ')');
+                    return $existing_term_id;
+                } else {
+                    // Try to find term by slug
+                    $existing_term = get_term_by('slug', $translated_slug, $term->taxonomy);
+                    if ($existing_term && !is_wp_error($existing_term)) {
+                        $existing_term_id = $existing_term->term_id;
+                        update_term_meta($term_id, '_xf_translator_term_' . $target_language_prefix, $existing_term_id);
+                        update_term_meta($existing_term_id, '_xf_translator_original_term_id', $term_id);
+                        update_term_meta($existing_term_id, '_xf_translator_language', $target_language_prefix);
+                        $this->update_translated_posts_with_term($term_id, $existing_term_id, $target_language_prefix, $term->taxonomy);
+                        error_log('XF Translator: Linked existing term by slug. Original: ' . $term_id . ' (' . $term->name . '), Translated: ' . $existing_term_id . ' (' . $translated_name . ')');
+                        return $existing_term_id;
+                    }
+                }
+            }
+            error_log('XF Translator: Failed to create translated term. Term ID: ' . $term_id . ', Name: ' . $term->name . ', Translated: ' . $translated_name . ', Error: ' . $translated_term_result->get_error_message() . ' (Code: ' . $translated_term_result->get_error_code() . ')');
             return $translated_term_result;
         }
         
@@ -205,6 +269,9 @@ class Xf_Translator_Taxonomy_Processor {
         update_term_meta($term_id, '_xf_translator_term_' . $target_language_prefix, $translated_term_id);
         update_term_meta($translated_term_id, '_xf_translator_original_term_id', $term_id);
         update_term_meta($translated_term_id, '_xf_translator_language', $target_language_prefix);
+        
+        // Update existing translated posts that have this term
+        $this->update_translated_posts_with_term($term_id, $translated_term_id, $target_language_prefix, $term->taxonomy);
         
         return $translated_term_id;
     }
@@ -287,7 +354,7 @@ class Xf_Translator_Taxonomy_Processor {
                 $glossary_items[] = $term_data['term'];
             }
             $glossary_list = implode(', ', $glossary_items);
-            $prompt = "Translate the following category/taxonomy name to {$target_language}. Do not translate the words {$glossary_list} or any occurrence of it. Return ONLY the translated text, nothing else.\n\n";
+            $prompt = "Translate the following category/taxonomy name to {$target_language}. Do not translate these words {$glossary_list}. Return ONLY the translated text, nothing else.\n\n";
             $prompt .= "Text to translate: {$text}\n\n";
             $prompt .= "Translation:";
         }
@@ -326,6 +393,158 @@ class Xf_Translator_Taxonomy_Processor {
         $translated_text = preg_replace('/\s*\(.*?\)\s*$/', '', $translated_text); // Remove parenthetical explanations
         
         return trim($translated_text);
+    }
+    
+    /**
+     * Update existing translated posts to use the newly translated term
+     *
+     * @param int $original_term_id Original term ID
+     * @param int $translated_term_id Translated term ID
+     * @param string $language_prefix Language prefix
+     * @param string $taxonomy Taxonomy name
+     */
+    private function update_translated_posts_with_term($original_term_id, $translated_term_id, $language_prefix, $taxonomy) {
+        global $wpdb;
+        
+        // Find all original posts (not translated) that have the original term
+        $original_posts = get_posts(array(
+            'post_type' => 'any',
+            'post_status' => 'publish',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'meta_query' => array(
+                'relation' => 'AND',
+                array(
+                    'key' => '_xf_translator_original_post_id',
+                    'compare' => 'NOT EXISTS'
+                ),
+                array(
+                    'key' => '_api_translator_original_post_id',
+                    'compare' => 'NOT EXISTS'
+                ),
+            ),
+            'tax_query' => array(
+                array(
+                    'taxonomy' => $taxonomy,
+                    'field' => 'term_id',
+                    'terms' => $original_term_id,
+                ),
+            ),
+        ));
+        
+        $translated_posts_updated = 0;
+        
+        // For each original post that has this term, update its translated version
+        foreach ($original_posts as $original_post_id) {
+            // Find the translated post for this language
+            $translated_post_id = get_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, true);
+            
+            if (!$translated_post_id) {
+                // Try alternative meta key
+                $translated_post_id = $wpdb->get_var($wpdb->prepare(
+                    "SELECT post_id FROM {$wpdb->postmeta} 
+                    WHERE meta_key = %s AND meta_value = %d 
+                    LIMIT 1",
+                    '_xf_translator_original_post_id',
+                    $original_post_id
+                ));
+                
+                if ($translated_post_id) {
+                    $translated_post_lang = get_post_meta($translated_post_id, '_xf_translator_language', true);
+                    if ($translated_post_lang !== $language_prefix) {
+                        $translated_post_id = false;
+                    }
+                }
+            }
+            
+            if ($translated_post_id && get_post($translated_post_id)) {
+                // Get current terms on the translated post
+                $translated_post_terms = wp_get_post_terms($translated_post_id, $taxonomy, array('fields' => 'ids'));
+                
+                // Check if translated post has the original term (should be replaced)
+                // OR if it should have the term based on the original post
+                $needs_update = false;
+                $updated_terms = array();
+                
+                if (in_array($original_term_id, $translated_post_terms)) {
+                    // Replace original term with translated term
+                    $needs_update = true;
+                    foreach ($translated_post_terms as $term_id) {
+                        if ($term_id == $original_term_id) {
+                            $updated_terms[] = $translated_term_id;
+                        } else {
+                            $updated_terms[] = $term_id;
+                        }
+                    }
+                } else {
+                    // Check if original post has this term and translated post should have it too
+                    $original_post_terms = wp_get_post_terms($original_post_id, $taxonomy, array('fields' => 'ids'));
+                    if (in_array($original_term_id, $original_post_terms)) {
+                        // Original post has this term, so translated post should have the translated version
+                        $needs_update = true;
+                        $updated_terms = array_merge($translated_post_terms, array($translated_term_id));
+                        $updated_terms = array_unique($updated_terms);
+                    }
+                }
+                
+                if ($needs_update && !empty($updated_terms)) {
+                    wp_set_post_terms($translated_post_id, $updated_terms, $taxonomy);
+                    $translated_posts_updated++;
+                }
+            }
+        }
+        
+        // Also check for translated posts that directly have the original term
+        // (in case they were created before the term translation existed)
+        $translated_posts_with_term = get_posts(array(
+            'post_type' => 'any',
+            'post_status' => 'publish',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'meta_query' => array(
+                array(
+                    'key' => '_xf_translator_language',
+                    'value' => $language_prefix,
+                    'compare' => '='
+                ),
+            ),
+            'tax_query' => array(
+                array(
+                    'taxonomy' => $taxonomy,
+                    'field' => 'term_id',
+                    'terms' => $original_term_id,
+                ),
+            ),
+        ));
+        
+        foreach ($translated_posts_with_term as $translated_post_id) {
+            $post_terms = wp_get_post_terms($translated_post_id, $taxonomy, array('fields' => 'ids'));
+            
+            if (in_array($original_term_id, $post_terms)) {
+                // Replace original term with translated term
+                $updated_terms = array();
+                foreach ($post_terms as $term_id) {
+                    if ($term_id == $original_term_id) {
+                        $updated_terms[] = $translated_term_id;
+                    } else {
+                        $updated_terms[] = $term_id;
+                    }
+                }
+                
+                wp_set_post_terms($translated_post_id, $updated_terms, $taxonomy);
+                $translated_posts_updated++;
+            }
+        }
+        
+        if ($translated_posts_updated > 0) {
+            error_log(sprintf(
+                'XF Translator: Updated %d translated post(s) to use translated term (original: %d, translated: %d, language: %s)',
+                $translated_posts_updated,
+                $original_term_id,
+                $translated_term_id,
+                $language_prefix
+            ));
+        }
     }
 }
 

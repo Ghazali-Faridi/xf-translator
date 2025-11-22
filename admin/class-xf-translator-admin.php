@@ -115,8 +115,8 @@ class Xf_Translator_Admin {
      */
     public function add_admin_menu() {
         add_menu_page(
-            __('API Translator', 'api-translator'),
-            __('API Translator', 'api-translator'),
+            __('Unite.AI Translations', 'xf-translator'),
+            __('Unite.AI Translations', 'xf-translator'),
             'manage_options',
             'xf-translator',
             array($this, 'render_settings_page'),
@@ -245,6 +245,13 @@ class Xf_Translator_Admin {
         
         if (isset($_POST['selected_model'])) {
             $this->settings->update('selected_model', sanitize_text_field($_POST['selected_model']));
+        }
+        
+        if (isset($_POST['processing_delay_minutes'])) {
+            $delay = intval($_POST['processing_delay_minutes']);
+            if ($delay >= 0) {
+                $this->settings->update('processing_delay_minutes', $delay);
+            }
         }
         
         $this->add_notice(__('Settings saved successfully.', 'api-translator'), 'success');
@@ -562,6 +569,35 @@ class Xf_Translator_Admin {
             $this->add_notice(__('Invalid post type(s) selected.', 'xf-translator'), 'error');
             return;
         }
+
+        // Optional date filters
+        $start_date = isset($_POST['analyze_start_date']) ? sanitize_text_field($_POST['analyze_start_date']) : '';
+        $end_date = isset($_POST['analyze_end_date']) ? sanitize_text_field($_POST['analyze_end_date']) : '';
+        $start_datetime = null;
+        $end_datetime = null;
+
+        if (!empty($start_date)) {
+            $start_datetime = DateTime::createFromFormat('Y-m-d', $start_date);
+            if (!$start_datetime) {
+                $this->add_notice(__('Invalid start date format. Please use YYYY-MM-DD.', 'xf-translator'), 'error');
+                return;
+            }
+            $start_datetime->setTime(0, 0, 0);
+        }
+
+        if (!empty($end_date)) {
+            $end_datetime = DateTime::createFromFormat('Y-m-d', $end_date);
+            if (!$end_datetime) {
+                $this->add_notice(__('Invalid end date format. Please use YYYY-MM-DD.', 'xf-translator'), 'error');
+                return;
+            }
+            $end_datetime->setTime(23, 59, 59);
+        }
+
+        if ($start_datetime && $end_datetime && $start_datetime > $end_datetime) {
+            $this->add_notice(__('Start date cannot be later than end date.', 'xf-translator'), 'error');
+            return;
+        }
         
         // Get all languages from settings
         $languages = $this->settings->get('languages', array());
@@ -599,6 +635,22 @@ class Xf_Translator_Admin {
                     )
                 )
             );
+
+            if ($start_datetime || $end_datetime) {
+                $range = array(
+                    'inclusive' => true
+                );
+
+                if ($start_datetime) {
+                    $range['after'] = $start_datetime->format('Y-m-d H:i:s');
+                }
+
+                if ($end_datetime) {
+                    $range['before'] = $end_datetime->format('Y-m-d H:i:s');
+                }
+
+                $args['date_query'] = array($range);
+            }
             
             $english_posts = get_posts($args);
             
@@ -766,6 +818,34 @@ class Xf_Translator_Admin {
                 ),
                 'success'
             );
+
+            if ($start_datetime || $end_datetime) {
+                $range_text = '';
+                if ($start_datetime && $end_datetime) {
+                    $range_text = sprintf(
+                        __('between %1$s and %2$s', 'xf-translator'),
+                        date_i18n(get_option('date_format'), $start_datetime->getTimestamp()),
+                        date_i18n(get_option('date_format'), $end_datetime->getTimestamp())
+                    );
+                } elseif ($start_datetime) {
+                    $range_text = sprintf(
+                        __('on or after %s', 'xf-translator'),
+                        date_i18n(get_option('date_format'), $start_datetime->getTimestamp())
+                    );
+                } elseif ($end_datetime) {
+                    $range_text = sprintf(
+                        __('on or before %s', 'xf-translator'),
+                        date_i18n(get_option('date_format'), $end_datetime->getTimestamp())
+                    );
+                }
+
+                if (!empty($range_text)) {
+                    $this->add_notice(
+                        sprintf(__('Date filter applied: %s.', 'xf-translator'), $range_text),
+                        'info'
+                    );
+                }
+            }
         }
     }
     
