@@ -562,11 +562,20 @@ class Xf_Translator_Processor
             $body['max_tokens'] = $max_tokens;
         }
 
-        // Calculate timeout based on content size (minimum 600 seconds, add 10 seconds per 1000 characters)
+        // Calculate timeout based on content size
+        // Note: Cloudflare has a 100-second timeout limit, so we cap at 90 seconds to stay under it
         $content_length = strlen($prompt);
-        $calculated_timeout = max(600, 600 + intval($content_length / 1000) * 10);
-        // Cap at 1800 seconds (30 minutes) to avoid extremely long waits
-        $timeout = min($calculated_timeout, 1800);
+        // Base timeout: 30 seconds, add 5 seconds per 1000 characters
+        $calculated_timeout = 30 + intval($content_length / 1000) * 5;
+        // Cap at 90 seconds to stay under Cloudflare's 100-second limit
+        $timeout = min($calculated_timeout, 90);
+        
+        // Warn if content is very large (might need chunking)
+        if ($content_length > 50000) {
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::warning('Large content detected (' . number_format($content_length) . ' chars). Translation may timeout. Consider breaking content into smaller chunks.');
+            }
+        }
 
         // Log API request to debug.log
         $request_log = array(
@@ -582,7 +591,12 @@ class Xf_Translator_Processor
             'timeout' => $timeout,
             'request_body' => $body
         );
-        error_log('XF Translator API Request: ' . json_encode($request_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        // Log to plugin-specific log file
+        if (class_exists('Xf_Translator_Logger')) {
+            Xf_Translator_Logger::log_api('REQUEST', $request_log);
+        } else {
+            error_log('XF Translator API Request: ' . json_encode($request_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        }
 
         // Save API request to post meta BEFORE making the call (so we always have the request)
         if ($post_id && $queue_id) {
@@ -600,18 +614,34 @@ class Xf_Translator_Processor
 
             // Debug: Log if save failed
             if (!$log_saved) {
-                error_log('XF Translator: Failed to save API log to post meta. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id . ', Key: ' . $log_key);
+                if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('Failed to save API log to post meta. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id . ', Key: ' . $log_key);
             } else {
-                error_log('XF Translator: API log saved successfully. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
+                error_log('XF Translator: Failed to save API log to post meta. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id . ', Key: ' . $log_key);
+            }
+            } else {
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::debug('API log saved successfully. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
+                } else {
+                    error_log('XF Translator: API log saved successfully. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
+                }
             }
         } else {
-            error_log('XF Translator: Cannot save API log - missing post_id or queue_id. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::warning('Cannot save API log - missing post_id or queue_id. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
+            } else {
+                error_log('XF Translator: Cannot save API log - missing post_id or queue_id. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
+            }
         }
 
         if (empty($api_key)) {
             $api_type = $is_deepseek ? 'DeepSeek' : 'OpenAI';
             $this->last_error = "{$api_type} API key is not configured. Please add your API key in the plugin settings.";
-            error_log('XF Translator API Error: ' . $this->last_error);
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('API Error: ' . $this->last_error);
+            } else {
+                error_log('XF Translator API Error: ' . $this->last_error);
+            }
 
             // Update log with error
             if ($post_id && $queue_id) {
@@ -624,9 +654,9 @@ class Xf_Translator_Processor
             return false;
         }
 
-        // Increase PHP execution time limit to allow for long API requests
-        // Set to timeout + 60 seconds buffer to ensure the request can complete
-        $php_time_limit = $timeout + 60;
+        // Increase PHP execution time limit to allow for API requests
+        // Set to timeout + 30 seconds buffer to ensure the request can complete
+        $php_time_limit = $timeout + 30;
         if (function_exists('set_time_limit')) {
             @set_time_limit($php_time_limit);
         }
@@ -635,7 +665,11 @@ class Xf_Translator_Processor
         }
 
         // Log PHP execution time settings
-        error_log('XF Translator: PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds)');
+        if (class_exists('Xf_Translator_Logger')) {
+            Xf_Translator_Logger::debug('PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds, content length: ' . number_format($content_length) . ' chars)');
+        } else {
+            error_log('XF Translator: PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds)');
+        }
 
         // Make API request
         $response = wp_remote_post($endpoint, array(
@@ -676,7 +710,12 @@ class Xf_Translator_Processor
             $response_log['response_body_parsed'] = $decoded_response;
         }
 
-        error_log('XF Translator API Response: ' . json_encode($response_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        // Log to plugin-specific log file
+        if (class_exists('Xf_Translator_Logger')) {
+            Xf_Translator_Logger::log_api('RESPONSE', $response_log);
+        } else {
+            error_log('XF Translator API Response: ' . json_encode($response_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        }
 
         // Update API log with response (always save, even on error)
         if ($post_id && $queue_id) {
@@ -720,27 +759,58 @@ class Xf_Translator_Processor
             $error_code = $response->get_error_code();
             $current_max_execution_time = ini_get('max_execution_time');
 
-            // Check if it's a timeout error
-            if (strpos($error_message, 'timeout') !== false || strpos($error_message, 'timed out') !== false || $error_code === 'http_request_failed') {
-                $this->last_error = "API request timed out after {$timeout} seconds. The content may be too large for a single translation request. Consider breaking the content into smaller chunks or the API may be experiencing high load. Content length: " . number_format($content_length) . " characters.";
+            // Check if it's a timeout error (including Cloudflare 524)
+            $is_timeout = strpos($error_message, 'timeout') !== false || 
+                         strpos($error_message, 'timed out') !== false || 
+                         strpos($error_message, '524') !== false ||
+                         $error_code === 'http_request_failed' ||
+                         $response_code === 524;
+            
+            if ($is_timeout) {
+                $this->last_error = "Translation request timed out (Cloudflare/Server timeout). The content may be too large (" . number_format($content_length) . " characters). ";
+                $this->last_error .= "Try breaking the content into smaller chunks or the API may be experiencing high load. ";
+                $this->last_error .= "Request timeout was set to {$timeout} seconds.";
             } else {
                 $this->last_error = "API request error: {$error_message} (Error code: {$error_code})";
             }
 
-            error_log('XF Translator API Error: ' . $this->last_error);
-            error_log('XF Translator: Timeout used: ' . $timeout . ' seconds, Content length: ' . $content_length . ' characters');
-            error_log('XF Translator: PHP max_execution_time: ' . $current_max_execution_time . ' seconds');
-            error_log('XF Translator: Raw error message: ' . $error_message . ' (Code: ' . $error_code . ')');
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('API Error: ' . $this->last_error);
+                Xf_Translator_Logger::error('Timeout used: ' . $timeout . ' seconds, Content length: ' . $content_length . ' characters');
+                Xf_Translator_Logger::error('PHP max_execution_time: ' . $current_max_execution_time . ' seconds');
+                Xf_Translator_Logger::error('Raw error: ' . $error_message . ' (Code: ' . $error_code . ', Response Code: ' . $response_code . ')');
+            } else {
+                error_log('XF Translator API Error: ' . $this->last_error);
+                error_log('XF Translator: Timeout used: ' . $timeout . ' seconds, Content length: ' . $content_length . ' characters');
+                error_log('XF Translator: PHP max_execution_time: ' . $current_max_execution_time . ' seconds');
+                error_log('XF Translator: Raw error message: ' . $error_message . ' (Code: ' . $error_code . ', Response Code: ' . $response_code . ')');
+            }
             return false;
         }
 
         $data = json_decode($response_body, true);
-
+        
+        // Check for Cloudflare timeout (524) or other HTTP errors
+        if ($response_code === 524) {
+            $this->last_error = "Cloudflare timeout (524): The request took longer than 100 seconds. Content length: " . number_format($content_length) . " characters. The content may be too large - consider breaking it into smaller chunks.";
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('Cloudflare timeout (524) - Content too large: ' . number_format($content_length) . ' characters');
+            } else {
+                error_log('XF Translator API Error: ' . $this->last_error);
+            }
+            return false;
+        }
+        
         if ($response_code !== 200) {
             $error_message = isset($data['error']['message']) ? $data['error']['message'] : 'Unknown API error';
             $this->last_error = "API returned error code {$response_code}: {$error_message}";
-            error_log('XF Translator API Error: ' . $this->last_error);
-            error_log('XF Translator API Response: ' . $response_body);
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('API Error: ' . $this->last_error);
+                Xf_Translator_Logger::error('API Response: ' . substr($response_body, 0, 1000));
+            } else {
+                error_log('XF Translator API Error: ' . $this->last_error);
+                error_log('XF Translator API Response: ' . $response_body);
+            }
             return false;
         }
 
@@ -1454,10 +1524,23 @@ class Xf_Translator_Processor
             return false;
         }
 
-        // Only process if status is pending or failed (for retry)
-        if ($queue_entry['status'] !== 'pending' && $queue_entry['status'] !== 'failed') {
+        // Only process if status is pending, failed (for retry), or processing (for stuck items)
+        if ($queue_entry['status'] !== 'pending' && $queue_entry['status'] !== 'failed' && $queue_entry['status'] !== 'processing') {
             $this->last_error = "Queue entry #{$queue_entry_id} is not in a processable state (current status: {$queue_entry['status']})";
             return false;
+        }
+        
+        // If status is processing, it might be stuck - reset to pending first
+        if ($queue_entry['status'] === 'processing') {
+            $wpdb->update(
+                $table_name,
+                array('status' => 'pending'),
+                array('id' => $queue_entry_id),
+                array('%s'),
+                array('%d')
+            );
+            // Update the local variable
+            $queue_entry['status'] = 'pending';
         }
 
         // Update status to processing

@@ -275,12 +275,26 @@ jQuery(document).ready(function($) {
         });
     }
     
+    // Store translation data in a global object to avoid HTML attribute encoding issues
+    var translationDataStore = {};
+    var translationDataIndex = 0;
+    
     function displayTestResult(model, data) {
         var modelLabel = getModelLabel(model);
         var resultHtml = '<div class="test-result-box" style="margin-bottom: 20px; padding: 15px; background: #fff; border: 1px solid #ddd; border-left: 4px solid #0073aa;">';
         resultHtml += '<h4 style="margin-top: 0;">' + escapeHtml(modelLabel) + '</h4>';
         resultHtml += '<p><strong>Title:</strong> ' + escapeHtml(data.translated_title || 'N/A') + '</p>';
-        resultHtml += '<p><strong>Content:</strong> ' + escapeHtml(data.translated_content ? (data.translated_content.substring(0, 300) + (data.translated_content.length > 300 ? '...' : '')) : 'N/A') + '</p>';
+        
+        // For content preview, strip HTML tags for a clean preview but show it's HTML content
+        var contentPreview = data.translated_content || 'N/A';
+        if (contentPreview !== 'N/A' && contentPreview.length > 300) {
+            contentPreview = contentPreview.substring(0, 300) + '...';
+        }
+        // Strip HTML tags for preview but indicate it contains HTML
+        var textPreview = $('<div>').html(contentPreview).text();
+        var hasHtml = contentPreview !== textPreview;
+        resultHtml += '<p><strong>Content:</strong> <span style="border: 1px solid #ddd; padding: 5px; display: inline-block; max-width: 100%;">' + (hasHtml ? '<em style="color: #666; font-size: 0.9em;">(HTML content - click "View Full Translation" to see rendered)</em><br>' : '') + escapeHtml(textPreview) + '</span></p>';
+        
         if (data.translated_excerpt) {
             resultHtml += '<p><strong>Excerpt:</strong> ' + escapeHtml(data.translated_excerpt) + '</p>';
         }
@@ -290,7 +304,16 @@ jQuery(document).ready(function($) {
         if (data.response_time) {
             resultHtml += '<p><small style="color: #666;"><strong>Response Time:</strong> ' + data.response_time + 's</small></p>';
         }
-        resultHtml += '<button class="button button-small view-full-translation" data-model="' + escapeHtml(model) + '" data-title="' + escapeHtml(data.translated_title || '') + '" data-content="' + escapeHtml(data.translated_content || '') + '" data-excerpt="' + escapeHtml(data.translated_excerpt || '') + '" style="margin-top: 10px;"><?php _e('View Full Translation', 'xf-translator'); ?></button>';
+        
+        // Store data in a global object using an index
+        var dataIndex = 'trans_' + (translationDataIndex++);
+        translationDataStore[dataIndex] = {
+            title: data.translated_title || '',
+            content: data.translated_content || '',
+            excerpt: data.translated_excerpt || ''
+        };
+        
+        resultHtml += '<button class="button button-small view-full-translation" data-model="' + escapeHtml(model) + '" data-index="' + dataIndex + '" style="margin-top: 10px;"><?php _e('View Full Translation', 'xf-translator'); ?></button>';
         resultHtml += '<button class="button button-small save-as-default" data-model="' + escapeHtml(model) + '" style="margin-top: 10px; margin-left: 5px;"><?php _e('Save as Default', 'xf-translator'); ?></button>';
         resultHtml += '</div>';
         
@@ -327,21 +350,46 @@ jQuery(document).ready(function($) {
     // Handle view full translation
     $(document).on('click', '.view-full-translation', function() {
         var model = $(this).data('model');
-        var title = $(this).data('title');
-        var content = $(this).data('content');
-        var excerpt = $(this).data('excerpt');
+        var dataIndex = $(this).data('index');
         
-        var fullHtml = '<div style="max-width: 800px; max-height: 600px; overflow-y: auto;">';
-        fullHtml += '<h3>' + escapeHtml(getModelLabel(model)) + ' - Full Translation</h3>';
-        fullHtml += '<p><strong>Title:</strong><br>' + escapeHtml(title) + '</p>';
-        fullHtml += '<p><strong>Content:</strong><br>' + escapeHtml(content) + '</p>';
-        if (excerpt) {
-            fullHtml += '<p><strong>Excerpt:</strong><br>' + escapeHtml(excerpt) + '</p>';
+        // Get data from the global store
+        var translationData = translationDataStore[dataIndex];
+        if (!translationData) {
+            alert('<?php _e('Translation data not found.', 'xf-translator'); ?>');
+            return;
         }
-        fullHtml += '</div>';
         
-        // Create modal
-        var modal = $('<div class="xf-translation-modal" style="display: block; position: fixed; z-index: 100000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5);"><div style="background-color: #fff; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 90%; max-width: 900px; position: relative;"><span class="xf-modal-close" style="color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer;">&times;</span>' + fullHtml + '</div></div>');
+        var title = translationData.title || '';
+        var content = translationData.content || '';
+        var excerpt = translationData.excerpt || '';
+        
+        // Create modal structure
+        var modal = $('<div class="xf-translation-modal" style="display: block; position: fixed; z-index: 100000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5);">' +
+            '<div style="background-color: #fff; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 90%; max-width: 900px; position: relative; max-height: 80vh; overflow-y: auto;">' +
+            '<span class="xf-modal-close" style="color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; position: absolute; right: 15px; top: 15px;">&times;</span>' +
+            '<div class="xf-translation-content" style="max-width: 800px;"></div>' +
+            '</div>' +
+            '</div>');
+        
+        // Build content with proper HTML rendering
+        var contentDiv = modal.find('.xf-translation-content');
+        contentDiv.append('<h3 style="margin-top: 0;">' + escapeHtml(getModelLabel(model)) + ' - Full Translation</h3>');
+        contentDiv.append('<div style="margin-bottom: 20px;"><strong>Title:</strong><br><div style="margin-top: 5px;">' + escapeHtml(title) + '</div></div>');
+        
+        // Render content as HTML - use jQuery's html() method to properly render HTML tags
+        var contentWrapper = $('<div style="margin-bottom: 20px;"><strong>Content:</strong><div style="margin-top: 5px; border: 1px solid #ddd; padding: 15px; background: #f9f9f9; border-radius: 4px; word-wrap: break-word;"></div></div>');
+        // Use html() to render the HTML content properly
+        if (content) {
+            contentWrapper.find('div').html(content);
+        } else {
+            contentWrapper.find('div').text('N/A');
+        }
+        contentDiv.append(contentWrapper);
+        
+        if (excerpt) {
+            contentDiv.append('<div style="margin-bottom: 20px;"><strong>Excerpt:</strong><br><div style="margin-top: 5px;">' + escapeHtml(excerpt) + '</div></div>');
+        }
+        
         $('body').append(modal);
         
         $('.xf-modal-close').on('click', function() {

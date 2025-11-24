@@ -73,6 +73,11 @@ $languages = $settings->get('languages', array());
                             // Check if translated menu exists
                             $translated_menu_id = get_term_meta($menu->term_id, '_xf_translator_menu_' . $language['prefix'], true);
                             $translated_menu = $translated_menu_id ? wp_get_nav_menu_object($translated_menu_id) : false;
+                            
+                            // Clean up orphaned meta if menu was deleted
+                            if ($translated_menu_id && !$translated_menu) {
+                                delete_term_meta($menu->term_id, '_xf_translator_menu_' . $language['prefix']);
+                            }
                             ?>
                             <td>
                                 <?php if ($translated_menu) : ?>
@@ -98,7 +103,13 @@ $languages = $settings->get('languages', array());
                                     <?php foreach ($languages as $language) : ?>
                                         <?php
                                         $translated_menu_id = get_term_meta($menu->term_id, '_xf_translator_menu_' . $language['prefix'], true);
-                                        if (!$translated_menu_id) :
+                                        $translated_menu = $translated_menu_id ? wp_get_nav_menu_object($translated_menu_id) : false;
+                                        // Only show language if translated menu doesn't exist (or was deleted)
+                                        if (!$translated_menu) :
+                                            // Clean up orphaned meta if menu was deleted
+                                            if ($translated_menu_id) {
+                                                delete_term_meta($menu->term_id, '_xf_translator_menu_' . $language['prefix']);
+                                            }
                                         ?>
                                             <option value="<?php echo esc_attr($language['name']); ?>">
                                                 <?php echo esc_html($language['name']); ?>

@@ -147,7 +147,8 @@ class Xf_Translator_Admin {
             'existing-queue' => __('Existing Post Queue', 'api-translator'),
             'translation-rules' => __('Translation Rules', 'api-translator'),
             'menu-translation' => __('Menu Translation', 'api-translator'),
-            'taxonomy-translation' => __('Taxonomy Translation', 'api-translator')
+            'taxonomy-translation' => __('Taxonomy Translation', 'api-translator'),
+            'logs' => __('Logs', 'api-translator')
         );
         
         include plugin_dir_path( __FILE__ ) . 'partials/xf-translator-admin-display.php';
@@ -618,19 +619,23 @@ class Xf_Translator_Admin {
             $post_type_label = $post_type_obj ? $post_type_obj->label : $selected_post_type;
             
             // Get all published posts of selected type that are NOT translations (English posts/pages)
-            // Posts that have _xf_translator_original_post_id are translations, so we exclude them
+            // Posts that have _xf_translator_original_post_id or _xf_translator_language are translations, so we exclude them
             $args = array(
                 'post_type' => $selected_post_type,
                 'post_status' => 'publish',
                 'posts_per_page' => -1,
                 'meta_query' => array(
-                    'relation' => 'OR',
+                    'relation' => 'AND',
                     array(
                         'key' => '_xf_translator_original_post_id',
                         'compare' => 'NOT EXISTS'
                     ),
                     array(
                         'key' => '_api_translator_original_post_id',
+                        'compare' => 'NOT EXISTS'
+                    ),
+                    array(
+                        'key' => '_xf_translator_language',
                         'compare' => 'NOT EXISTS'
                     )
                 )
@@ -1032,13 +1037,17 @@ class Xf_Translator_Admin {
             'orderby' => 'ID',
             'order' => 'ASC',
             'meta_query' => array(
-                'relation' => 'OR',
+                'relation' => 'AND',
                 array(
                     'key' => '_xf_translator_original_post_id',
                     'compare' => 'NOT EXISTS'
                 ),
                 array(
                     'key' => '_api_translator_original_post_id',
+                    'compare' => 'NOT EXISTS'
+                ),
+                array(
+                    'key' => '_xf_translator_language',
                     'compare' => 'NOT EXISTS'
                 )
             )
@@ -1239,13 +1248,32 @@ class Xf_Translator_Admin {
             return;
         }
         
-        if ($queue_entry['status'] !== 'failed') {
-            $this->add_notice(__('Only failed queue entries can be retried.', 'xf-translator'), 'error');
+        // Allow retry for both failed and processing status (processing items might be stuck)
+        if ($queue_entry['status'] !== 'failed' && $queue_entry['status'] !== 'processing') {
+            $this->add_notice(__('Only failed or processing queue entries can be retried.', 'xf-translator'), 'error');
             return;
         }
         
+        // If status is processing, reset it to pending first
+        if ($queue_entry['status'] === 'processing') {
+            $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'pending',
+                    'error_message' => null
+                ),
+                array('id' => $queue_entry_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+        }
+        
         // Log retry attempt
-        error_log('XF Translator: Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ')');
+        if (class_exists('Xf_Translator_Logger')) {
+            Xf_Translator_Logger::info('Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Previous status: ' . $queue_entry['status'] . ')');
+        } else {
+            error_log('XF Translator: Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Previous status: ' . $queue_entry['status'] . ')');
+        }
         
         // Process the translation immediately (this will trigger API logging)
         require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';

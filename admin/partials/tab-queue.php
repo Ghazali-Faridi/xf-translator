@@ -145,19 +145,26 @@ $recent_jobs = $wpdb->get_results(
                             }
 
                             $error_message = isset($job['error_message']) ? $job['error_message'] : '';
+                            
+                            // Set color for processing status
+                            if($job['status']=="processing"){
+                                $color="#0073aa";
+                            }
                             ?>
                             <span style="padding: 3px 8px; background: <?php echo $color; ?>; color: #fff; border-radius: 3px; font-size: 11px; margin-right: 5px;">
                                 <?php echo esc_html(ucfirst($job['status'])); ?>
                             </span>
-                            <?php if($job['status']=="failed") : ?>
+                            <?php if($job['status']=="failed" || $job['status']=="processing") : ?>
                                 <div style="margin-top: 5px;">
-                                    <button type="button" 
-                                            class="button button-small view-error-detail" 
-                                            data-error-message="<?php echo esc_attr($error_message); ?>"
-                                            data-queue-id="<?php echo esc_attr($job['id']); ?>"
-                                            style="margin-right: 5px; font-size: 11px;">
-                                        <?php _e('View Detail', 'xf-translator'); ?>
-                                    </button>
+                                    <?php if($job['status']=="failed" && !empty($error_message)) : ?>
+                                        <button type="button" 
+                                                class="button button-small view-error-detail" 
+                                                data-error-message="<?php echo esc_attr($error_message); ?>"
+                                                data-queue-id="<?php echo esc_attr($job['id']); ?>"
+                                                style="margin-right: 5px; font-size: 11px;">
+                                            <?php _e('View Detail', 'xf-translator'); ?>
+                                        </button>
+                                    <?php endif; ?>
                                     <form method="post" action="" style="display: inline-block; margin: 0;">
                                         <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
                                         <input type="hidden" name="api_translator_action" value="retry_queue_entry">
