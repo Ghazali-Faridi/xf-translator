@@ -237,13 +237,16 @@ class Xf_Translator_Public {
 					continue;
 				}
 
+				// URL segment for this language (e.g. "fr-CA" => "frCA").
+				$url_prefix = $this->get_url_prefix_for_language( $language );
+
 				// Use the configured prefix exactly for lookups/meta.
 				$translated_id = $this->get_translated_post_id( $original_post_id, $language['prefix'] );
 				if ( ! $translated_id ) {
 					// No translation exists, link to home page with language prefix
 					$items[] = array(
 						'label'  => $language['name'],
-						'url'    => home_url( '/' . $language['prefix'] . '/' ),
+						'url'    => $url_prefix ? home_url( '/' . $url_prefix . '/' ) : home_url( '/' ),
 						'active' => strtolower( $language['prefix'] ) === strtolower( $current_lang_prefix ),
 					);
 					continue;
@@ -266,9 +269,11 @@ class Xf_Translator_Public {
 				if ( empty( $language['prefix'] ) ) {
 					continue;
 				}
+
+				$url_prefix = $this->get_url_prefix_for_language( $language );
 				$items[] = array(
 					'label'  => $language['name'],
-					'url'    => home_url( '/' . $language['prefix'] . '/' ),
+					'url'    => $url_prefix ? home_url( '/' . $url_prefix . '/' ) : home_url( '/' ),
 					'active' => strtolower( $language['prefix'] ) === strtolower( $current_lang_prefix ),
 				);
 			}
@@ -439,6 +444,45 @@ class Xf_Translator_Public {
 	}
 
 	/**
+	 * Get the URL-safe prefix segment for a language configuration.
+	 *
+	 * Example:
+	 * - Stored prefix "fr-CA" → URL prefix "frCA" (hyphen removed, case preserved).
+	 * - Stored prefix "fr"    → URL prefix "fr".
+	 *
+	 * This lets site owners store human-friendly prefixes (used in meta / hreflang),
+	 * while URLs use a simple segment that avoids server/host restrictions.
+	 *
+	 * @param array|string $language Language settings array or raw prefix string.
+	 * @return string URL-safe prefix (no slashes, no spaces), or empty string on failure.
+	 */
+	private function get_url_prefix_for_language( $language ) {
+		if ( is_array( $language ) ) {
+			$prefix = isset( $language['prefix'] ) ? $language['prefix'] : '';
+		} else {
+			$prefix = (string) $language;
+		}
+
+		if ( ! $prefix ) {
+			return '';
+		}
+
+		// Trim whitespace and slashes.
+		$prefix = trim( $prefix );
+		$prefix = trim( $prefix, '/' );
+
+		if ( $prefix === '' ) {
+			return '';
+		}
+
+		// Build URL-safe prefix: remove all non-alphanumeric characters.
+		// e.g. "fr-CA" => "frCA", "pt-BR" => "ptBR".
+		$url_prefix = preg_replace( '/[^A-Za-z0-9]/', '', $prefix );
+
+		return $url_prefix ?: '';
+	}
+
+	/**
 	 * Get original post ID for a translated post
 	 *
 	 * @param int $post_id
@@ -561,88 +605,79 @@ class Xf_Translator_Public {
 		// Get all language prefixes from settings
 		require_once plugin_dir_path(dirname(__FILE__)) . 'admin/class-settings.php';
 		$settings = new Settings();
-		$languages = $settings->get('languages', array());
+		$languages = $settings->get( 'languages', array() );
 		
-		if (empty($languages)) {
+		if ( empty( $languages ) ) {
 			return;
 		}
-		
-		// Build regex pattern for all language prefixes
-		$prefixes = array();
-		foreach ($languages as $language) {
-			if (!empty($language['prefix'])) {
-				$prefixes[] = preg_quote($language['prefix'], '/');
-			}
-		}
-		
-		if (empty($prefixes)) {
-			return;
-		}
-		
-		$prefix_pattern = implode('|', $prefixes);
-		
-		// Add query var for language prefix
-		add_rewrite_tag('%xf_lang_prefix%', '(' . $prefix_pattern . ')');
-		// Register as public query var so it's accessible
+
+		// Register query var so it's accessible in WP_Query.
+		add_rewrite_tag( '%xf_lang_prefix%', '([^/]+)' );
 		global $wp;
-		$wp->add_query_var('xf_lang_prefix');
-		
-		// Add rewrite rule for home page with language prefix (e.g., /fr/)
-		add_rewrite_rule(
-			'^(' . $prefix_pattern . ')/?$',
-			'index.php?xf_lang_prefix=$matches[1]',
-			'top'
-		);
+		$wp->add_query_var( 'xf_lang_prefix' );
 		
 		// Get all public taxonomies for rewrite rules
-		$taxonomies = get_taxonomies(array('public' => true, 'publicly_queryable' => true), 'objects');
-		
-		// Create pattern that matches slugs but excludes asset file extensions
-		// Match any characters except /, but ensure it doesn't end with asset extensions
-		// Using a pattern that explicitly excludes common asset extensions
-		$slug_pattern = '([^/.]+|([^/]+)(?<!\.css)(?<!\.js)(?<!\.jpg)(?<!\.jpeg)(?<!\.png)(?<!\.gif)(?<!\.svg)(?<!\.ico)(?<!\.woff)(?<!\.woff2)(?<!\.ttf)(?<!\.eot)(?<!\.pdf)(?<!\.zip)(?<!\.map))';
-		
-		// Simpler approach: match slug that doesn't contain a dot followed by asset extension
-		// This is more reliable than negative lookbehind
-		$slug_pattern = '([^/]+)(?<!\.css)(?<!\.js)(?<!\.jpg)(?<!\.jpeg)(?<!\.png)(?<!\.gif)(?<!\.svg)(?<!\.ico)(?<!\.woff)(?<!\.woff2)(?<!\.ttf)(?<!\.eot)(?<!\.pdf)(?<!\.zip)(?<!\.map)';
-		
-		// Even simpler: just match the slug and filter in the query handler
-		// This is more reliable
-		$slug_pattern = '([^/]+)';
-		
-		// Add rewrite rules for posts and pages with language prefix
-		add_rewrite_rule(
-			'^(' . $prefix_pattern . ')/' . $slug_pattern . '/?$',
-			'index.php?name=$matches[2]&xf_lang_prefix=$matches[1]',
-			'top'
-		);
-		
-		// Also handle pagination
-		add_rewrite_rule(
-			'^(' . $prefix_pattern . ')/' . $slug_pattern . '/page/([0-9]+)/?$',
-			'index.php?name=$matches[2]&paged=$matches[3]&xf_lang_prefix=$matches[1]',
-			'top'
-		);
-		
-		// Add rewrite rules for taxonomy archives with language prefix
-		// Category archives: /fr/category/category-slug/
-		// Tag archives: /fr/tag/tag-slug/
-		// Custom taxonomy: /fr/taxonomy/term-slug/
-		foreach ($taxonomies as $taxonomy) {
-			if ($taxonomy->public && $taxonomy->publicly_queryable) {
+		$taxonomies = get_taxonomies( array( 'public' => true, 'publicly_queryable' => true ), 'objects' );
+
+		// Add per-language rewrite rules so we can map clean URL prefixes
+		// (e.g. "frCA") back to stored prefixes (e.g. "fr-CA") in xf_lang_prefix.
+		foreach ( $languages as $language ) {
+			if ( empty( $language['prefix'] ) ) {
+				continue;
+			}
+
+			$stored_prefix = $language['prefix']; // e.g. "fr-CA".
+			$url_prefix    = $this->get_url_prefix_for_language( $language ); // e.g. "frCA".
+
+			if ( ! $url_prefix ) {
+				continue;
+			}
+
+			$escaped_url_prefix = preg_quote( $url_prefix, '/' );
+
+			// Home page with language prefix: /frCA/
+			add_rewrite_rule(
+				'^' . $escaped_url_prefix . '/?$',
+				'index.php?xf_lang_prefix=' . urlencode( $stored_prefix ),
+				'top'
+			);
+
+			// Single posts/pages with language prefix: /frCA/post-slug/
+			add_rewrite_rule(
+				'^' . $escaped_url_prefix . '/([^/]+)/?$',
+				'index.php?name=$matches[1]&xf_lang_prefix=' . urlencode( $stored_prefix ),
+				'top'
+			);
+
+			// Pagination for posts/pages: /frCA/post-slug/page/2/
+			add_rewrite_rule(
+				'^' . $escaped_url_prefix . '/([^/]+)/page/([0-9]+)/?$',
+				'index.php?name=$matches[1]&paged=$matches[2]&xf_lang_prefix=' . urlencode( $stored_prefix ),
+				'top'
+			);
+
+			// Taxonomy archives with language prefix
+			// Category archives: /frCA/category/category-slug/
+			// Tag archives: /frCA/tag/tag-slug/
+			// Custom taxonomy: /frCA/taxonomy/term-slug/
+			foreach ( $taxonomies as $taxonomy ) {
+				if ( ! $taxonomy->public || ! $taxonomy->publicly_queryable ) {
+					continue;
+				}
+
 				$taxonomy_slug = $taxonomy->rewrite['slug'] ?? $taxonomy->name;
-				
-				// Add rewrite rule for taxonomy archive
+
+				// Taxonomy archive
 				add_rewrite_rule(
-					'^(' . $prefix_pattern . ')/' . $taxonomy_slug . '/([^/]+)/?$',
-					'index.php?' . $taxonomy->query_var . '=$matches[2]&xf_lang_prefix=$matches[1]',
+					'^' . $escaped_url_prefix . '/' . preg_quote( $taxonomy_slug, '/' ) . '/([^/]+)/?$',
+					'index.php?' . $taxonomy->query_var . '=$matches[1]&xf_lang_prefix=' . urlencode( $stored_prefix ),
 					'top'
 				);
-				
-				// Add rewrite rule for paginated taxonomy archive
+
+				// Paginated taxonomy archive
 				add_rewrite_rule(
-					'^(' . $prefix_pattern . ')/' . $taxonomy_slug . '/([^/]+)/page/([0-9]+)/?$',
-					'index.php?' . $taxonomy->query_var . '=$matches[2]&paged=$matches[3]&xf_lang_prefix=$matches[1]',
+					'^' . $escaped_url_prefix . '/' . preg_quote( $taxonomy_slug, '/' ) . '/([^/]+)/page/([0-9]+)/?$',
+					'index.php?' . $taxonomy->query_var . '=$matches[1]&paged=$matches[2]&xf_lang_prefix=' . urlencode( $stored_prefix ),
 					'top'
 				);
 			}
@@ -1018,13 +1053,25 @@ class Xf_Translator_Public {
 		// Also check from current URL path
 		if (empty($lang_prefix)) {
 			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
-			if (preg_match('#^/([a-z]{2})/#i', $request_uri, $matches)) {
-				$possible_prefix = strtolower($matches[1]);
-				// Verify it's a valid language prefix
-				$languages = $this->settings->get('languages', array());
-				foreach ($languages as $language) {
-					if (strtolower($language['prefix']) === $possible_prefix) {
-						$lang_prefix = $possible_prefix;
+			$path        = parse_url( $request_uri, PHP_URL_PATH );
+
+			if ( $path ) {
+				// Try to match any configured language by its URL-safe prefix
+				// (e.g. "fr-CA" uses "frCA" in the URL).
+				$languages = $this->settings->get( 'languages', array() );
+				foreach ( $languages as $language ) {
+					if ( empty( $language['prefix'] ) ) {
+						continue;
+					}
+
+					$url_prefix = $this->get_url_prefix_for_language( $language );
+					if ( ! $url_prefix ) {
+						continue;
+					}
+
+					if ( preg_match( '#^/' . preg_quote( $url_prefix, '#' ) . '(/|$)#i', $path ) ) {
+						// Store the original configured prefix (e.g. "fr-CA").
+						$lang_prefix = $language['prefix'];
 						break;
 					}
 				}
@@ -1806,13 +1853,14 @@ class Xf_Translator_Public {
 				continue;
 			}
 
-			$prefix = trim( $language['prefix'], '/' );
-			if ( empty( $prefix ) ) {
+			// Use URL-safe prefix for path matching (e.g. "fr-CA" => "frCA").
+			$url_prefix = $this->get_url_prefix_for_language( $language );
+			if ( ! $url_prefix ) {
 				continue;
 			}
 
-			// Match URLs that start with the prefix, e.g. /de-DE/... or /fr/...
-			if ( preg_match( '#^/' . preg_quote( $prefix, '#' ) . '(/|$)#i', $path ) ) {
+			// Match URLs that start with the URL prefix, e.g. /frCA/... or /deDE/...
+			if ( preg_match( '#^/' . preg_quote( $url_prefix, '#' ) . '(/|$)#i', $path ) ) {
 				return false;
 			}
 		}
