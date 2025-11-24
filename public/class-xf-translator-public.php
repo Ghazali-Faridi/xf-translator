@@ -129,8 +129,10 @@ class Xf_Translator_Public {
 			if ( empty( $language['prefix'] ) ) {
 				continue;
 			}
-
-			$prefix             = strtolower( $language['prefix'] );
+			
+			// Use the configured prefix exactly as stored for lookups/meta,
+			// and normalize only for hreflang output.
+			$prefix             = $language['prefix'];
 			$translated_post_id = $this->get_translated_post_id( $original_post_id, $prefix );
 			if ( ! $translated_post_id ) {
 				continue;
@@ -141,7 +143,9 @@ class Xf_Translator_Public {
 				continue;
 			}
 
-			$hreflang = ! empty( $language['hreflang'] ) ? strtolower( $language['hreflang'] ) : $prefix;
+			// hreflang should be lowercase (e.g., de-de, fr-ca), but this is
+			// independent from how we store prefixes/meta internally.
+			$hreflang = ! empty( $language['hreflang'] ) ? strtolower( $language['hreflang'] ) : strtolower( $prefix );
 			$language_versions[ $hreflang ] = $permalink;
 		}
 
@@ -233,7 +237,8 @@ class Xf_Translator_Public {
 					continue;
 				}
 
-				$translated_id = $this->get_translated_post_id( $original_post_id, strtolower( $language['prefix'] ) );
+				// Use the configured prefix exactly for lookups/meta.
+				$translated_id = $this->get_translated_post_id( $original_post_id, $language['prefix'] );
 				if ( ! $translated_id ) {
 					// No translation exists, link to home page with language prefix
 					$items[] = array(
@@ -1762,6 +1767,57 @@ class Xf_Translator_Public {
 				$query->set('post__in', array(0));
 			}
 		}
+	}
+
+	/**
+	 * Prevent WordPress canonical redirects from stripping language prefixes
+	 * on translated URLs (e.g. /de-DE/post-slug/ → /post-slug/).
+	 *
+	 * @param string|false $redirect_url  The URL WordPress wants to redirect to.
+	 * @param string       $requested_url The originally requested URL.
+	 *
+	 * @return string|false Modified redirect URL or false to disable redirect.
+	 */
+	public function filter_redirect_canonical( $redirect_url, $requested_url ) {
+		// Only affect frontend.
+		if ( is_admin() ) {
+			return $redirect_url;
+		}
+
+		// If our language query var is present, never canonical-redirect.
+		$lang_prefix = get_query_var( 'xf_lang_prefix' );
+		if ( ! empty( $lang_prefix ) ) {
+			return false;
+		}
+
+		// Extra safety: detect language prefixes directly from the requested path.
+		$path = parse_url( $requested_url, PHP_URL_PATH );
+		if ( empty( $path ) ) {
+			return $redirect_url;
+		}
+
+		$languages = $this->settings->get( 'languages', array() );
+		if ( empty( $languages ) ) {
+			return $redirect_url;
+		}
+
+		foreach ( $languages as $language ) {
+			if ( empty( $language['prefix'] ) ) {
+				continue;
+			}
+
+			$prefix = trim( $language['prefix'], '/' );
+			if ( empty( $prefix ) ) {
+				continue;
+			}
+
+			// Match URLs that start with the prefix, e.g. /de-DE/... or /fr/...
+			if ( preg_match( '#^/' . preg_quote( $prefix, '#' ) . '(/|$)#i', $path ) ) {
+				return false;
+			}
+		}
+
+		return $redirect_url;
 	}
 
 }

@@ -286,46 +286,40 @@ class Xf_Translator_Processor
             'excerpt' => $post->post_excerpt
         );
 
-        // Get ACF fields if ACF is active
-        if (function_exists('get_fields')) {
-            $acf_fields = get_fields($post_id);
-            if ($acf_fields) {
-                // Filter out ACF internal fields (starting with _)
-                foreach ($acf_fields as $key => $value) {
-                    if (strpos($key, '_') !== 0 && !empty($value)) {
-                        // Handle different field types
-                        if (is_string($value) || is_numeric($value)) {
-                            $data['acf_' . $key] = $value;
-                        } elseif (is_array($value)) {
-                            // For array fields, convert to string representation
-                            $data['acf_' . $key] = $this->format_field_value($value);
-                        }
-                    }
-                }
-            }
-        }
+        // Define SEO-related meta keys to include
+        // Common SEO plugins: Yoast, Rank Math, All in One SEO, SEOPress
+        $seo_meta_keys = array(
+            // Yoast SEO
+            '_yoast_wpseo_title',
+            '_yoast_wpseo_metadesc',
+            // Rank Math
+            'rank_math_title',
+            'rank_math_description',
+            // All in One SEO
+            '_aioseo_title',
+            '_aioseo_description',
+            // SEOPress
+            '_seopress_titles_title',
+            '_seopress_titles_desc',
+            // Generic/common meta tags
+            '_meta_title',
+            '_meta_description',
+            'meta_title',
+            'meta_description'
+        );
 
-        // Also get custom fields (post meta) that might be ACF fields or other custom fields
+        // Get only SEO-related meta fields
         $custom_fields = get_post_meta($post_id);
         foreach ($custom_fields as $key => $values) {
-            // Skip internal WordPress fields and ACF internal fields
-            if (strpos($key, '_') === 0) {
-                continue;
-            }
+            // Only include SEO-related meta keys
+            if (in_array($key, $seo_meta_keys)) {
+                // Get the first value (most custom fields have single values)
+                $value = is_array($values) ? $values[0] : $values;
 
-            // Skip if already added as ACF field
-            if (isset($data['acf_' . $key])) {
-                continue;
-            }
-
-            // Get the first value (most custom fields have single values)
-            $value = is_array($values) ? $values[0] : $values;
-
-            // Handle different value types
-            if (is_string($value) || is_numeric($value)) {
-                $data['meta_' . $key] = $value;
-            } elseif (is_array($value)) {
-                $data['meta_' . $key] = $this->format_field_value($value);
+                // Only include if value is not empty and is a string/numeric
+                if (!empty($value) && (is_string($value) || is_numeric($value))) {
+                    $data['meta_' . $key] = $value;
+                }
             }
         }
 
@@ -1667,12 +1661,14 @@ class Xf_Translator_Processor
         // Check if translated post already exists
         $translated_post_id = get_post_meta($post_id, '_xf_translator_translated_post_' . $target_language_prefix, true);
 
+        $edited_fields = !empty($parsed_translation) ? array_keys($parsed_translation) : array();
+
         if ($translated_post_id && get_post($translated_post_id)) {
-            // Update existing translated post
-            $updated_post_id = $this->update_translated_post($translated_post_id, $parsed_translation, $queue_entry_id);
+            // Update existing translated post with the fields we actually translated
+            $updated_post_id = $this->update_translated_post($translated_post_id, $parsed_translation, $edited_fields);
         } else {
-            // Create new translated post
-            $updated_post_id = $this->create_translated_post($post_id, $parsed_translation, $target_language_prefix, $queue_entry_id);
+            // Create new translated post using the translated data (title/content/etc)
+            $updated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
         }
 
         if (!$updated_post_id) {

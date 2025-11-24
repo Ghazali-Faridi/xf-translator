@@ -103,13 +103,42 @@ $recent_jobs = $wpdb->get_results(
                     $post = get_post($job['parent_post_id']);
                     $post_title = $post ? $post->post_title : __('Post not found', 'xf-translator');
                     $post_edit_link = $post ? get_edit_post_link($job['parent_post_id']) : '#';
+                    
+                    // Check if translation is completed and get translated post
+                    $translated_post = null;
+                    $translated_post_title = '';
+                    $translated_post_link = '#';
+                    
+                    if ($job['status'] === 'completed' && !empty($job['translated_post_id'])) {
+                        $translated_post = get_post($job['translated_post_id']);
+                        if ($translated_post) {
+                            $translated_post_title = $translated_post->post_title;
+                            $translated_post_link = get_edit_post_link($job['translated_post_id']);
+                        }
+                    }
                     ?>
                     <tr>
                         <td>
                             <strong>#<?php echo esc_html($job['id']); ?></strong>
                         </td>
                         <td>
-                            <?php if ($post) : ?>
+                            <?php if ($translated_post && $job['status'] === 'completed') : ?>
+                                <!-- Show translated post if completed -->
+                                <a href="<?php echo esc_url($translated_post_link); ?>" target="_blank" style="font-weight: bold;">
+                                    <?php echo esc_html($translated_post_title); ?>
+                                </a>
+                                <br>
+                                <small style="color: #666;">
+                                    <?php _e('Translated Post ID:', 'xf-translator'); ?> <?php echo esc_html($job['translated_post_id']); ?>
+                                    <?php if ($post) : ?>
+                                        | <?php _e('Original:', 'xf-translator'); ?> 
+                                        <a href="<?php echo esc_url($post_edit_link); ?>" target="_blank" style="color: #666;">
+                                            <?php echo esc_html($post_title); ?>
+                                        </a>
+                                    <?php endif; ?>
+                                </small>
+                            <?php elseif ($post) : ?>
+                                <!-- Show original post if not completed -->
                                 <a href="<?php echo esc_url($post_edit_link); ?>" target="_blank">
                                     <?php echo esc_html($post_title); ?>
                                 </a>

@@ -224,6 +224,9 @@ class Xf_Translator {
 		// Filter query to find translated posts by language prefix
 		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_translated_post_query', 10, 1 );
 		
+		// Prevent WordPress canonical redirects from stripping language prefixes
+		$this->loader->add_filter( 'redirect_canonical', $plugin_public, 'filter_redirect_canonical', 999, 2 );
+		
 		// Filter all queries to show only content for current language
 		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_content_by_language', 5, 1 );
 		

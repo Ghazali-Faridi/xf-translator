@@ -1309,6 +1309,10 @@ class Xf_Translator_Admin {
      * @param WP_Post $post_before Post object before update
      */
     public function handle_post_edit($post_id, $post_after, $post_before) {
+        // DISABLED: Automatic translation on post edits is disabled
+        // To re-enable, remove or comment out this return statement
+        return;
+        
         // Skip autosaves and revisions
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
             return;
@@ -1573,6 +1577,10 @@ class Xf_Translator_Admin {
      * @param int $post_id Post ID
      */
     public function handle_acf_save($post_id) {
+        // DISABLED: Automatic translation on post edits is disabled
+        // To re-enable, remove or comment out this return statement
+        return;
+        
         // Skip autosaves and revisions
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
             return;
@@ -1647,6 +1655,10 @@ class Xf_Translator_Admin {
      * @param mixed $meta_value Meta value
      */
     public function handle_meta_update($meta_id, $post_id, $meta_key, $meta_value) {
+        // DISABLED: Automatic translation on post edits is disabled
+        // To re-enable, remove or comment out this return statement
+        return;
+        
         // Skip our internal meta keys
         if (strpos($meta_key, '_xf_translator_') === 0 || 
             strpos($meta_key, '_api_translator_') === 0 ||
@@ -1727,6 +1739,10 @@ class Xf_Translator_Admin {
      * @param int $post_id Post ID
      */
     public function check_custom_fields_after_update($post_id) {
+        // DISABLED: Automatic translation on post edits is disabled
+        // To re-enable, remove or comment out this return statement
+        return;
+        
         // Skip autosaves and revisions
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
             return;
