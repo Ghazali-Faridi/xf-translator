@@ -446,9 +446,11 @@ class Xf_Translator_Public {
 	/**
 	 * Get the URL-safe prefix segment for a language configuration.
 	 *
+	 * Uses the 'path' field if available, otherwise falls back to 'prefix'.
 	 * Example:
-	 * - Stored prefix "fr-CA" → URL prefix "frCA" (hyphen removed, case preserved).
-	 * - Stored prefix "fr"    → URL prefix "fr".
+	 * - Stored path "fr" → URL prefix "fr".
+	 * - Stored path "Ar" → URL prefix "Ar".
+	 * - If path not set, uses prefix: "fr-CA" → URL prefix "frCA" (hyphen removed).
 	 *
 	 * This lets site owners store human-friendly prefixes (used in meta / hreflang),
 	 * while URLs use a simple segment that avoids server/host restrictions.
@@ -458,7 +460,10 @@ class Xf_Translator_Public {
 	 */
 	private function get_url_prefix_for_language( $language ) {
 		if ( is_array( $language ) ) {
-			$prefix = isset( $language['prefix'] ) ? $language['prefix'] : '';
+			// Use 'path' field if available, otherwise fall back to 'prefix'
+			$prefix = isset( $language['path'] ) && !empty( $language['path'] ) 
+				? $language['path'] 
+				: ( isset( $language['prefix'] ) ? $language['prefix'] : '' );
 		} else {
 			$prefix = (string) $language;
 		}
@@ -476,7 +481,7 @@ class Xf_Translator_Public {
 		}
 
 		// Build URL-safe prefix: remove all non-alphanumeric characters.
-		// e.g. "fr-CA" => "frCA", "pt-BR" => "ptBR".
+		// e.g. "fr-CA" => "frCA", "pt-BR" => "ptBR", "fr" => "fr", "Ar" => "Ar".
 		$url_prefix = preg_replace( '/[^A-Za-z0-9]/', '', $prefix );
 
 		return $url_prefix ?: '';

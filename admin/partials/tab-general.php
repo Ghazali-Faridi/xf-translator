@@ -138,8 +138,38 @@ if (!defined('ABSPATH')) {
                            maxlength="10"
                            placeholder="<?php esc_attr_e('e.g., en, es, fr', 'api-translator'); ?>">
                     <p class="description">
-                        <?php _e('ISO language code (e.g., en, es, fr, de)', 'api-translator'); ?>
+                        <?php _e('ISO language code (e.g., en, es, fr, de). Must be unique.', 'api-translator'); ?>
                     </p>
+                    <span id="prefix-error" class="error-message" style="color: #dc3232; display: none;"></span>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">
+                    <label for="language_path"><?php _e('Language Path', 'api-translator'); ?></label>
+                </th>
+                <td>
+                    <input type="text" 
+                           id="language_path" 
+                           name="language_path" 
+                           class="regular-text" 
+                           maxlength="20"
+                           placeholder="<?php esc_attr_e('e.g., fr, Ar', 'api-translator'); ?>">
+                    <p class="description">
+                        <?php _e('URL path used in post slugs (e.g., fr, Ar). If empty, prefix will be used. Must be unique.', 'api-translator'); ?>
+                    </p>
+                    <span id="path-error" class="error-message" style="color: #dc3232; display: none;"></span>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">
+                    <label for="language_description"><?php _e('Language Description', 'api-translator'); ?></label>
+                </th>
+                <td>
+                    <textarea id="language_description" 
+                              name="language_description" 
+                              class="large-text" 
+                              rows="3"
+                              placeholder="<?php esc_attr_e('Optional description for this language', 'api-translator'); ?>"></textarea>
                 </td>
             </tr>
         </table>
@@ -157,6 +187,8 @@ if (!defined('ABSPATH')) {
                 <tr>
                     <th scope="col"><?php _e('Language Name', 'api-translator'); ?></th>
                     <th scope="col"><?php _e('Prefix', 'api-translator'); ?></th>
+                    <th scope="col"><?php _e('Path', 'api-translator'); ?></th>
+                    <th scope="col"><?php _e('Description', 'api-translator'); ?></th>
                     <th scope="col" class="actions-col"><?php _e('Actions', 'api-translator'); ?></th>
                 </tr>
             </thead>
@@ -170,11 +202,19 @@ if (!defined('ABSPATH')) {
                             <code><?php echo esc_html($language['prefix']); ?></code>
                         </td>
                         <td>
+                            <code><?php echo esc_html(isset($language['path']) && !empty($language['path']) ? $language['path'] : $language['prefix']); ?></code>
+                        </td>
+                        <td>
+                            <?php echo esc_html(isset($language['description']) ? $language['description'] : ''); ?>
+                        </td>
+                        <td>
                             <button type="button" 
                                     class="button button-small edit-language" 
                                     data-index="<?php echo esc_attr($index); ?>"
                                     data-name="<?php echo esc_attr($language['name']); ?>"
-                                    data-prefix="<?php echo esc_attr($language['prefix']); ?>">
+                                    data-prefix="<?php echo esc_attr($language['prefix']); ?>"
+                                    data-path="<?php echo esc_attr(isset($language['path']) ? $language['path'] : ''); ?>"
+                                    data-description="<?php echo esc_attr(isset($language['description']) ? $language['description'] : ''); ?>">
                                 <?php _e('Edit', 'api-translator'); ?>
                             </button>
                             
@@ -265,6 +305,39 @@ if (!defined('ABSPATH')) {
                                class="regular-text" 
                                required
                                maxlength="10">
+                        <p class="description">
+                            <?php _e('ISO language code. Must be unique.', 'api-translator'); ?>
+                        </p>
+                        <span id="edit-prefix-error" class="error-message" style="color: #dc3232; display: none;"></span>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label for="edit_language_path"><?php _e('Language Path', 'api-translator'); ?></label>
+                    </th>
+                    <td>
+                        <input type="text" 
+                               id="edit_language_path" 
+                               name="language_path" 
+                               class="regular-text" 
+                               maxlength="20"
+                               placeholder="<?php esc_attr_e('e.g., fr, Ar', 'api-translator'); ?>">
+                        <p class="description">
+                            <?php _e('URL path used in post slugs. If empty, prefix will be used. Must be unique.', 'api-translator'); ?>
+                        </p>
+                        <span id="edit-path-error" class="error-message" style="color: #dc3232; display: none;"></span>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label for="edit_language_description"><?php _e('Language Description', 'api-translator'); ?></label>
+                    </th>
+                    <td>
+                        <textarea id="edit_language_description" 
+                                  name="language_description" 
+                                  class="large-text" 
+                                  rows="3"
+                                  placeholder="<?php esc_attr_e('Optional description for this language', 'api-translator'); ?>"></textarea>
                     </td>
                 </tr>
             </table>

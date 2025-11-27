@@ -167,6 +167,8 @@ class Xf_Translator {
         $this->loader->add_action('wp_ajax_xf_get_post_content', $plugin_admin, 'ajax_get_post_content');
         $this->loader->add_action('wp_ajax_xf_test_translation', $plugin_admin, 'ajax_test_translation');
         $this->loader->add_action('wp_ajax_xf_save_default_model', $plugin_admin, 'ajax_save_default_model');
+        $this->loader->add_action('wp_ajax_xf_check_prefix_availability', $plugin_admin, 'ajax_check_prefix_availability');
+        $this->loader->add_action('wp_ajax_xf_check_path_availability', $plugin_admin, 'ajax_check_path_availability');
         
         
         // Hook to create translation queue entries when a post is saved

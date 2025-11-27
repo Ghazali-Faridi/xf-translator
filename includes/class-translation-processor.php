@@ -464,9 +464,26 @@ class Xf_Translator_Processor
             $brand_tone_template = "You need to translate the following {content} in {lng} but dont translate any brand name / company name you are expert content translator your tone should be professional & should seo optimized dont translate any [] square brackets and square bracket's inside content";
         }
 
+        // Get language description for {desc} placeholder
+        $language_description = '';
+        $languages = $this->settings->get('languages', array());
+        foreach ($languages as $lang) {
+            if (isset($lang['name']) && $lang['name'] === $target_language) {
+                $language_description = isset($lang['description']) ? $lang['description'] : '';
+                break;
+            }
+        }
+
         // Replace placeholders
         $prompt = str_replace('{content}', $content_string, $brand_tone_template);
         $prompt = str_replace('{lng}', $language_name, $prompt);
+
+        // Replace {desc} placeholder with language description
+        if (!empty($language_description)) {
+            $prompt = str_replace('{desc}', $language_description, $prompt);
+        } else {
+            $prompt = str_replace('{desc}', '', $prompt);
+        }
 
         // Replace {glossy} placeholder with just the glossary list
         // The instruction text should already be in the template around {glossy}
@@ -2008,6 +2025,23 @@ class Xf_Translator_Processor
             $prompt = str_replace('{content}', $this->build_content_string($post_data), $custom_prompt);
             $prompt = str_replace('{lng}', $target_language, $prompt);
 
+            // Get language description for {desc} placeholder
+            $language_description = '';
+            $languages = $this->settings->get('languages', array());
+            foreach ($languages as $lang) {
+                if (isset($lang['name']) && $lang['name'] === $target_language) {
+                    $language_description = isset($lang['description']) ? $lang['description'] : '';
+                    break;
+                }
+            }
+            
+            // Replace {desc} placeholder with language description
+            if (!empty($language_description)) {
+                $prompt = str_replace('{desc}', $language_description, $prompt);
+            } else {
+                $prompt = str_replace('{desc}', '', $prompt);
+            }
+
             // Add glossary terms if configured
             $glossary_terms = $this->settings->get('glossary_terms', array());
             if (!empty($glossary_terms)) {
@@ -2052,12 +2086,138 @@ class Xf_Translator_Processor
         // Get token usage from the API call
         $tokens_used = $this->last_test_tokens;
 
+        // Create a test post with the translated content
+        $test_post_id = $this->create_test_translated_post($post_id, $target_language, $parsed_translation, $post_data);
+
+        if ($test_post_id === false) {
+            // If post creation fails, still return the translation data
+            return array(
+                'title' => $parsed_translation['title'] ?? '',
+                'content' => $parsed_translation['content'] ?? '',
+                'excerpt' => $parsed_translation['excerpt'] ?? '',
+                'tokens_used' => $tokens_used,
+                'test_post_id' => false,
+                'test_post_url' => ''
+            );
+        }
+
+        // Get the post URL
+        $test_post_url = get_permalink($test_post_id);
+
         return array(
             'title' => $parsed_translation['title'] ?? '',
             'content' => $parsed_translation['content'] ?? '',
             'excerpt' => $parsed_translation['excerpt'] ?? '',
-            'tokens_used' => $tokens_used
+            'tokens_used' => $tokens_used,
+            'test_post_id' => $test_post_id,
+            'test_post_url' => $test_post_url
         );
+    }
+    
+    /**
+     * Create a test post with translated content
+     * This is similar to create_translated_post but creates a draft post marked as test
+     *
+     * @param int $original_post_id Original post ID
+     * @param string $target_language Target language name
+     * @param array $translated_data Parsed translated data
+     * @param array $original_data Original post data
+     * @return int|false Test post ID or false on failure
+     */
+    private function create_test_translated_post($original_post_id, $target_language, $translated_data, $original_data)
+    {
+        $original_post = get_post($original_post_id);
+
+        if (!$original_post) {
+            return false;
+        }
+
+        // Get language prefix for meta key
+        $languages = $this->settings->get('languages', array());
+        $language_prefix = '';
+        foreach ($languages as $lang) {
+            if ($lang['name'] === $target_language) {
+                $language_prefix = $lang['prefix'];
+                break;
+            }
+        }
+
+        // Prepare post data - always create as draft for test posts
+        $post_data = array(
+            'post_type' => $original_post->post_type,
+            'post_status' => 'draft', // Always draft for test posts
+            'post_author' => $original_post->post_author,
+            'post_parent' => $original_post->post_parent,
+            'menu_order' => $original_post->menu_order,
+            'comment_status' => $original_post->comment_status,
+            'ping_status' => $original_post->ping_status,
+        );
+
+        // Set translated title with test indicator
+        if (isset($translated_data['title']) && !empty($translated_data['title'])) {
+            $post_data['post_title'] = $translated_data['title'] . ' [TEST]';
+        } else {
+            $post_data['post_title'] = $original_post->post_title . ' (' . $target_language . ') [TEST]';
+        }
+
+        // Set translated content
+        if (isset($translated_data['content']) && !empty($translated_data['content'])) {
+            $post_data['post_content'] = $translated_data['content'];
+        } else {
+            $post_data['post_content'] = $original_post->post_content;
+        }
+
+        // Set translated excerpt
+        if (isset($translated_data['excerpt']) && !empty($translated_data['excerpt'])) {
+            $post_data['post_excerpt'] = $translated_data['excerpt'];
+        } else {
+            $post_data['post_excerpt'] = $original_post->post_excerpt;
+        }
+
+        // Generate unique slug for test post
+        $original_slug = $original_post->post_name;
+        if (empty($original_slug)) {
+            $original_slug = sanitize_title($original_post->post_title);
+        }
+        
+        // Add test suffix to slug to make it unique
+        $test_slug = $original_slug . '-test-' . time();
+        $post_data['post_name'] = $test_slug;
+
+        // Copy categories and tags
+        $categories = wp_get_post_categories($original_post_id, array('fields' => 'ids'));
+        if (!empty($categories)) {
+            $post_data['post_category'] = $categories;
+        }
+
+        $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));
+        if (!empty($tags)) {
+            $post_data['tags_input'] = $tags;
+        }
+
+        // Set flag to prevent post listener from processing this test post
+        self::$creating_translated_post = true;
+
+        // Create test post
+        $test_post_id = wp_insert_post($post_data, true);
+
+        // Clear flag
+        self::$creating_translated_post = false;
+
+        if (is_wp_error($test_post_id)) {
+            return false;
+        }
+
+        // Mark this as a test post and link to original
+        update_post_meta($test_post_id, '_xf_translator_is_test_post', true);
+        update_post_meta($test_post_id, '_xf_translator_original_post_id', $original_post_id);
+        update_post_meta($test_post_id, '_xf_translator_language', $language_prefix);
+        update_post_meta($test_post_id, '_xf_translator_test_timestamp', time());
+
+        // Also store on original post for reference
+        update_post_meta($original_post_id, '_xf_translator_test_post_' . $language_prefix, $test_post_id);
+
+        return $test_post_id;
     }
 
     /**

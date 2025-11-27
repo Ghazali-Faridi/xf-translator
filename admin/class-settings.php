@@ -89,24 +89,102 @@ class Settings {
      *
      * @param string $name Language name
      * @param string $prefix Language prefix (e.g., 'en', 'es')
+     * @param string $path Language path for URL (e.g., 'fr', 'Ar')
+     * @param string $description Language description
      * @return bool
      */
-    public function add_language($name, $prefix) {
+    public function add_language($name, $prefix, $path = '', $description = '') {
         $languages = $this->get('languages', array());
         
-        // Check if language already exists
+        // Check if prefix already exists
         foreach ($languages as $lang) {
-            if ($lang['prefix'] === $prefix) {
-                return false; // Language already exists
+            if (isset($lang['prefix']) && $lang['prefix'] === $prefix) {
+                return false; // Prefix already exists
             }
+        }
+        
+        // If path is not provided, use prefix as fallback
+        if (empty($path)) {
+            $path = $prefix;
+        }
+        
+        // Check if path already exists (after determining final path value)
+        if ($this->path_exists($path)) {
+            return false; // Path already exists
         }
         
         $languages[] = array(
             'name' => sanitize_text_field($name),
-            'prefix' => sanitize_text_field($prefix)
+            'prefix' => sanitize_text_field($prefix),
+            'path' => sanitize_text_field($path),
+            'description' => sanitize_textarea_field($description)
         );
         
         return $this->update('languages', $languages);
+    }
+    
+    /**
+     * Check if prefix is already used
+     *
+     * @param string $prefix Prefix to check
+     * @param int $exclude_index Optional index to exclude from check (for edit)
+     * @return bool True if prefix exists, false otherwise
+     */
+    public function prefix_exists($prefix, $exclude_index = null) {
+        $languages = $this->get('languages', array());
+        
+        foreach ($languages as $index => $lang) {
+            // Skip the current language being edited
+            if ($exclude_index !== null && $index === $exclude_index) {
+                continue;
+            }
+            
+            if (isset($lang['prefix']) && $lang['prefix'] === $prefix) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Check if path is already used
+     *
+     * @param string $path Path to check
+     * @param int $exclude_index Optional index to exclude from check (for edit)
+     * @return bool True if path exists, false otherwise
+     */
+    public function path_exists($path, $exclude_index = null) {
+        if (empty($path)) {
+            return false; // Empty paths are allowed (will use prefix as fallback)
+        }
+        
+        $languages = $this->get('languages', array());
+        
+        foreach ($languages as $index => $lang) {
+            // Skip the current language being edited
+            if ($exclude_index !== null && $index === $exclude_index) {
+                continue;
+            }
+            
+            // Get the path for this language (use path if set, otherwise prefix)
+            $lang_path = '';
+            if (isset($lang['path']) && !empty($lang['path'])) {
+                $lang_path = $lang['path'];
+            } elseif (isset($lang['prefix'])) {
+                $lang_path = $lang['prefix'];
+            }
+            
+            // Normalize paths for comparison (remove non-alphanumeric, case-insensitive)
+            $normalized_path = preg_replace('/[^A-Za-z0-9]/', '', strtolower($path));
+            $normalized_lang_path = preg_replace('/[^A-Za-z0-9]/', '', strtolower($lang_path));
+            
+            if ($normalized_path === $normalized_lang_path && !empty($normalized_path)) {
+                return true;
+            }
+        }
+        
+        return false;
     }
     
     /**
@@ -115,18 +193,46 @@ class Settings {
      * @param int $index Language index
      * @param string $name Language name
      * @param string $prefix Language prefix
+     * @param string $path Language path for URL
+     * @param string $description Language description
      * @return bool
      */
-    public function update_language($index, $name, $prefix) {
+    public function update_language($index, $name, $prefix, $path = '', $description = '') {
         $languages = $this->get('languages', array());
         
         if (!isset($languages[$index])) {
             return false;
         }
         
+        // Check if prefix is already used by another language
+        if ($this->prefix_exists($prefix, $index)) {
+            return false;
+        }
+        
+        // Preserve existing path and description if not provided
+        $existing = $languages[$index];
+        if (empty($path) && isset($existing['path'])) {
+            $path = $existing['path'];
+        }
+        if (empty($description) && isset($existing['description'])) {
+            $description = $existing['description'];
+        }
+        
+        // If path is still not provided, use prefix as fallback
+        if (empty($path)) {
+            $path = $prefix;
+        }
+        
+        // Check if path is already used by another language
+        if ($this->path_exists($path, $index)) {
+            return false;
+        }
+        
         $languages[$index] = array(
             'name' => sanitize_text_field($name),
-            'prefix' => sanitize_text_field($prefix)
+            'prefix' => sanitize_text_field($prefix),
+            'path' => sanitize_text_field($path),
+            'description' => sanitize_textarea_field($description)
         );
         
         return $this->update('languages', $languages);

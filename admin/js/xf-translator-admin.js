@@ -14,10 +14,18 @@
             var index = $(this).data('index');
             var name = $(this).data('name');
             var prefix = $(this).data('prefix');
+            var path = $(this).data('path') || '';
+            var description = $(this).data('description') || '';
             
             $('#edit_language_index').val(index);
             $('#edit_language_name').val(name);
             $('#edit_language_prefix').val(prefix);
+            $('#edit_language_path').val(path);
+            $('#edit_language_description').val(description);
+            
+            // Clear any previous error messages
+            $('#edit-prefix-error').hide().text('');
+            $('#edit-path-error').hide().text('');
             
             $('#edit-language-modal').fadeIn();
         });
@@ -34,6 +42,200 @@
                 $(event.target).fadeOut();
             }
         });
+        
+        // Real-time prefix validation for add language form
+        var prefixCheckTimeout;
+        $('#language_prefix').on('input', function() {
+            var $input = $(this);
+            var prefix = $input.val().trim();
+            var $error = $('#prefix-error');
+            
+            // Clear previous timeout
+            clearTimeout(prefixCheckTimeout);
+            
+            // Hide error if empty
+            if (!prefix) {
+                $error.hide().text('');
+                return;
+            }
+            
+            // Debounce the check
+            prefixCheckTimeout = setTimeout(function() {
+                checkPrefixAvailability(prefix, null, $error);
+            }, 500);
+        });
+        
+        // Real-time prefix validation for edit language form
+        var editPrefixCheckTimeout;
+        $('#edit_language_prefix').on('input', function() {
+            var $input = $(this);
+            var prefix = $input.val().trim();
+            var index = $('#edit_language_index').val();
+            var $error = $('#edit-prefix-error');
+            
+            // Clear previous timeout
+            clearTimeout(editPrefixCheckTimeout);
+            
+            // Hide error if empty
+            if (!prefix) {
+                $error.hide().text('');
+                return;
+            }
+            
+            // Debounce the check
+            editPrefixCheckTimeout = setTimeout(function() {
+                checkPrefixAvailability(prefix, index, $error);
+            }, 500);
+        });
+        
+        // Real-time path validation for add language form
+        var pathCheckTimeout;
+        $('#language_path').on('input', function() {
+            var $input = $(this);
+            var path = $input.val().trim();
+            var prefix = $('#language_prefix').val().trim();
+            var $error = $('#path-error');
+            
+            // Clear previous timeout
+            clearTimeout(pathCheckTimeout);
+            
+            // If path is empty, it will use prefix, so check prefix instead
+            if (!path && prefix) {
+                path = prefix;
+            }
+            
+            // Hide error if empty
+            if (!path) {
+                $error.hide().text('');
+                return;
+            }
+            
+            // Debounce the check
+            pathCheckTimeout = setTimeout(function() {
+                checkPathAvailability(path, prefix, null, $error);
+            }, 500);
+        });
+        
+        // Real-time path validation for edit language form
+        var editPathCheckTimeout;
+        $('#edit_language_path').on('input', function() {
+            var $input = $(this);
+            var path = $input.val().trim();
+            var prefix = $('#edit_language_prefix').val().trim();
+            var index = $('#edit_language_index').val();
+            var $error = $('#edit-path-error');
+            
+            // Clear previous timeout
+            clearTimeout(editPathCheckTimeout);
+            
+            // If path is empty, it will use prefix, so check prefix instead
+            if (!path && prefix) {
+                path = prefix;
+            }
+            
+            // Hide error if empty
+            if (!path) {
+                $error.hide().text('');
+                return;
+            }
+            
+            // Debounce the check
+            editPathCheckTimeout = setTimeout(function() {
+                checkPathAvailability(path, prefix, index, $error);
+            }, 500);
+        });
+        
+        // Also check path when prefix changes (since path can fallback to prefix)
+        $('#language_prefix').on('input', function() {
+            var path = $('#language_path').val().trim();
+            var prefix = $(this).val().trim();
+            
+            // If path is empty, trigger path validation with prefix value
+            if (!path && prefix) {
+                $('#language_path').trigger('input');
+            }
+        });
+        
+        $('#edit_language_prefix').on('input', function() {
+            var path = $('#edit_language_path').val().trim();
+            var prefix = $(this).val().trim();
+            
+            // If path is empty, trigger path validation with prefix value
+            if (!path && prefix) {
+                $('#edit_language_path').trigger('input');
+            }
+        });
+        
+        // Function to check prefix availability via AJAX
+        function checkPrefixAvailability(prefix, excludeIndex, $errorElement) {
+            if (!prefix) {
+                $errorElement.hide().text('');
+                return;
+            }
+            
+            $.ajax({
+                url: apiTranslator.ajaxUrl,
+                type: 'POST',
+                data: {
+                    action: 'xf_check_prefix_availability',
+                    prefix: prefix,
+                    exclude_index: excludeIndex,
+                    nonce: apiTranslator.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        if (response.data.available) {
+                            $errorElement.hide().text('');
+                        } else {
+                            $errorElement.text('This prefix is already in use.').show();
+                        }
+                    } else {
+                        // On error, don't show error message (might be network issue)
+                        $errorElement.hide().text('');
+                    }
+                },
+                error: function() {
+                    // On AJAX error, don't show error message
+                    $errorElement.hide().text('');
+                }
+            });
+        }
+        
+        // Function to check path availability via AJAX
+        function checkPathAvailability(path, prefix, excludeIndex, $errorElement) {
+            if (!path) {
+                $errorElement.hide().text('');
+                return;
+            }
+            
+            $.ajax({
+                url: apiTranslator.ajaxUrl,
+                type: 'POST',
+                data: {
+                    action: 'xf_check_path_availability',
+                    path: path,
+                    prefix: prefix,
+                    exclude_index: excludeIndex,
+                    nonce: apiTranslator.nonce
+                },
+                success: function(response) {
+                    if (response.success) {
+                        if (response.data.available) {
+                            $errorElement.hide().text('');
+                        } else {
+                            $errorElement.text('This path is already in use by another language.').show();
+                        }
+                    } else {
+                        // On error, don't show error message (might be network issue)
+                        $errorElement.hide().text('');
+                    }
+                },
+                error: function() {
+                    // On AJAX error, don't show error message
+                    $errorElement.hide().text('');
+                }
+            });
+        }
         
         // Error Detail Modal
         $(document).on('click', '.view-error-detail', function() {
@@ -72,6 +274,22 @@
                 if (prefix.length > 10) {
                     e.preventDefault();
                     alert('Language prefix must be 10 characters or less.');
+                    return false;
+                }
+                
+                // Check for prefix errors
+                var $prefixError = action === 'add_language' ? $('#prefix-error') : $('#edit-prefix-error');
+                if ($prefixError.is(':visible') && $prefixError.text().length > 0) {
+                    e.preventDefault();
+                    alert('Please fix the prefix error before submitting.');
+                    return false;
+                }
+                
+                // Check for path errors
+                var $pathError = action === 'add_language' ? $('#path-error') : $('#edit-path-error');
+                if ($pathError.is(':visible') && $pathError.text().length > 0) {
+                    e.preventDefault();
+                    alert('Please fix the path error before submitting.');
                     return false;
                 }
             }

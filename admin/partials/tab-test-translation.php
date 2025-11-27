@@ -285,6 +285,17 @@ jQuery(document).ready(function($) {
         resultHtml += '<h4 style="margin-top: 0;">' + escapeHtml(modelLabel) + '</h4>';
         resultHtml += '<p><strong>Title:</strong> ' + escapeHtml(data.translated_title || 'N/A') + '</p>';
         
+        // Display test post URL if available
+        if (data.test_post_url && data.test_post_id) {
+            resultHtml += '<p style="margin: 10px 0; padding: 10px; background: #e7f5e7; border-left: 4px solid #46b450;">';
+            resultHtml += '<strong>✓ Test Post Created:</strong> ';
+            resultHtml += '<a href="' + escapeHtml(data.test_post_url) + '" target="_blank" style="color: #0073aa; text-decoration: underline;">';
+            resultHtml += 'View Test Post';
+            resultHtml += '</a>';
+            resultHtml += ' <span style="color: #666; font-size: 12px;">(opens in new tab)</span>';
+            resultHtml += '</p>';
+        }
+        
         // For content preview, strip HTML tags for a clean preview but show it's HTML content
         var contentPreview = data.translated_content || 'N/A';
         if (contentPreview !== 'N/A' && contentPreview.length > 300) {

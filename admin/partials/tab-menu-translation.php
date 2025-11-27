@@ -31,6 +31,27 @@ $languages = $settings->get('languages', array());
     <h2><?php _e('Menu Translation', 'xf-translator'); ?></h2>
     <p><?php _e('Translate your navigation menus into different languages. Each language will have its own menu with translated menu items.', 'xf-translator'); ?></p>
     
+    <?php if (!empty($languages) && !empty($menus)) : ?>
+    <div class="notice-inline notice-info" style="margin-bottom: 20px; padding: 15px; border-left: 4px solid #0073aa;">
+        <form method="post" action="" class="xf-bulk-menu-form" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="translate_all_menus">
+            <label for="bulk-menu-language" style="font-weight: 600;"><?php _e('Translate every menu to:', 'xf-translator'); ?></label>
+            <select id="bulk-menu-language" name="target_language" required>
+                <option value=""><?php _e('Select Language', 'xf-translator'); ?></option>
+                <?php foreach ($languages as $language) : ?>
+                    <option value="<?php echo esc_attr($language['name']); ?>">
+                        <?php echo esc_html($language['name']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <button type="submit" class="button button-primary">
+                <?php _e('Translate All Menus', 'xf-translator'); ?>
+            </button>
+        </form>
+    </div>
+    <?php endif; ?>
+    
     <?php settings_errors('api_translator_messages'); ?>
     
     <?php if (empty($menus)) : ?>

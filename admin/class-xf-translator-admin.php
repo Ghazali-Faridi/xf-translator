@@ -103,7 +103,7 @@ class Xf_Translator_Admin {
 		wp_enqueue_script( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'js/xf-translator-admin.js', array( 'jquery' ), $this->version, false );
 		
 		// Localize script for AJAX
-		wp_localize_script( $this->plugin_name, 'xfTranslator', array(
+		wp_localize_script( $this->plugin_name, 'apiTranslator', array(
 			'ajaxUrl' => admin_url( 'admin-ajax.php' ),
 			'nonce' => wp_create_nonce( 'xf_translator_ajax' )
 		) );
@@ -210,6 +210,10 @@ class Xf_Translator_Admin {
                 $this->handle_translate_menu();
                 break;
                 
+            case 'translate_all_menus':
+                $this->handle_translate_all_menus();
+                break;
+                
             case 'translate_menu_item':
                 $this->handle_translate_menu_item();
                 break;
@@ -265,11 +269,28 @@ class Xf_Translator_Admin {
         if (isset($_POST['language_name']) && isset($_POST['language_prefix'])) {
             $name = sanitize_text_field($_POST['language_name']);
             $prefix = sanitize_text_field($_POST['language_prefix']);
+            $path = isset($_POST['language_path']) ? sanitize_text_field($_POST['language_path']) : '';
+            $description = isset($_POST['language_description']) ? sanitize_textarea_field($_POST['language_description']) : '';
             
-            if ($this->settings->add_language($name, $prefix)) {
+            // Validate prefix is not duplicate
+            if ($this->settings->prefix_exists($prefix)) {
+                $this->add_notice(__('This prefix is already in use. Please choose a different prefix.', 'api-translator'), 'error');
+                return;
+            }
+            
+            // Determine final path value (use path if provided, otherwise prefix)
+            $final_path = !empty($path) ? $path : $prefix;
+            
+            // Validate path is not duplicate
+            if ($this->settings->path_exists($final_path)) {
+                $this->add_notice(__('This path is already in use by another language. Please choose a different path.', 'api-translator'), 'error');
+                return;
+            }
+            
+            if ($this->settings->add_language($name, $prefix, $path, $description)) {
                 $this->add_notice(__('Language added successfully.', 'api-translator'), 'success');
             } else {
-                $this->add_notice(__('Language already exists or invalid data.', 'api-translator'), 'error');
+                $this->add_notice(__('Language already exists or invalid data. Path or prefix may already be in use.', 'api-translator'), 'error');
             }
         }
     }
@@ -282,11 +303,39 @@ class Xf_Translator_Admin {
             $index = intval($_POST['language_index']);
             $name = sanitize_text_field($_POST['language_name']);
             $prefix = sanitize_text_field($_POST['language_prefix']);
+            $path = isset($_POST['language_path']) ? sanitize_text_field($_POST['language_path']) : '';
+            $description = isset($_POST['language_description']) ? sanitize_textarea_field($_POST['language_description']) : '';
             
-            if ($this->settings->update_language($index, $name, $prefix)) {
+            // Validate prefix is not duplicate (excluding current language)
+            if ($this->settings->prefix_exists($prefix, $index)) {
+                $this->add_notice(__('This prefix is already in use. Please choose a different prefix.', 'api-translator'), 'error');
+                return;
+            }
+            
+            // Get existing language to determine final path value
+            $languages = $this->settings->get('languages', array());
+            $existing = isset($languages[$index]) ? $languages[$index] : array();
+            
+            // Determine final path value
+            $final_path = '';
+            if (!empty($path)) {
+                $final_path = $path;
+            } elseif (isset($existing['path']) && !empty($existing['path'])) {
+                $final_path = $existing['path'];
+            } else {
+                $final_path = $prefix;
+            }
+            
+            // Validate path is not duplicate (excluding current language)
+            if ($this->settings->path_exists($final_path, $index)) {
+                $this->add_notice(__('This path is already in use by another language. Please choose a different path.', 'api-translator'), 'error');
+                return;
+            }
+            
+            if ($this->settings->update_language($index, $name, $prefix, $path, $description)) {
                 $this->add_notice(__('Language updated successfully.', 'api-translator'), 'success');
             } else {
-                $this->add_notice(__('Failed to update language.', 'api-translator'), 'error');
+                $this->add_notice(__('Failed to update language. Path or prefix may already be in use.', 'api-translator'), 'error');
             }
         }
     }
@@ -1972,6 +2021,86 @@ class Xf_Translator_Admin {
     }
     
     /**
+     * Handle translating all menus into a single language
+     */
+    private function handle_translate_all_menus() {
+        if (!isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'menu_translation_error', __('Target language is required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $target_language = sanitize_text_field($_POST['target_language']);
+        $languages = $this->settings->get('languages', array());
+        $target_language_prefix = '';
+        
+        foreach ($languages as $language) {
+            if ($language['name'] === $target_language) {
+                $target_language_prefix = $language['prefix'];
+                break;
+            }
+        }
+        
+        if (empty($target_language_prefix)) {
+            add_settings_error('api_translator_messages', 'menu_translation_error', __('Invalid target language.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $all_menus = wp_get_nav_menus();
+        
+        if (empty($all_menus)) {
+            add_settings_error('api_translator_messages', 'menu_translation_error', __('No menus found to translate.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-menu-translation-processor.php';
+        $processor = new Xf_Translator_Menu_Processor();
+        
+        $translated_count = 0;
+        $skipped_count = 0;
+        $failed_menus = array();
+        
+        foreach ($all_menus as $menu) {
+            // Only process original menus
+            $original_menu_id = get_term_meta($menu->term_id, '_xf_translator_original_menu_id', true);
+            if (!empty($original_menu_id)) {
+                continue;
+            }
+            
+            // Skip menu if translation already exists
+            $translated_menu_id = get_term_meta($menu->term_id, '_xf_translator_menu_' . $target_language_prefix, true);
+            $translated_menu = $translated_menu_id ? wp_get_nav_menu_object($translated_menu_id) : false;
+            
+            if ($translated_menu) {
+                $skipped_count++;
+                continue;
+            }
+            
+            $result = $processor->translate_menu($menu->term_id, $target_language);
+            
+            if ($result && !is_wp_error($result)) {
+                $translated_count++;
+            } else {
+                $failed_menus[] = $menu->name;
+            }
+        }
+        
+        $message = sprintf(
+            __('Bulk menu translation finished. %1$d translated, %2$d skipped, %3$d failed.', 'xf-translator'),
+            $translated_count,
+            $skipped_count,
+            count($failed_menus)
+        );
+        
+        $notice_type = empty($failed_menus) ? 'success' : 'warning';
+        add_settings_error('api_translator_messages', 'menu_bulk_translation_summary', $message, $notice_type);
+        
+        if (!empty($failed_menus)) {
+            $failed_list = implode(', ', $failed_menus);
+            add_settings_error('api_translator_messages', 'menu_bulk_translation_failed', sprintf(__('Failed menus: %s', 'xf-translator'), $failed_list), 'error');
+        }
+    }
+    
+    /**
      * Handle individual menu item translation request
      */
     private function handle_translate_menu_item() {
@@ -2127,7 +2256,9 @@ class Xf_Translator_Admin {
             'translated_content' => $result['content'] ?? '',
             'translated_excerpt' => $result['excerpt'] ?? '',
             'tokens_used' => $result['tokens_used'] ?? 0,
-            'response_time' => $response_time
+            'response_time' => $response_time,
+            'test_post_id' => $result['test_post_id'] ?? false,
+            'test_post_url' => $result['test_post_url'] ?? ''
         ));
     }
     
@@ -2235,6 +2366,79 @@ class Xf_Translator_Admin {
         }
         
         $query->set('meta_query', $meta_query);
+    }
+    
+    /**
+     * AJAX handler to check prefix availability
+     */
+    public function ajax_check_prefix_availability() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        $prefix = isset($_POST['prefix']) ? sanitize_text_field($_POST['prefix']) : '';
+        $exclude_index = isset($_POST['exclude_index']) && $_POST['exclude_index'] !== '' ? intval($_POST['exclude_index']) : null;
+        
+        if (empty($prefix)) {
+            wp_send_json_error(array('message' => 'Prefix is required'));
+            return;
+        }
+        
+        $exists = $this->settings->prefix_exists($prefix, $exclude_index);
+        
+        wp_send_json_success(array(
+            'available' => !$exists,
+            'prefix' => $prefix
+        ));
+    }
+    
+    /**
+     * AJAX handler to check path availability
+     */
+    public function ajax_check_path_availability() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        $path = isset($_POST['path']) ? sanitize_text_field($_POST['path']) : '';
+        $prefix = isset($_POST['prefix']) ? sanitize_text_field($_POST['prefix']) : '';
+        $exclude_index = isset($_POST['exclude_index']) && $_POST['exclude_index'] !== '' ? intval($_POST['exclude_index']) : null;
+        
+        // If path is empty, it will use prefix as fallback, so check prefix instead
+        if (empty($path)) {
+            if (!empty($prefix)) {
+                $path = $prefix;
+            } else {
+                wp_send_json_success(array(
+                    'available' => true,
+                    'path' => ''
+                ));
+                return;
+            }
+        }
+        
+        $exists = $this->settings->path_exists($path, $exclude_index);
+        
+        wp_send_json_success(array(
+            'available' => !$exists,
+            'path' => $path
+        ));
     }
 
 }
