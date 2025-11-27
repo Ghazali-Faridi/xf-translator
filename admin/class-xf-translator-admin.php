@@ -233,7 +233,32 @@ class Xf_Translator_Admin {
             case 'retry_queue_entry':
                 $this->handle_retry_queue_entry();
                 break;
+                
+            case 'save_meta_fields':
+                $this->handle_save_meta_fields();
+                break;
         }
+    }
+    
+    /**
+     * Handle save meta fields
+     */
+    private function handle_save_meta_fields() {
+        $post_meta_fields = array();
+        $user_meta_fields = array();
+        
+        if (isset($_POST['selected_post_meta_fields']) && !empty($_POST['selected_post_meta_fields'])) {
+            $post_meta_fields = array_filter(array_map('trim', explode(',', sanitize_text_field($_POST['selected_post_meta_fields']))));
+        }
+        
+        if (isset($_POST['selected_user_meta_fields']) && !empty($_POST['selected_user_meta_fields'])) {
+            $user_meta_fields = array_filter(array_map('trim', explode(',', sanitize_text_field($_POST['selected_user_meta_fields']))));
+        }
+        
+        $this->settings->update_translatable_post_meta_fields($post_meta_fields);
+        $this->settings->update_translatable_user_meta_fields($user_meta_fields);
+        
+        $this->add_notice(__('Meta fields settings saved successfully.', 'xf-translator'), 'success');
     }
     
     /**
@@ -2398,6 +2423,164 @@ class Xf_Translator_Admin {
             'available' => !$exists,
             'prefix' => $prefix
         ));
+    }
+    
+    /**
+     * AJAX handler to scan post meta fields
+     */
+    public function ajax_scan_post_meta_fields() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        global $wpdb;
+        
+        // Get all unique meta keys from posts
+        $meta_keys = $wpdb->get_col(
+            "SELECT DISTINCT meta_key 
+            FROM {$wpdb->postmeta} 
+            WHERE meta_key NOT LIKE '\\_%' 
+            AND meta_key NOT LIKE '_xf_translator_%'
+            AND meta_key NOT LIKE '_api_translator_%'
+            AND meta_key NOT LIKE '_edit_%'
+            AND meta_key NOT LIKE '_wp_%'
+            ORDER BY meta_key ASC
+            LIMIT 200"
+        );
+        
+        // Also get private meta keys (starting with _) but exclude internal ones
+        $private_meta_keys = $wpdb->get_col(
+            "SELECT DISTINCT meta_key 
+            FROM {$wpdb->postmeta} 
+            WHERE meta_key LIKE '\\_%' 
+            AND meta_key NOT LIKE '_xf_translator_%'
+            AND meta_key NOT LIKE '_api_translator_%'
+            AND meta_key NOT LIKE '_edit_%'
+            AND meta_key NOT LIKE '_wp_%'
+            AND meta_key NOT LIKE '_thumbnail_%'
+            ORDER BY meta_key ASC
+            LIMIT 200"
+        );
+        
+        $all_keys = array_merge($meta_keys, $private_meta_keys);
+        $all_keys = array_unique($all_keys);
+        sort($all_keys);
+        
+        // Get sample values for each field
+        $fields_with_samples = array();
+        foreach ($all_keys as $key) {
+            $sample = $wpdb->get_var($wpdb->prepare(
+                "SELECT meta_value 
+                FROM {$wpdb->postmeta} 
+                WHERE meta_key = %s 
+                AND meta_value != '' 
+                AND LENGTH(meta_value) < 200
+                AND meta_value NOT LIKE '{%'
+                LIMIT 1",
+                $key
+            ));
+            
+            if ($sample && is_string($sample)) {
+                $fields_with_samples[] = array(
+                    'key' => $key,
+                    'sample' => $sample
+                );
+            } else {
+                $fields_with_samples[] = array(
+                    'key' => $key,
+                    'sample' => ''
+                );
+            }
+        }
+        
+        wp_send_json_success(array('fields' => $fields_with_samples));
+    }
+    
+    /**
+     * AJAX handler to scan user meta fields
+     */
+    public function ajax_scan_user_meta_fields() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        global $wpdb;
+        
+        // Get all unique meta keys from users
+        $meta_keys = $wpdb->get_col(
+            "SELECT DISTINCT meta_key 
+            FROM {$wpdb->usermeta} 
+            WHERE meta_key NOT LIKE '\\_%' 
+            AND meta_key NOT LIKE '_xf_translator_%'
+            AND meta_key NOT LIKE '_api_translator_%'
+            AND meta_key NOT LIKE '_wp_%'
+            ORDER BY meta_key ASC
+            LIMIT 200"
+        );
+        
+        // Also get private meta keys (starting with _) but exclude internal ones
+        $private_meta_keys = $wpdb->get_col(
+            "SELECT DISTINCT meta_key 
+            FROM {$wpdb->usermeta} 
+            WHERE meta_key LIKE '\\_%' 
+            AND meta_key NOT LIKE '_xf_translator_%'
+            AND meta_key NOT LIKE '_api_translator_%'
+            AND meta_key NOT LIKE '_wp_%'
+            AND meta_key != '_capabilities'
+            AND meta_key != '_user_level'
+            AND meta_key != '_user_roles'
+            ORDER BY meta_key ASC
+            LIMIT 200"
+        );
+        
+        $all_keys = array_merge($meta_keys, $private_meta_keys);
+        $all_keys = array_unique($all_keys);
+        sort($all_keys);
+        
+        // Get sample values for each field
+        $fields_with_samples = array();
+        foreach ($all_keys as $key) {
+            $sample = $wpdb->get_var($wpdb->prepare(
+                "SELECT meta_value 
+                FROM {$wpdb->usermeta} 
+                WHERE meta_key = %s 
+                AND meta_value != '' 
+                AND LENGTH(meta_value) < 200
+                AND meta_value NOT LIKE '{%'
+                LIMIT 1",
+                $key
+            ));
+            
+            if ($sample && is_string($sample)) {
+                $fields_with_samples[] = array(
+                    'key' => $key,
+                    'sample' => $sample
+                );
+            } else {
+                $fields_with_samples[] = array(
+                    'key' => $key,
+                    'sample' => ''
+                );
+            }
+        }
+        
+        wp_send_json_success(array('fields' => $fields_with_samples));
     }
     
     /**

@@ -286,40 +286,73 @@ class Xf_Translator_Processor
             'excerpt' => $post->post_excerpt
         );
 
-        // Define SEO-related meta keys to include
-        // Common SEO plugins: Yoast, Rank Math, All in One SEO, SEOPress
-        $seo_meta_keys = array(
-            // Yoast SEO
-            '_yoast_wpseo_title',
-            '_yoast_wpseo_metadesc',
-            // Rank Math
-            'rank_math_title',
-            'rank_math_description',
-            // All in One SEO
-            '_aioseo_title',
-            '_aioseo_description',
-            // SEOPress
-            '_seopress_titles_title',
-            '_seopress_titles_desc',
-            // Generic/common meta tags
-            '_meta_title',
-            '_meta_description',
-            'meta_title',
-            'meta_description'
-        );
+        // Get translatable meta fields from settings
+        $translatable_meta_fields = $this->settings->get_translatable_post_meta_fields();
+        
+        // If no fields configured, use default SEO fields for backward compatibility
+        if (empty($translatable_meta_fields)) {
+            $translatable_meta_fields = array(
+                '_yoast_wpseo_title',
+                '_yoast_wpseo_metadesc',
+                'rank_math_title',
+                'rank_math_description',
+                '_aioseo_title',
+                '_aioseo_description',
+                '_seopress_titles_title',
+                '_seopress_titles_desc',
+                '_meta_title',
+                '_meta_description',
+                'meta_title',
+                'meta_description'
+            );
+        }
 
-        // Get only SEO-related meta fields
-        $custom_fields = get_post_meta($post_id);
-        foreach ($custom_fields as $key => $values) {
-            // Only include SEO-related meta keys
-            if (in_array($key, $seo_meta_keys)) {
-                // Get the first value (most custom fields have single values)
-                $value = is_array($values) ? $values[0] : $values;
-
+        // Get selected meta fields
+        if (!empty($translatable_meta_fields)) {
+            foreach ($translatable_meta_fields as $meta_key) {
+                $value = get_post_meta($post_id, $meta_key, true);
+                
                 // Only include if value is not empty and is a string/numeric
                 if (!empty($value) && (is_string($value) || is_numeric($value))) {
-                    $data['meta_' . $key] = $value;
+                    $data['meta_' . $meta_key] = $value;
                 }
+            }
+        }
+
+        return $data;
+    }
+    
+    /**
+     * Get user data including selected user meta fields
+     *
+     * @param int $user_id User ID
+     * @return array|false User data or false on failure
+     */
+    private function get_user_data($user_id)
+    {
+        $user = get_userdata($user_id);
+
+        if (!$user) {
+            return false;
+        }
+
+        $data = array();
+
+        // Get translatable user meta fields from settings
+        $translatable_meta_fields = $this->settings->get_translatable_user_meta_fields();
+        
+        // Default fields if none configured
+        if (empty($translatable_meta_fields)) {
+            $translatable_meta_fields = array('description', 'user_description');
+        }
+
+        // Get selected user meta fields
+        foreach ($translatable_meta_fields as $meta_key) {
+            $value = get_user_meta($user_id, $meta_key, true);
+            
+            // Only include if value is not empty and is a string/numeric
+            if (!empty($value) && (is_string($value) || is_numeric($value))) {
+                $data['user_meta_' . $meta_key] = $value;
             }
         }
 
@@ -1456,10 +1489,20 @@ class Xf_Translator_Processor
             if (strpos($field_key, 'acf_') === 0 && function_exists('update_field')) {
                 // ACF field
                 update_field($actual_field_name, $translated_value, $translated_post_id);
-            } else {
-                // Regular post meta
+            } elseif (strpos($field_key, 'meta_') === 0) {
+                // Regular post meta - save both to translated post and with language prefix for frontend filtering
                 update_post_meta($translated_post_id, $actual_field_name, $translated_value);
+                
+                // Also store with language prefix on original post for frontend filter retrieval
+                $translated_meta_key = '_xf_translator_meta_' . $actual_field_name . '_' . $language_prefix;
+                update_post_meta($original_post_id, $translated_meta_key, $translated_value);
             }
+        }
+
+        // Translate user meta fields (author bio, etc.) if configured
+        $author_id = $original_post->post_author;
+        if ($author_id) {
+            $this->translate_user_meta_fields($author_id, $target_language, $language_prefix);
         }
 
         // Copy taxonomies from original post, using translated terms if available
@@ -2274,6 +2317,92 @@ class Xf_Translator_Processor
 
         // Default to 4000 for unknown models (safe default)
         return 4000;
+    }
+    
+    /**
+     * Translate user meta fields for a specific user
+     *
+     * @param int $user_id User ID
+     * @param string $target_language Target language name
+     * @param string $language_prefix Language prefix
+     * @return bool Success status
+     */
+    private function translate_user_meta_fields($user_id, $target_language, $language_prefix)
+    {
+        // Get user data with selected meta fields
+        $user_data = $this->get_user_data($user_id);
+        
+        if (empty($user_data)) {
+            return true; // No user meta fields to translate
+        }
+        
+        // Build translation prompt for user meta
+        $content_parts = array();
+        foreach ($user_data as $field => $value) {
+            if (!empty($value)) {
+                $field_label = ucfirst(str_replace('user_meta_', '', $field));
+                $content_parts[] = "{$field_label}: {$value}";
+            }
+        }
+        
+        if (empty($content_parts)) {
+            return true; // No content to translate
+        }
+        
+        $content_string = implode("\n\n", $content_parts);
+        
+        // Build simple prompt for user meta translation
+        $brand_tone_template = $this->settings->get('brand_tone', '');
+        if (empty($brand_tone_template)) {
+            $prompt = "Translate the following user information to {$target_language}:\n\n{$content_string}\n\nProvide the translation in the same format with field labels.";
+        } else {
+            $prompt = str_replace('{content}', $content_string, $brand_tone_template);
+            $prompt = str_replace('{lng}', $target_language, $prompt);
+            
+            // Get language description for {desc} placeholder
+            $languages = $this->settings->get('languages', array());
+            $language_description = '';
+            foreach ($languages as $lang) {
+                if (isset($lang['name']) && $lang['name'] === $target_language) {
+                    $language_description = isset($lang['description']) ? $lang['description'] : '';
+                    break;
+                }
+            }
+            
+            if (!empty($language_description)) {
+                $prompt = str_replace('{desc}', $language_description, $prompt);
+            } else {
+                $prompt = str_replace('{desc}', '', $prompt);
+            }
+        }
+        
+        // Call translation API
+        $translation_result = $this->call_translation_api($prompt, $language_prefix, 0, 0);
+        
+        if ($translation_result === false) {
+            error_log('XF Translator: Failed to translate user meta fields for user ID: ' . $user_id);
+            return false;
+        }
+        
+        // Parse translation response
+        $parsed_translation = $this->parse_translation_response($translation_result, $user_data);
+        
+        if (!$parsed_translation) {
+            error_log('XF Translator: Failed to parse user meta translation response for user ID: ' . $user_id);
+            return false;
+        }
+        
+        // Save translated user meta fields
+        foreach ($parsed_translation as $field_key => $translated_value) {
+            // Remove prefix to get actual meta key
+            $actual_meta_key = str_replace('user_meta_', '', $field_key);
+            
+            // Store translated value with language prefix
+            $translated_meta_key = '_xf_translator_user_meta_' . $actual_meta_key . '_' . $language_prefix;
+            update_user_meta($user_id, $translated_meta_key, $translated_value);
+        }
+        
+        return true;
     }
 }
 

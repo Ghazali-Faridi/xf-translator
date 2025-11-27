@@ -78,6 +78,11 @@ class Xf_Translator_Public {
 		
 		// Filter taxonomy archive queries to show translated posts
 		add_action('pre_get_posts', array($this, 'filter_taxonomy_archive_query'), 10, 1);
+		
+		// Filter meta fields to show translated versions
+		add_filter('get_post_meta', array($this, 'filter_get_post_meta'), 10, 4);
+		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
+		add_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 10, 3);
 
 	}
 
@@ -1871,6 +1876,121 @@ class Xf_Translator_Public {
 		}
 
 		return $redirect_url;
+	}
+	
+	/**
+	 * Filter get_post_meta to return translated meta values
+	 *
+	 * @param mixed $value Meta value
+	 * @param int $post_id Post ID
+	 * @param string $meta_key Meta key
+	 * @param bool $single Whether to return single value
+	 * @return mixed Translated meta value or original value
+	 */
+	public function filter_get_post_meta($value, $post_id, $meta_key, $single)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return $value;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_post_meta_fields();
+		if (empty($translatable_fields) || !in_array($meta_key, $translatable_fields)) {
+			return $value;
+		}
+		
+		// Get original post ID if this is a translated post
+		$original_post_id = $this->get_original_post_id($post_id);
+		
+		// Get translated meta value from original post
+		$translated_meta_key = '_xf_translator_meta_' . $meta_key . '_' . $lang_prefix;
+		$translated_value = get_post_meta($original_post_id, $translated_meta_key, $single);
+		
+		// Return translated value if available, otherwise original
+		if (!empty($translated_value)) {
+			return $translated_value;
+		}
+		
+		// If no translated value, return original (which might be from translated post or original post)
+		return $value;
+	}
+	
+	/**
+	 * Filter get_user_meta to return translated meta values
+	 *
+	 * @param mixed $value Meta value
+	 * @param int $user_id User ID
+	 * @param string $meta_key Meta key
+	 * @param bool $single Whether to return single value
+	 * @return mixed Translated meta value or original value
+	 */
+	public function filter_get_user_meta($value, $user_id, $meta_key, $single)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return $value;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
+		if (empty($translatable_fields) || !in_array($meta_key, $translatable_fields)) {
+			return $value;
+		}
+		
+		// Get translated meta value
+		$translated_meta_key = '_xf_translator_user_meta_' . $meta_key . '_' . $lang_prefix;
+		$translated_value = get_user_meta($user_id, $translated_meta_key, $single);
+		
+		// Return translated value if available, otherwise original
+		return !empty($translated_value) ? $translated_value : $value;
+	}
+	
+	/**
+	 * Filter get_the_author_meta to return translated author meta values
+	 *
+	 * @param mixed $value Meta value
+	 * @param int $user_id User ID
+	 * @param string $field Meta field name
+	 * @return mixed Translated meta value or original value
+	 */
+	public function filter_get_the_author_meta($value, $user_id, $field)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return $value;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
+		if (empty($translatable_fields) || !in_array($field, $translatable_fields)) {
+			return $value;
+		}
+		
+		// Get translated meta value
+		$translated_meta_key = '_xf_translator_user_meta_' . $field . '_' . $lang_prefix;
+		$translated_value = get_user_meta($user_id, $translated_meta_key, true);
+		
+		// Return translated value if available, otherwise original
+		return !empty($translated_value) ? $translated_value : $value;
 	}
 
 }

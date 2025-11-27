@@ -29,7 +29,9 @@ class Settings {
         'brand_tone' => '',
         'exclude_paths' => array(),
         'glossary_terms' => array(),
-        'processing_delay_minutes' => 0
+        'processing_delay_minutes' => 0,
+        'translatable_post_meta_fields' => array(),
+        'translatable_user_meta_fields' => array('description', 'user_description')
     );
     
     /**
@@ -347,6 +349,46 @@ class Settings {
      */
     public function update_brand_tone($tone) {
         return $this->update('brand_tone', sanitize_textarea_field($tone));
+    }
+    
+    /**
+     * Get translatable post meta fields
+     *
+     * @return array Array of meta field keys
+     */
+    public function get_translatable_post_meta_fields() {
+        return $this->get('translatable_post_meta_fields', array());
+    }
+    
+    /**
+     * Get translatable user meta fields
+     *
+     * @return array Array of meta field keys
+     */
+    public function get_translatable_user_meta_fields() {
+        return $this->get('translatable_user_meta_fields', array('description', 'user_description'));
+    }
+    
+    /**
+     * Update translatable post meta fields
+     *
+     * @param array $fields Array of meta field keys
+     * @return bool
+     */
+    public function update_translatable_post_meta_fields($fields) {
+        $sanitized = array_map('sanitize_text_field', $fields);
+        return $this->update('translatable_post_meta_fields', array_unique($sanitized));
+    }
+    
+    /**
+     * Update translatable user meta fields
+     *
+     * @param array $fields Array of meta field keys
+     * @return bool
+     */
+    public function update_translatable_user_meta_fields($fields) {
+        $sanitized = array_map('sanitize_text_field', $fields);
+        return $this->update('translatable_user_meta_fields', array_unique($sanitized));
     }
 }
 
