@@ -50,6 +50,8 @@ $processing_delay_minutes = $settings->get('processing_delay_minutes', 0);
             <?php include plugin_dir_path( __FILE__ ) . 'tab-menu-translation.php'; ?>
         <?php elseif ($current_tab === 'taxonomy-translation') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-taxonomy-translation.php'; ?>
+        <?php elseif ($current_tab === 'user-meta-translation') : ?>
+            <?php include plugin_dir_path( __FILE__ ) . 'tab-user-meta-translation.php'; ?>
         <?php elseif ($current_tab === 'logs') : ?>
             <?php include plugin_dir_path( __FILE__ ) . 'tab-logs.php'; ?>
         <?php endif; ?>

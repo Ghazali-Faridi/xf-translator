@@ -171,7 +171,9 @@ class Xf_Translator {
         $this->loader->add_action('wp_ajax_xf_check_path_availability', $plugin_admin, 'ajax_check_path_availability');
         $this->loader->add_action('wp_ajax_xf_scan_post_meta_fields', $plugin_admin, 'ajax_scan_post_meta_fields');
         $this->loader->add_action('wp_ajax_xf_scan_user_meta_fields', $plugin_admin, 'ajax_scan_user_meta_fields');
-        
+        $this->loader->add_action('wp_ajax_xf_translate_user_meta_bulk', $plugin_admin, 'ajax_translate_user_meta_bulk');
+        $this->loader->add_action('wp_ajax_xf_save_user_meta_translation', $plugin_admin, 'ajax_save_user_meta_translation');
+        $this->loader->add_action('wp_ajax_xf_load_user_meta_translations', $plugin_admin, 'ajax_load_user_meta_translations');
         
         // Hook to create translation queue entries when a post is saved
         // Use multiple hooks for better compatibility
@@ -232,7 +234,10 @@ class Xf_Translator {
 		$this->loader->add_filter( 'redirect_canonical', $plugin_public, 'filter_redirect_canonical', 999, 2 );
 		
 		// Filter all queries to show only content for current language
-		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_content_by_language', 5, 1 );
+		// Use higher priority (999) to run after other filters that might modify the query
+		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_content_by_language', 999, 1 );
+		// Also filter the results after query runs as a backup
+		$this->loader->add_filter( 'posts_results', $plugin_public, 'filter_posts_results_by_language', 10, 2 );
 		
 		// Filter menu locations to show translated menus
 		$this->loader->add_filter( 'wp_nav_menu_args', $plugin_public, 'filter_nav_menu_args', 10, 1 );

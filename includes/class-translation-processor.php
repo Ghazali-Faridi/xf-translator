@@ -348,10 +348,17 @@ class Xf_Translator_Processor
 
         // Get selected user meta fields
         foreach ($translatable_meta_fields as $meta_key) {
-            $value = get_user_meta($user_id, $meta_key, true);
+            // Handle 'description' field - WordPress stores it as 'description' in user meta
+            $actual_key = $meta_key;
+            if ($meta_key === 'user_description') {
+                $actual_key = 'description'; // WordPress uses 'description' in user meta
+            }
+            
+            $value = get_user_meta($user_id, $actual_key, true);
             
             // Only include if value is not empty and is a string/numeric
             if (!empty($value) && (is_string($value) || is_numeric($value))) {
+                // Store with the original key name for consistency
                 $data['user_meta_' . $meta_key] = $value;
             }
         }
@@ -941,7 +948,12 @@ class Xf_Translator_Processor
         foreach ($original_data as $field_key => $value) {
             if (!empty($value)) {
                 // Generate the label we used when sending to API (same as in build_translation_prompt)
-                $field_label = ucfirst(str_replace(array('acf_', 'meta_'), '', $field_key));
+                // For user meta fields, remove 'user_meta_' prefix; for others, remove 'acf_' or 'meta_'
+                if (strpos($field_key, 'user_meta_') === 0) {
+                    $field_label = ucfirst(str_replace('user_meta_', '', $field_key));
+                } else {
+                    $field_label = ucfirst(str_replace(array('acf_', 'meta_'), '', $field_key));
+                }
                 $original_labels[$field_key] = $field_label;
                 $field_order[] = $field_key; // Track order
             }
@@ -2397,12 +2409,159 @@ class Xf_Translator_Processor
             // Remove prefix to get actual meta key
             $actual_meta_key = str_replace('user_meta_', '', $field_key);
             
+            // Handle 'user_description' - WordPress stores it as 'description' in user meta
+            $store_key = $actual_meta_key;
+            if ($actual_meta_key === 'user_description') {
+                $store_key = 'description';
+            }
+            
             // Store translated value with language prefix
-            $translated_meta_key = '_xf_translator_user_meta_' . $actual_meta_key . '_' . $language_prefix;
+            $translated_meta_key = '_xf_translator_user_meta_' . $store_key . '_' . $language_prefix;
             update_user_meta($user_id, $translated_meta_key, $translated_value);
         }
         
         return true;
+    }
+    
+    /**
+     * Translate a single user meta field for a specific user
+     * Public method for use in AJAX handlers
+     *
+     * @param int $user_id User ID
+     * @param string $meta_key Meta field key
+     * @param string $target_language Target language name
+     * @param string $language_prefix Language prefix
+     * @return array Result array with success status and translated value
+     */
+    public function translate_user_meta_field($user_id, $meta_key, $target_language, $language_prefix)
+    {
+        // Handle 'user_description' - WordPress stores it as 'description' in user meta
+        $actual_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+        $original_value = get_user_meta($user_id, $actual_key, true);
+        
+        if (empty($original_value)) {
+            return array(
+                'success' => false,
+                'error' => 'Empty field value',
+                'translated_value' => ''
+            );
+        }
+        
+        // Build translation prompt for single field
+        $field_label = $this->get_meta_field_label_for_translation($meta_key);
+        $content_string = "{$field_label}: {$original_value}";
+        
+        // Build prompt
+        $brand_tone_template = $this->settings->get('brand_tone', '');
+        if (empty($brand_tone_template)) {
+            $prompt = "Translate the following to {$target_language}:\n\n{$content_string}\n\nProvide only the translated value without the field label.";
+        } else {
+            $prompt = str_replace('{content}', $content_string, $brand_tone_template);
+            $prompt = str_replace('{lng}', $target_language, $prompt);
+            
+            // Get language description for {desc} placeholder
+            $languages = $this->settings->get('languages', array());
+            $language_description = '';
+            foreach ($languages as $lang) {
+                if (isset($lang['name']) && $lang['name'] === $target_language) {
+                    $language_description = isset($lang['description']) ? $lang['description'] : '';
+                    break;
+                }
+            }
+            
+            if (!empty($language_description)) {
+                $prompt = str_replace('{desc}', $language_description, $prompt);
+            } else {
+                $prompt = str_replace('{desc}', '', $prompt);
+            }
+        }
+        
+        // Call translation API
+        $translation_result = $this->call_translation_api($prompt, $language_prefix, 0, 0);
+        
+        if ($translation_result === false) {
+            return array(
+                'success' => false,
+                'error' => 'Translation API call failed',
+                'translated_value' => ''
+            );
+        }
+        
+        // Extract translated value from response
+        $translated_value = $this->extract_single_field_translation($translation_result, $field_label);
+        
+        if (empty($translated_value)) {
+            // Try to extract just the value if response format is different
+            $translated_value = trim($translation_result);
+            // Remove field label if present
+            $translated_value = preg_replace('/^' . preg_quote($field_label, '/') . ':\s*/i', '', $translated_value);
+            $translated_value = trim($translated_value);
+        }
+        
+        if (!empty($translated_value)) {
+            // Save the translation
+            $store_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+            $translated_meta_key = '_xf_translator_user_meta_' . $store_key . '_' . $language_prefix;
+            update_user_meta($user_id, $translated_meta_key, $translated_value);
+            
+            return array(
+                'success' => true,
+                'translated_value' => $translated_value
+            );
+        }
+        
+        return array(
+            'success' => false,
+            'error' => 'Could not extract translated value',
+            'translated_value' => ''
+        );
+    }
+    
+    /**
+     * Get meta field label for translation prompt
+     *
+     * @param string $meta_key Meta field key
+     * @return string Human-readable label
+     */
+    private function get_meta_field_label_for_translation($meta_key)
+    {
+        $label_map = array(
+            'description' => 'Biographical Info',
+            'user_description' => 'Biographical Info',
+            'first_name' => 'First Name',
+            'last_name' => 'Last Name',
+            'nickname' => 'Nickname',
+            'display_name' => 'Display Name',
+        );
+        
+        return isset($label_map[$meta_key]) ? $label_map[$meta_key] : ucwords(str_replace('_', ' ', $meta_key));
+    }
+    
+    /**
+     * Extract single field translation from API response
+     *
+     * @param string $response API response
+     * @param string $field_label Field label
+     * @return string Extracted translation
+     */
+    private function extract_single_field_translation($response, $field_label)
+    {
+        // Try to find the field label and extract value after it
+        $pattern = '/' . preg_quote($field_label, '/') . ':\s*(.+?)(?:\n|$)/is';
+        if (preg_match($pattern, $response, $matches)) {
+            return trim($matches[1]);
+        }
+        
+        // If no label found, try to get first line or first sentence
+        $lines = explode("\n", trim($response));
+        if (!empty($lines)) {
+            $first_line = trim($lines[0]);
+            // Remove field label if present
+            $first_line = preg_replace('/^' . preg_quote($field_label, '/') . ':\s*/i', '', $first_line);
+            return trim($first_line);
+        }
+        
+        return trim($response);
     }
 }
 

@@ -148,6 +148,7 @@ class Xf_Translator_Admin {
             'translation-rules' => __('Translation Rules', 'api-translator'),
             'menu-translation' => __('Menu Translation', 'api-translator'),
             'taxonomy-translation' => __('Taxonomy Translation', 'api-translator'),
+            'user-meta-translation' => __('User Meta Translation', 'api-translator'),
             'logs' => __('Logs', 'api-translator')
         );
         
@@ -237,7 +238,58 @@ class Xf_Translator_Admin {
             case 'save_meta_fields':
                 $this->handle_save_meta_fields();
                 break;
+                
+            case 'save_user_meta_translations':
+                $this->handle_save_user_meta_translations();
+                break;
         }
+    }
+    
+    /**
+     * Handle save user meta translations
+     */
+    private function handle_save_user_meta_translations() {
+        if (!isset($_POST['user_id']) || !isset($_POST['language_prefix'])) {
+            $this->add_notice(__('Invalid request.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $user_id = intval($_POST['user_id']);
+        $language_prefix = sanitize_text_field($_POST['language_prefix']);
+        
+        if (empty($user_id) || empty($language_prefix)) {
+            $this->add_notice(__('User ID and language are required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        if (!isset($_POST['translated_meta']) || !is_array($_POST['translated_meta'])) {
+            $this->add_notice(__('No translations provided.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $translatable_fields = $this->settings->get_translatable_user_meta_fields();
+        
+        foreach ($_POST['translated_meta'] as $meta_key => $translated_value) {
+            // Verify this is a translatable field
+            if (!in_array($meta_key, $translatable_fields)) {
+                continue;
+            }
+            
+            // Handle 'user_description' - WordPress stores it as 'description' in user meta
+            $store_key = $meta_key;
+            if ($meta_key === 'user_description') {
+                $store_key = 'description';
+            }
+            
+            // Sanitize the translated value
+            $translated_value = sanitize_textarea_field($translated_value);
+            
+            // Store translated value with language prefix
+            $translated_meta_key = '_xf_translator_user_meta_' . $store_key . '_' . $language_prefix;
+            update_user_meta($user_id, $translated_meta_key, $translated_value);
+        }
+        
+        $this->add_notice(__('User meta translations saved successfully.', 'xf-translator'), 'success');
     }
     
     /**
@@ -2392,7 +2444,7 @@ class Xf_Translator_Admin {
         
         $query->set('meta_query', $meta_query);
     }
-    
+
     /**
      * AJAX handler to check prefix availability
      */
@@ -2423,6 +2475,70 @@ class Xf_Translator_Admin {
             'available' => !$exists,
             'prefix' => $prefix
         ));
+    }
+    
+    /**
+     * Get human-readable label for a meta field key
+     *
+     * @param string $key Meta field key
+     * @param string $type 'post' or 'user'
+     * @return string Human-readable label
+     */
+    public function get_meta_field_label($key, $type = 'post') {
+        // Common field label mappings
+        $label_map = array(
+            // Post meta fields
+            '_yoast_wpseo_title' => 'Yoast SEO Title',
+            '_yoast_wpseo_metadesc' => 'Yoast SEO Meta Description',
+            'rank_math_title' => 'Rank Math Title',
+            'rank_math_description' => 'Rank Math Description',
+            '_aioseo_title' => 'All in One SEO Title',
+            '_aioseo_description' => 'All in One SEO Description',
+            '_seopress_titles_title' => 'SEOPress Title',
+            '_seopress_titles_desc' => 'SEOPress Description',
+            '_meta_title' => 'Meta Title',
+            '_meta_description' => 'Meta Description',
+            'meta_title' => 'Meta Title',
+            'meta_description' => 'Meta Description',
+            
+            // User meta fields
+            'description' => 'Biographical Info',
+            'user_description' => 'Biographical Info',
+            'first_name' => 'First Name',
+            'last_name' => 'Last Name',
+            'nickname' => 'Nickname',
+            'display_name' => 'Display Name',
+        );
+        
+        // Check if we have a mapped label
+        if (isset($label_map[$key])) {
+            return $label_map[$key];
+        }
+        
+        // Try to derive label from key
+        $label = $key;
+        
+        // Remove leading underscore
+        $label = ltrim($label, '_');
+        
+        // Replace underscores and hyphens with spaces
+        $label = str_replace(array('_', '-'), ' ', $label);
+        
+        // Handle plugin prefixes
+        if (strpos($label, 'yoast wpseo') === 0) {
+            $label = 'Yoast SEO ' . substr($label, 12);
+        } elseif (strpos($label, 'rank math') === 0) {
+            $label = 'Rank Math ' . substr($label, 9);
+        } elseif (strpos($label, 'aioseo') === 0) {
+            $label = 'All in One SEO ' . substr($label, 6);
+        } elseif (strpos($label, 'seopress') === 0) {
+            $label = 'SEOPress ' . substr($label, 8);
+        }
+        
+        // Capitalize words
+        $label = ucwords($label);
+        
+        return $label;
     }
     
     /**
@@ -2488,14 +2604,18 @@ class Xf_Translator_Admin {
                 $key
             ));
             
+            $label = $this->get_meta_field_label($key, 'post');
+            
             if ($sample && is_string($sample)) {
                 $fields_with_samples[] = array(
                     'key' => $key,
+                    'label' => $label,
                     'sample' => $sample
                 );
             } else {
                 $fields_with_samples[] = array(
                     'key' => $key,
+                    'label' => $label,
                     'sample' => ''
                 );
             }
@@ -2567,20 +2687,393 @@ class Xf_Translator_Admin {
                 $key
             ));
             
+            $label = $this->get_meta_field_label($key, 'user');
+            
             if ($sample && is_string($sample)) {
                 $fields_with_samples[] = array(
                     'key' => $key,
+                    'label' => $label,
                     'sample' => $sample
                 );
             } else {
                 $fields_with_samples[] = array(
                     'key' => $key,
+                    'label' => $label,
                     'sample' => ''
                 );
             }
         }
         
         wp_send_json_success(array('fields' => $fields_with_samples));
+    }
+    
+    /**
+     * AJAX handler to translate user meta fields in bulk
+     */
+    public function ajax_translate_user_meta_bulk() {
+        // Enable error logging for debugging
+        error_log('XF Translator: Bulk translation AJAX called');
+        
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            error_log('XF Translator: Invalid nonce in bulk translation');
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            error_log('XF Translator: Insufficient permissions in bulk translation');
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        $selected_fields = isset($_POST['fields']) ? array_map('sanitize_text_field', $_POST['fields']) : array();
+        $target_language_prefix = isset($_POST['language_prefix']) ? sanitize_text_field($_POST['language_prefix']) : '';
+        
+        error_log('XF Translator: Fields: ' . print_r($selected_fields, true) . ', Language: ' . $target_language_prefix);
+        
+        if (empty($selected_fields) || empty($target_language_prefix)) {
+            wp_send_json_error(array('message' => 'Fields and language are required'));
+            return;
+        }
+        
+        // Normalize field list - remove duplicates that map to the same actual database key
+        // This prevents translating both 'description' and 'user_description' since they map to the same field
+        $normalized_fields = array();
+        $processed_keys = array();
+        
+        // Prefer 'description' over 'user_description' if both exist
+        // Sort to ensure 'description' comes before 'user_description'
+        usort($selected_fields, function($a, $b) {
+            if ($a === 'description' && $b === 'user_description') return -1;
+            if ($a === 'user_description' && $b === 'description') return 1;
+            return strcmp($a, $b);
+        });
+        
+        foreach ($selected_fields as $meta_key) {
+            // Normalize the key (user_description -> description)
+            $actual_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+            
+            // Only add if we haven't processed this actual key yet
+            if (!in_array($actual_key, $processed_keys)) {
+                $normalized_fields[] = $meta_key; // Keep original for display
+                $processed_keys[] = $actual_key;
+            }
+        }
+        
+        // Use normalized fields instead of selected_fields
+        $selected_fields = $normalized_fields;
+        
+        // Get language name
+        $languages = $this->settings->get('languages', array());
+        $target_language_name = '';
+        foreach ($languages as $lang) {
+            if ($lang['prefix'] === $target_language_prefix) {
+                $target_language_name = $lang['name'];
+                break;
+            }
+        }
+        
+        if (empty($target_language_name)) {
+            wp_send_json_error(array('message' => 'Invalid language'));
+            return;
+        }
+        
+        // Get all users
+        $users = get_users();
+        $results = array();
+        
+        // Load Settings class first (required by translation processor)
+        // Settings class is in the same directory as this admin class
+        $settings_file = dirname(__FILE__) . '/class-settings.php';
+        if (!file_exists($settings_file)) {
+            wp_send_json_error(array('message' => 'Settings class file not found at: ' . $settings_file));
+            return;
+        }
+        require_once $settings_file;
+        
+        // Load translation processor
+        // Translation processor is in the includes directory (one level up from admin)
+        $processor_file = dirname(dirname(__FILE__)) . '/includes/class-translation-processor.php';
+        if (!file_exists($processor_file)) {
+            wp_send_json_error(array('message' => 'Translation processor file not found'));
+            return;
+        }
+        
+        require_once $processor_file;
+        
+        if (!class_exists('Xf_Translator_Processor')) {
+            wp_send_json_error(array('message' => 'Translation processor class not found'));
+            return;
+        }
+        
+        if (!class_exists('Settings')) {
+            wp_send_json_error(array('message' => 'Settings class not found'));
+            return;
+        }
+        
+        try {
+            error_log('XF Translator: Creating translation processor instance');
+            $translation_processor = new Xf_Translator_Processor();
+            error_log('XF Translator: Translation processor created successfully');
+        } catch (Exception $e) {
+            error_log('XF Translator: Exception creating processor: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            wp_send_json_error(array('message' => 'Failed to initialize translation processor: ' . $e->getMessage()));
+            return;
+        } catch (Error $e) {
+            error_log('XF Translator: Error creating processor: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            wp_send_json_error(array('message' => 'Failed to initialize translation processor: ' . $e->getMessage()));
+            return;
+        } catch (Throwable $e) {
+            error_log('XF Translator: Throwable creating processor: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            wp_send_json_error(array('message' => 'Failed to initialize translation processor: ' . $e->getMessage()));
+            return;
+        }
+        
+        foreach ($users as $user) {
+            $user_results = array();
+            
+            foreach ($selected_fields as $meta_key) {
+                // Handle 'user_description' - WordPress stores it as 'description' in user meta
+                $actual_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+                $original_value = get_user_meta($user->ID, $actual_key, true);
+                
+                if (empty($original_value)) {
+                    continue; // Skip empty fields
+                }
+                
+                // Translate this field for this user
+                try {
+                    error_log("XF Translator: Translating field {$meta_key} for user {$user->ID}");
+                    $translation_result = $translation_processor->translate_user_meta_field($user->ID, $meta_key, $target_language_name, $target_language_prefix);
+                    
+                    if (isset($translation_result['success']) && $translation_result['success']) {
+                        $user_results[] = array(
+                            'field' => $meta_key,
+                            'field_label' => $this->get_meta_field_label($meta_key, 'user'),
+                            'original' => $original_value,
+                            'translated' => isset($translation_result['translated_value']) ? $translation_result['translated_value'] : '',
+                            'success' => true
+                        );
+                    } else {
+                        $error_msg = isset($translation_result['error']) ? $translation_result['error'] : 'Translation failed';
+                        error_log("XF Translator: Translation failed for field {$meta_key}, user {$user->ID}: {$error_msg}");
+                        $user_results[] = array(
+                            'field' => $meta_key,
+                            'field_label' => $this->get_meta_field_label($meta_key, 'user'),
+                            'original' => $original_value,
+                            'translated' => '',
+                            'success' => false,
+                            'error' => $error_msg
+                        );
+                    }
+                } catch (Exception $e) {
+                    error_log("XF Translator: Exception translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    $user_results[] = array(
+                        'field' => $meta_key,
+                        'field_label' => $this->get_meta_field_label($meta_key, 'user'),
+                        'original' => $original_value,
+                        'translated' => '',
+                        'success' => false,
+                        'error' => 'Exception: ' . $e->getMessage()
+                    );
+                } catch (Error $e) {
+                    error_log("XF Translator: Error translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    $user_results[] = array(
+                        'field' => $meta_key,
+                        'field_label' => $this->get_meta_field_label($meta_key, 'user'),
+                        'original' => $original_value,
+                        'translated' => '',
+                        'success' => false,
+                        'error' => 'Error: ' . $e->getMessage()
+                    );
+                } catch (Throwable $e) {
+                    error_log("XF Translator: Throwable translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    $user_results[] = array(
+                        'field' => $meta_key,
+                        'field_label' => $this->get_meta_field_label($meta_key, 'user'),
+                        'original' => $original_value,
+                        'translated' => '',
+                        'success' => false,
+                        'error' => 'Error: ' . $e->getMessage()
+                    );
+                }
+            }
+            
+            if (!empty($user_results)) {
+                $results[] = array(
+                    'user_id' => $user->ID,
+                    'user_name' => $user->display_name,
+                    'user_email' => $user->user_email,
+                    'fields' => $user_results
+                );
+            }
+        }
+        
+        wp_send_json_success(array(
+            'results' => $results,
+            'language' => $target_language_name,
+            'language_prefix' => $target_language_prefix
+        ));
+    }
+    
+    /**
+     * AJAX handler to save a single user meta translation
+     */
+    public function ajax_save_user_meta_translation() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        $user_id = isset($_POST['user_id']) ? intval($_POST['user_id']) : 0;
+        $meta_key = isset($_POST['meta_key']) ? sanitize_text_field($_POST['meta_key']) : '';
+        $language_prefix = isset($_POST['language_prefix']) ? sanitize_text_field($_POST['language_prefix']) : '';
+        $translated_value = isset($_POST['translated_value']) ? sanitize_textarea_field($_POST['translated_value']) : '';
+        
+        if (empty($user_id) || empty($meta_key) || empty($language_prefix)) {
+            wp_send_json_error(array('message' => 'Missing required parameters'));
+            return;
+        }
+        
+        // Handle 'user_description' - WordPress stores it as 'description' in user meta
+        $store_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+        
+        // Store translated value with language prefix
+        $translated_meta_key = '_xf_translator_user_meta_' . $store_key . '_' . $language_prefix;
+        update_user_meta($user_id, $translated_meta_key, $translated_value);
+        
+        wp_send_json_success(array('message' => 'Translation saved successfully'));
+    }
+    
+    /**
+     * AJAX handler to load user meta translations from database
+     */
+    public function ajax_load_user_meta_translations() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+        
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+        
+        $language_prefix = isset($_POST['language_prefix']) ? sanitize_text_field($_POST['language_prefix']) : '';
+        $selected_fields = isset($_POST['fields']) ? array_map('sanitize_text_field', $_POST['fields']) : array();
+        
+        if (empty($language_prefix)) {
+            wp_send_json_error(array('message' => 'Language is required'));
+            return;
+        }
+        
+        // Get language name
+        $languages = $this->settings->get('languages', array());
+        $target_language_name = '';
+        foreach ($languages as $lang) {
+            if ($lang['prefix'] === $language_prefix) {
+                $target_language_name = $lang['name'];
+                break;
+            }
+        }
+        
+        // If no fields specified, use configured translatable fields
+        if (empty($selected_fields)) {
+            $selected_fields = $this->settings->get_translatable_user_meta_fields();
+        }
+        
+        if (empty($selected_fields)) {
+            wp_send_json_error(array('message' => 'No fields configured'));
+            return;
+        }
+        
+        // Normalize field list - remove duplicates that map to the same actual database key
+        // This prevents showing both 'description' and 'user_description' since they map to the same field
+        $normalized_fields = array();
+        $processed_keys = array();
+        
+        // Prefer 'description' over 'user_description' if both exist
+        // Sort to ensure 'description' comes before 'user_description'
+        usort($selected_fields, function($a, $b) {
+            if ($a === 'description' && $b === 'user_description') return -1;
+            if ($a === 'user_description' && $b === 'description') return 1;
+            return strcmp($a, $b);
+        });
+        
+        foreach ($selected_fields as $meta_key) {
+            // Normalize the key (user_description -> description)
+            $actual_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+            
+            // Only add if we haven't processed this actual key yet
+            if (!in_array($actual_key, $processed_keys)) {
+                $normalized_fields[] = $meta_key; // Keep original for display
+                $processed_keys[] = $actual_key;
+            }
+        }
+        
+        // Use normalized fields instead of selected_fields
+        $selected_fields = $normalized_fields;
+        
+        // Get all users
+        $users = get_users();
+        $results = array();
+        
+        foreach ($users as $user) {
+            $user_results = array();
+            
+            foreach ($selected_fields as $meta_key) {
+                // Handle 'user_description' - WordPress stores it as 'description' in user meta
+                $actual_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
+                $original_value = get_user_meta($user->ID, $actual_key, true);
+                
+                if (empty($original_value)) {
+                    continue; // Skip empty fields
+                }
+                
+                // Get translated value
+                $translated_meta_key = '_xf_translator_user_meta_' . $actual_key . '_' . $language_prefix;
+                $translated_value = get_user_meta($user->ID, $translated_meta_key, true);
+                
+                // Only include this field if a translation exists (not empty)
+                // This prevents showing users who don't have translations for the selected language
+                if (!empty($translated_value)) {
+                    $user_results[] = array(
+                        'field' => $meta_key,
+                        'field_label' => $this->get_meta_field_label($meta_key, 'user'),
+                        'original' => $original_value,
+                        'translated' => $translated_value,
+                        'success' => true
+                    );
+                }
+            }
+            
+            // Only add user to results if they have at least one translation
+            if (!empty($user_results)) {
+                $results[] = array(
+                    'user_id' => $user->ID,
+                    'user_name' => $user->display_name,
+                    'user_email' => $user->user_email,
+                    'fields' => $user_results
+                );
+            }
+        }
+        
+        wp_send_json_success(array(
+            'results' => $results,
+            'language' => $target_language_name,
+            'language_prefix' => $language_prefix
+        ));
     }
     
     /**

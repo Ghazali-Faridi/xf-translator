@@ -79,10 +79,30 @@ class Xf_Translator_Public {
 		// Filter taxonomy archive queries to show translated posts
 		add_action('pre_get_posts', array($this, 'filter_taxonomy_archive_query'), 10, 1);
 		
+		// Add posts_where filter to exclude translated posts at SQL level (more reliable than meta_query)
+		add_filter('posts_where', array($this, 'filter_posts_where_exclude_translations'), 999, 2);
+		
 		// Filter meta fields to show translated versions
 		add_filter('get_post_meta', array($this, 'filter_get_post_meta'), 10, 4);
 		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
-		add_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 10, 3);
+		add_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 20, 3);
+		add_filter('the_author_meta', array($this, 'filter_the_author_meta_output'), 20, 2);
+		// Add filter for specific author meta fields (WordPress uses dynamic filters: get_the_author_{$field})
+		// This is the actual filter WordPress uses for get_the_author_meta('description')
+		// Note: The dynamic filter passes ($value, $user_id, $original_user_id) - no field parameter
+		add_filter('get_the_author_description', array($this, 'filter_get_the_author_description'), 20, 3);
+		add_filter('the_author_description', array($this, 'filter_the_author_meta_output'), 20, 2);
+		
+		// Debug: Log that filters are registered (only once per page load)
+		if (!defined('XF_TRANSLATOR_LOGGED_CONSTRUCTOR')) {
+			define('XF_TRANSLATOR_LOGGED_CONSTRUCTOR', true);
+			$this->write_debug_log('XF Translator Public class constructor called, filters being registered');
+		}
+		
+		// Verify filter is actually registered on wp hook
+		add_action('wp', array($this, 'debug_check_filters'), 999);
+		
+		// Removed excessive logging hook - was causing too many log entries
 
 	}
 
@@ -1044,51 +1064,68 @@ class Xf_Translator_Public {
 	}
 	
 	/**
+	 * Debug: Check if filters are registered (temporary debugging function)
+	 * Only log once per page load to reduce log spam
+	 */
+	public function debug_check_filters() {
+		if (!defined('XF_TRANSLATOR_LOGGED_FILTER_CHECK')) {
+			define('XF_TRANSLATOR_LOGGED_FILTER_CHECK', true);
+			$has_filter1 = has_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'));
+			$has_filter2 = has_filter('get_the_author_description', array($this, 'filter_get_the_author_description'));
+			$this->write_debug_log('Filter check - get_the_author_meta: ' . ($has_filter1 ? 'YES (priority: ' . $has_filter1 . ')' : 'NO') . ', get_the_author_description: ' . ($has_filter2 ? 'YES (priority: ' . $has_filter2 . ')' : 'NO'));
+		}
+	}
+	
+	/**
 	 * Get current language prefix from URL or post meta
 	 *
 	 * @return string Language prefix or empty string
 	 */
 	private function get_current_language_prefix() {
-		// First, try to get from query var (URL)
+		// First, try to get from query var (URL) - this is the most reliable
 		$lang_prefix = get_query_var('xf_lang_prefix');
 		
+		// If we have a prefix from query var, use it (it's already the stored prefix format)
+		if (!empty($lang_prefix)) {
+			return $lang_prefix;
+		}
+		
 		// If no language prefix in URL, check if we're on a translated post
-		if (empty($lang_prefix)) {
-			global $post;
-			if ($post) {
-				$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+		global $post;
+		if ($post && isset($post->ID)) {
+			$post_lang = get_post_meta($post->ID, '_xf_translator_language', true);
+			if (!empty($post_lang)) {
+				return $post_lang;
 			}
 		}
 		
 		// Also check from current URL path
-		if (empty($lang_prefix)) {
-			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
-			$path        = parse_url( $request_uri, PHP_URL_PATH );
+		$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+		$path        = parse_url( $request_uri, PHP_URL_PATH );
 
-			if ( $path ) {
-				// Try to match any configured language by its URL-safe prefix
-				// (e.g. "fr-CA" uses "frCA" in the URL).
-				$languages = $this->settings->get( 'languages', array() );
-				foreach ( $languages as $language ) {
-					if ( empty( $language['prefix'] ) ) {
-						continue;
-					}
+		if ( $path ) {
+			// Try to match any configured language by its URL-safe prefix
+			// (e.g. "fr-CA" uses "frCA" in the URL).
+			$languages = $this->settings->get( 'languages', array() );
+			foreach ( $languages as $language ) {
+				if ( empty( $language['prefix'] ) ) {
+					continue;
+				}
 
-					$url_prefix = $this->get_url_prefix_for_language( $language );
-					if ( ! $url_prefix ) {
-						continue;
-					}
+				$url_prefix = $this->get_url_prefix_for_language( $language );
+				if ( ! $url_prefix ) {
+					continue;
+				}
 
-					if ( preg_match( '#^/' . preg_quote( $url_prefix, '#' ) . '(/|$)#i', $path ) ) {
-						// Store the original configured prefix (e.g. "fr-CA").
-						$lang_prefix = $language['prefix'];
-						break;
-					}
+				// Match URL prefix at the start of the path
+				if ( preg_match( '#^/' . preg_quote( $url_prefix, '#' ) . '(/|$)#i', $path ) ) {
+					// Return the original configured prefix (e.g. "fr-CA").
+					return $language['prefix'];
 				}
 			}
 		}
 		
-		return $lang_prefix ?: '';
+		return '';
 	}
 	
 	/**
@@ -1777,26 +1814,30 @@ class Xf_Translator_Public {
 		
 		// Get current language prefix from URL
 		$lang_prefix = get_query_var('xf_lang_prefix');
+		$this->write_debug_log('filter_content_by_language - Main query - lang_prefix: ' . ($lang_prefix ? $lang_prefix : 'EMPTY'));
+		
+		// Check if this is home page by checking query vars
+		// At pre_get_posts, is_home() might not be set yet, so check query vars directly
+		$is_home_page = false;
+		$name = $query->get('name');
+		$pagename = $query->get('pagename');
+		$page_id = $query->get('page_id');
+		$p = $query->get('p');
+		$category_name = $query->get('category_name');
+		$tag = $query->get('tag');
+		
+		// If no specific post/page/category/tag is requested, it's likely home/blog archive
+		if (empty($name) && empty($pagename) && empty($page_id) && empty($p) && empty($category_name) && empty($tag)) {
+			$is_home_page = true;
+		}
 		
 		global $wpdb;
 		
 		if (empty($lang_prefix)) {
 			// On English/default: Exclude all translated posts
-			// Get all translated post IDs to exclude
-			$translated_post_ids = $wpdb->get_col(
-				"SELECT DISTINCT p.ID 
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
-					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'"
-			);
-			
-			if (!empty($translated_post_ids)) {
-				$existing_not_in = $query->get('post__not_in') ?: array();
-				$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
-			}
+			// The actual exclusion is handled by filter_posts_where_exclude_translations
+			// which uses SQL NOT EXISTS for more reliable filtering
+			// We don't need to set meta_query here as posts_where filter handles it
 		} else {
 			// On language-prefixed URL: Show only translated posts for this language
 			// Exclude original posts and other language translations
@@ -1824,6 +1865,128 @@ class Xf_Translator_Public {
 				$query->set('post__in', array(0));
 			}
 		}
+	}
+	
+	/**
+	 * Filter posts results to remove translated posts on English pages
+	 * This is a backup filter that runs after the query executes
+	 *
+	 * @param array $posts Array of post objects
+	 * @param WP_Query $query Query object
+	 * @return array Filtered posts
+	 */
+	public function filter_posts_results_by_language($posts, $query) {
+		// Only filter main query on frontend
+		if (is_admin() || !$query->is_main_query()) {
+			return $posts;
+		}
+		
+		// Skip for singular posts/pages
+		if ($query->is_singular) {
+			return $posts;
+		}
+		
+		// Get current language prefix from URL
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// Only filter if we're on English (no prefix)
+		if (!empty($lang_prefix)) {
+			return $posts;
+		}
+		
+		// Filter out any posts that have translation meta or are linked as translations
+		$filtered_posts = array();
+		global $wpdb;
+		
+		foreach ($posts as $post) {
+			$has_language_meta = get_post_meta($post->ID, '_xf_translator_language', true);
+			$has_original_id = get_post_meta($post->ID, '_xf_translator_original_post_id', true);
+			$has_legacy_original_id = get_post_meta($post->ID, '_api_translator_original_post_id', true);
+			
+			// Check if this post is linked as a translation from another post (forward links)
+			// The meta_value is stored as a string, so we need to cast it
+			$is_linked_translation = $wpdb->get_var($wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->postmeta} 
+				WHERE meta_key LIKE '_xf_translator_translated_post_%' 
+				AND CAST(meta_value AS UNSIGNED) = %d",
+				$post->ID
+			));
+			
+			// Only include posts that don't have any translation meta AND aren't linked as translations
+			if (empty($has_language_meta) && empty($has_original_id) && empty($has_legacy_original_id) && !$is_linked_translation) {
+				$filtered_posts[] = $post;
+			}
+		}
+		
+		return $filtered_posts;
+	}
+	
+	/**
+	 * Filter posts_where to exclude translated posts at SQL level
+	 * This is more reliable than meta_query as it directly modifies the SQL
+	 *
+	 * @param string $where WHERE clause
+	 * @param WP_Query $query Query object
+	 * @return string Modified WHERE clause
+	 */
+	public function filter_posts_where_exclude_translations($where, $query) {
+		// Only filter on frontend (apply to ALL frontend queries, not just main query)
+		// This ensures translated posts don't appear in widgets or custom loops either.
+		if (is_admin()) {
+			return $where;
+		}
+		
+		// Skip for singular posts/pages
+		if ($query->is_singular) {
+			return $where;
+		}
+		
+		// Get current language prefix from URL
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// Only filter if we're on English (no prefix)
+		if (!empty($lang_prefix)) {
+			return $where;
+		}
+		
+		global $wpdb;
+		
+		// First, get all translated post IDs to verify what we're excluding
+		$translated_ids = $wpdb->get_col(
+			"SELECT DISTINCT post_id 
+			FROM {$wpdb->postmeta} 
+			WHERE meta_key IN ('_xf_translator_original_post_id', '_api_translator_original_post_id', '_xf_translator_language')"
+		);
+		
+		$forward_linked_ids = $wpdb->get_col(
+			"SELECT DISTINCT CAST(meta_value AS UNSIGNED) 
+			FROM {$wpdb->postmeta} 
+			WHERE meta_key LIKE '_xf_translator_translated_post_%'
+			AND meta_value != ''
+			AND CAST(meta_value AS UNSIGNED) > 0"
+		);
+		
+		$all_translated = array_unique(array_merge($translated_ids, $forward_linked_ids));
+		
+		// Exclude posts that are translations by checking:
+		// 1. Posts with _xf_translator_language meta (any translation)
+		// 2. Posts with _xf_translator_original_post_id or _api_translator_original_post_id (linked translations)
+		// 3. Posts that are referenced in _xf_translator_translated_post_* meta keys on other posts (forward links)
+		$exclusion_sql = " AND NOT EXISTS (
+			SELECT 1 
+			FROM {$wpdb->postmeta} pm
+			WHERE pm.post_id = {$wpdb->posts}.ID
+			AND pm.meta_key IN ('_xf_translator_original_post_id', '_api_translator_original_post_id', '_xf_translator_language')
+		) AND NOT EXISTS (
+			SELECT 1 
+			FROM {$wpdb->postmeta} pm2
+			WHERE pm2.meta_key LIKE '_xf_translator_translated_post_%'
+			AND CAST(pm2.meta_value AS UNSIGNED) = {$wpdb->posts}.ID
+		)";
+		
+		$where .= $exclusion_sql;
+		
+		return $where;
 	}
 
 	/**
@@ -1938,24 +2101,212 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
+		// Skip if no meta key provided (getting all meta)
+		if (empty($meta_key)) {
+			return $value;
+		}
+		
 		// Get current language prefix
-		$lang_prefix = $this->get_current_language_prefix();
+		// On singular pages, prioritize the post's language meta
+		global $post;
+		$lang_prefix = '';
+		if (is_singular() && $post && isset($post->ID)) {
+			$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+		}
+		
+		// If no language from post, use the general method
+		if (empty($lang_prefix)) {
+			$lang_prefix = $this->get_current_language_prefix();
+		}
+		
 		if (empty($lang_prefix)) {
 			return $value;
 		}
 		
 		// Check if this meta field should be translated
 		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
-		if (empty($translatable_fields) || !in_array($meta_key, $translatable_fields)) {
+		if (empty($translatable_fields)) {
 			return $value;
 		}
 		
-		// Get translated meta value
-		$translated_meta_key = '_xf_translator_user_meta_' . $meta_key . '_' . $lang_prefix;
-		$translated_value = get_user_meta($user_id, $translated_meta_key, $single);
+		// Check if this field is in the translatable fields list (exact match or normalized)
+		if (!$this->is_field_translatable($meta_key, $translatable_fields)) {
+			return $value;
+		}
+		
+		// Get normalized meta key (handles WordPress internal mappings like user_description -> description)
+		$normalized_key = $this->normalize_user_meta_key($meta_key);
+		
+		// Try to get translated value - bypass our own filter to avoid recursion
+		remove_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10);
+		$translated_value = $this->get_translated_user_meta($user_id, $meta_key, $normalized_key, $lang_prefix, $single, $translatable_fields);
+		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
 		
 		// Return translated value if available, otherwise original
 		return !empty($translated_value) ? $translated_value : $value;
+	}
+	
+	/**
+	 * Check if a field is translatable (handles field name variations)
+	 *
+	 * @param string $meta_key Meta key to check
+	 * @param array $translatable_fields List of translatable field keys
+	 * @return bool True if field should be translated
+	 */
+	private function is_field_translatable($meta_key, $translatable_fields)
+	{
+		// Direct match
+		if (in_array($meta_key, $translatable_fields)) {
+			return true;
+		}
+		
+		// Check normalized version
+		$normalized = $this->normalize_user_meta_key($meta_key);
+		if ($normalized !== $meta_key && in_array($normalized, $translatable_fields)) {
+			return true;
+		}
+		
+		// Check if any translatable field normalizes to this key
+		foreach ($translatable_fields as $translatable_field) {
+			$normalized_translatable = $this->normalize_user_meta_key($translatable_field);
+			if ($normalized_translatable === $meta_key || $normalized_translatable === $normalized) {
+				return true;
+			}
+		}
+		
+		return false;
+	}
+	
+	/**
+	 * Normalize user meta key (handles WordPress internal mappings)
+	 *
+	 * @param string $meta_key Original meta key
+	 * @return string Normalized meta key
+	 */
+	private function normalize_user_meta_key($meta_key)
+	{
+		// WordPress stores 'user_description' as 'description' in the database
+		if ($meta_key === 'user_description') {
+			return 'description';
+		}
+		
+		return $meta_key;
+	}
+	
+	/**
+	 * Get translated user meta value, trying multiple possible keys
+	 *
+	 * @param int $user_id User ID
+	 * @param string $original_key Original meta key requested
+	 * @param string $normalized_key Normalized meta key
+	 * @param string $lang_prefix Language prefix
+	 * @param bool $single Whether to return single value
+	 * @param array $translatable_fields List of translatable fields
+	 * @return mixed Translated value or empty
+	 */
+	private function get_translated_user_meta($user_id, $original_key, $normalized_key, $lang_prefix, $single, $translatable_fields)
+	{
+		// Try keys in order of preference:
+		// 1. Normalized key (this is how translations are stored - always try this first)
+		// 2. Original key if it's in translatable fields
+		// 3. Any translatable field that normalizes to this key
+		
+		$keys_to_try = array();
+		
+		// Always try normalized key first (translations are stored with normalized keys)
+		$keys_to_try[] = $normalized_key;
+		
+		// Add original key if it's in translatable fields and different from normalized
+		if ($original_key !== $normalized_key && in_array($original_key, $translatable_fields)) {
+			$keys_to_try[] = $original_key;
+		}
+		
+		// Add any translatable field that normalizes to our target
+		foreach ($translatable_fields as $field) {
+			$normalized_field = $this->normalize_user_meta_key($field);
+			if ($normalized_field === $normalized_key && !in_array($field, $keys_to_try) && $field !== $normalized_key) {
+				$keys_to_try[] = $field;
+			}
+		}
+		
+		// Remove duplicates while preserving order
+		$keys_to_try = array_values(array_unique($keys_to_try));
+		
+		// Get all possible language prefixes to try
+		// This handles cases where URL prefix (e.g., "fr") doesn't match stored prefix (e.g., "fr-CA")
+		$lang_prefixes_to_try = array($lang_prefix);
+		
+		// Always try to find matching prefixes from configured languages
+		// This handles both short prefixes (e.g., "fr") and full prefixes (e.g., "fr-CA")
+		$languages = $this->settings->get('languages', array());
+		foreach ($languages as $language) {
+			if (!empty($language['prefix'])) {
+				$stored_prefix = $language['prefix'];
+				
+				// If exact match, it's already in the array
+				if (strtolower($stored_prefix) === strtolower($lang_prefix)) {
+					continue; // Already added
+				}
+				
+				// If lang_prefix is short (e.g., "fr"), check if stored prefix starts with it
+				if (strlen($lang_prefix) <= 3 && strpos($lang_prefix, '-') === false) {
+					if (strtolower(substr($stored_prefix, 0, strlen($lang_prefix))) === strtolower($lang_prefix)) {
+						if (!in_array($stored_prefix, $lang_prefixes_to_try)) {
+							$lang_prefixes_to_try[] = $stored_prefix;
+						}
+					}
+				}
+				
+				// Also check reverse: if stored prefix is short and lang_prefix starts with it
+				if (strlen($stored_prefix) <= 3 && strpos($stored_prefix, '-') === false) {
+					if (strtolower(substr($lang_prefix, 0, strlen($stored_prefix))) === strtolower($stored_prefix)) {
+						if (!in_array($stored_prefix, $lang_prefixes_to_try)) {
+							$lang_prefixes_to_try[] = $stored_prefix;
+						}
+					}
+				}
+			}
+		}
+		
+		// Try each key with each language prefix
+		foreach ($keys_to_try as $key) {
+			foreach ($lang_prefixes_to_try as $prefix_to_try) {
+				$translated_meta_key = '_xf_translator_user_meta_' . $key . '_' . $prefix_to_try;
+				// Bypass our own filter to avoid recursion
+				remove_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10);
+				$translated_value = get_user_meta($user_id, $translated_meta_key, $single);
+				add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
+				
+				// Check if we got a valid translated value
+				// For single values, check if it's not empty and not false
+				// For arrays, check if it's not empty
+				if ($single) {
+					if ($translated_value !== false && $translated_value !== '' && $translated_value !== null) {
+						return $translated_value;
+					}
+				} else {
+					if (!empty($translated_value) && is_array($translated_value)) {
+						return $translated_value;
+					}
+				}
+			}
+		}
+		
+		return '';
+	}
+	
+	/**
+	 * Filter get_the_author_description - specific handler for description field
+	 * WordPress uses dynamic filter get_the_author_{$field} which doesn't pass field name
+	 *
+	 * @param mixed $value Meta value
+	 * @param int $user_id User ID
+	 * @param int|false $original_user_id Original user ID
+	 * @return mixed Translated meta value or original value
+	 */
+	public function filter_get_the_author_description($value, $user_id, $original_user_id) {
+		// Call the main filter function with the field name explicitly set
+		return $this->filter_get_the_author_meta($value, $user_id, 'description');
 	}
 	
 	/**
@@ -1973,24 +2324,130 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
+		// Skip if no field provided
+		if (empty($field)) {
+			return $value;
+		}
+		
+		// If user_id is not provided or is 0, try to get it from global post
+		global $post;
+		if (empty($user_id) && $post && isset($post->post_author)) {
+			$user_id = $post->post_author;
+		}
+		
+		// If still no user ID, return original value
+		if (empty($user_id)) {
+			return $value;
+		}
+		
 		// Get current language prefix
-		$lang_prefix = $this->get_current_language_prefix();
+		// On singular pages, prioritize the post's language meta
+		$lang_prefix = '';
+		if (is_singular() && $post && isset($post->ID)) {
+			$lang_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+		}
+		
+		// If no language from post, use the general method
+		if (empty($lang_prefix)) {
+			$lang_prefix = $this->get_current_language_prefix();
+		}
+		
 		if (empty($lang_prefix)) {
 			return $value;
 		}
 		
 		// Check if this meta field should be translated
 		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
-		if (empty($translatable_fields) || !in_array($field, $translatable_fields)) {
+		if (empty($translatable_fields)) {
 			return $value;
 		}
 		
-		// Get translated meta value
-		$translated_meta_key = '_xf_translator_user_meta_' . $field . '_' . $lang_prefix;
-		$translated_value = get_user_meta($user_id, $translated_meta_key, true);
+		// Check if this field is in the translatable fields list
+		if (!$this->is_field_translatable($field, $translatable_fields)) {
+			return $value;
+		}
 		
-		// Return translated value if available, otherwise original
-		return !empty($translated_value) ? $translated_value : $value;
+		// Get normalized meta key
+		$normalized_key = $this->normalize_user_meta_key($field);
+		
+		// Try to get translated value - bypass our own filter to avoid recursion
+		remove_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10);
+		remove_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 20);
+		$translated_value = $this->get_translated_user_meta($user_id, $field, $normalized_key, $lang_prefix, true, $translatable_fields);
+		add_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 20, 3);
+		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
+		
+		// Return translated value if available
+		// get_translated_user_meta returns empty string if no translation found
+		// So if we get a non-empty value, use it; otherwise use original
+		// Check for both empty string and false (get_user_meta returns false if key doesn't exist)
+		if ($translated_value !== false && $translated_value !== '' && $translated_value !== null) {
+			return $translated_value;
+		}
+		
+		return $value;
+	}
+	
+	/**
+	 * Filter the_author_meta output to return translated author meta values
+	 * This handles direct output of author meta (e.g., the_author_meta('description'))
+	 *
+	 * @param mixed $value Meta value
+	 * @param string $field Meta field name
+	 * @return mixed Translated meta value or original value
+	 */
+	public function filter_the_author_meta_output($value, $field)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Get the user ID from the current post author
+		global $post;
+		if (!$post) {
+			return $value;
+		}
+		
+		$user_id = $post->post_author;
+		if (!$user_id) {
+			return $value;
+		}
+		
+		// Use the existing filter logic
+		return $this->filter_get_the_author_meta($value, $user_id, $field);
+	}
+	
+	/**
+	 * Helper method to write to debug log file
+	 * 
+	 * @param string $message Log message
+	 * @return void
+	 */
+	private function write_debug_log($message) {
+		$log_file = WP_CONTENT_DIR . '/xf-translator-debug.log';
+		$timestamp = date('Y-m-d H:i:s');
+		$log_entry = $timestamp . ' - ' . $message . "\n";
+		
+		// Ensure directory exists and file is writable
+		if (!file_exists($log_file)) {
+			// Try to create the file
+			@touch($log_file);
+			@chmod($log_file, 0666);
+		}
+		
+		// Write to custom log file (without error suppression so we can see errors)
+		$result = @file_put_contents($log_file, $log_entry, FILE_APPEND | LOCK_EX);
+		
+		// If file write failed, also log to error_log so we know about it
+		if ($result === false) {
+			$error = error_get_last();
+			error_log('XF Translator: Failed to write to debug log file: ' . $log_file . ' - Message: ' . $message . ' - Error: ' . ($error ? $error['message'] : 'Unknown error'));
+		}
+		
+		// Also write to error_log for visibility in debug.log
+		error_log('XF Translator: ' . $message);
 	}
 
 }
+
