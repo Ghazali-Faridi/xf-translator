@@ -10,8 +10,24 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Get all public taxonomies
-$taxonomies = get_taxonomies(array('public' => true), 'objects');
+// Get all public taxonomies (exclude post_tag - tags are translated automatically during post translation)
+$taxonomies = get_taxonomies(array(
+    'public' => true,
+    'publicly_queryable' => true,
+), 'objects');
+
+// Exclude post_tag (tags) - they are automatically translated when posts are translated
+if (isset($taxonomies['post_tag'])) {
+    unset($taxonomies['post_tag']);
+}
+
+// Ensure category is included even if flags differ
+if (taxonomy_exists('category') && !isset($taxonomies['category'])) {
+    $tax_obj = get_taxonomy('category');
+    if ($tax_obj) {
+        $taxonomies['category'] = $tax_obj;
+    }
+}
 $languages = $settings->get('languages', array());
 ?>
 

@@ -1298,9 +1298,13 @@ class Xf_Translator_Processor
      */
     private function create_translated_post($original_post_id, $target_language, $translated_data, $original_data)
     {
+        error_log('XF Translator: Starting create_translated_post for post ID: ' . $original_post_id . ', Language: ' . $target_language);
+        $post_creation_start_time = time();
+        
         $original_post = get_post($original_post_id);
 
         if (!$original_post) {
+            error_log('XF Translator: Original post not found. Post ID: ' . $original_post_id);
             return false;
         }
 
@@ -1313,6 +1317,13 @@ class Xf_Translator_Processor
                 break;
             }
         }
+        
+        if (empty($language_prefix)) {
+            error_log('XF Translator: Language prefix not found for language: ' . $target_language);
+            return false;
+        }
+        
+        error_log('XF Translator: Language prefix: ' . $language_prefix);
 
         // Check if translated post already exists (use prefix for meta key)
         $existing_translated_post_id = get_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, true);
@@ -1385,38 +1396,55 @@ class Xf_Translator_Processor
         // Store just the original slug (prefix will be added via permalink filter)
         $post_data['post_name'] = $original_slug;
 
-        // Copy categories and tags
+        // Copy categories (tags will be handled automatically during taxonomy processing)
         $categories = wp_get_post_categories($original_post_id, array('fields' => 'ids'));
         if (!empty($categories)) {
             $post_data['post_category'] = $categories;
         }
 
-        $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));
-        if (!empty($tags)) {
-            $post_data['tags_input'] = $tags;
-        }
+        // Note: Tags are NOT copied here - they will be automatically translated and assigned
+        // during the taxonomy processing step below
 
         // Set flag to prevent post listener from processing this new translated post
         self::$creating_translated_post = true;
 
+        error_log('XF Translator: Creating/updating translated post. Existing ID: ' . ($existing_translated_post_id ?: 'none'));
+        
         // Create or update post
         if ($existing_translated_post_id && get_post($existing_translated_post_id)) {
             // Update existing translated post
+            error_log('XF Translator: Updating existing translated post ID: ' . $existing_translated_post_id);
             $post_data['ID'] = $existing_translated_post_id;
             // For updates, keep original status (don't change to draft)
             $post_data['post_status'] = $original_post_status;
             $translated_post_id = wp_update_post($post_data, true);
+            
+            if (is_wp_error($translated_post_id)) {
+                error_log('XF Translator: Error updating post. Error: ' . $translated_post_id->get_error_message());
+            } else {
+                error_log('XF Translator: Successfully updated post ID: ' . $translated_post_id);
+            }
         } else {
             // Create new translated post
+            error_log('XF Translator: Creating new translated post');
             $translated_post_id = wp_insert_post($post_data, true);
+            
+            if (is_wp_error($translated_post_id)) {
+                error_log('XF Translator: Error creating post. Error: ' . $translated_post_id->get_error_message());
+            } else {
+                error_log('XF Translator: Successfully created post ID: ' . $translated_post_id);
+            }
         }
 
         // Clear flag
         self::$creating_translated_post = false;
 
         if (is_wp_error($translated_post_id)) {
+            error_log('XF Translator: Post creation/update failed. Returning false.');
             return false;
         }
+        
+        error_log('XF Translator: Post created/updated successfully. ID: ' . $translated_post_id . '. Starting meta/field processing...');
 
         // Verify table HTML was preserved after saving
         if (isset($translated_data['content']) && strpos($translated_data['content'], '<table') !== false) {
@@ -1484,7 +1512,7 @@ class Xf_Translator_Processor
             }
         }
 
-        // Copy and translate custom fields/ACF fields
+        // Copy and translate custom fields/ACF fields from original_data
         foreach ($original_data as $field_key => $original_value) {
             // Skip standard WordPress fields
             if (in_array($field_key, array('title', 'content', 'excerpt'))) {
@@ -1496,6 +1524,9 @@ class Xf_Translator_Processor
 
             // Remove prefix to get actual field name
             $actual_field_name = str_replace(array('acf_', 'meta_'), '', $field_key);
+
+            // Check if this field contains post IDs and convert them to translated post IDs
+            $translated_value = $this->convert_post_ids_to_translated($translated_value, $language_prefix);
 
             // Update the field
             if (strpos($field_key, 'acf_') === 0 && function_exists('update_field')) {
@@ -1511,6 +1542,48 @@ class Xf_Translator_Processor
             }
         }
 
+        // Copy ALL ACF fields from original post (including fields not in translatable list)
+        // This ensures fields like "you may like" are always copied, even if not translatable
+        if (function_exists('get_fields')) {
+            error_log('XF Translator: Starting ACF field processing for post ID: ' . $translated_post_id);
+            $acf_start_time = time();
+            $max_acf_time = 60; // 1 minute max for ACF processing
+            
+            $all_acf_fields = get_fields($original_post_id);
+            if ($all_acf_fields && is_array($all_acf_fields)) {
+                $acf_field_count = count($all_acf_fields);
+                error_log('XF Translator: Found ' . $acf_field_count . ' ACF field(s) to process');
+                
+                $processed_count = 0;
+                foreach ($all_acf_fields as $acf_field_name => $acf_field_value) {
+                    // Check for timeout
+                    if ((time() - $acf_start_time) > $max_acf_time) {
+                        error_log('XF Translator: ACF field processing timeout. Processed ' . $processed_count . ' of ' . $acf_field_count . ' fields');
+                        break;
+                    }
+
+                    // Skip if we already processed this field above
+                    if (isset($original_data['acf_' . $acf_field_name])) {
+                        continue;
+                    }
+
+                    // Skip internal ACF fields
+                    if (strpos($acf_field_name, '_') === 0) {
+                        continue;
+                    }
+
+                    // Convert post IDs to translated versions
+                    $converted_value = $this->convert_post_ids_to_translated($acf_field_value, $language_prefix);
+                    
+                    // Save the field to translated post
+                    update_field($acf_field_name, $converted_value, $translated_post_id);
+                    $processed_count++;
+                }
+                
+                error_log('XF Translator: Completed ACF field processing. Processed ' . $processed_count . ' field(s)');
+            }
+        }
+
         // Translate user meta fields (author bio, etc.) if configured
         $author_id = $original_post->post_author;
         if ($author_id) {
@@ -1518,11 +1591,17 @@ class Xf_Translator_Processor
         }
 
         // Copy taxonomies from original post, using translated terms if available
+        // Skip tags (post_tag) - tags are not translated or assigned to translated posts
         $taxonomies = get_object_taxonomies($original_post->post_type);
         require_once plugin_dir_path(__FILE__) . 'class-taxonomy-translation-processor.php';
         $taxonomy_processor = new Xf_Translator_Taxonomy_Processor();
 
         foreach ($taxonomies as $taxonomy) {
+            // Skip tags - don't translate or assign them
+            if ($taxonomy === 'post_tag') {
+                continue;
+            }
+
             $terms = wp_get_post_terms($original_post_id, $taxonomy, array('fields' => 'ids'));
             if (!is_wp_error($terms) && !empty($terms)) {
                 // Get translated term IDs
@@ -1545,7 +1624,163 @@ class Xf_Translator_Processor
             }
         }
 
+        $total_time = time() - $post_creation_start_time;
+        error_log('XF Translator: Completed create_translated_post for post ID: ' . $original_post_id . '. Translated post ID: ' . $translated_post_id . '. Total time: ' . $total_time . ' seconds');
+        
         return $translated_post_id;
+    }
+
+    /**
+     * Get translated post ID for a given original post ID and language prefix
+     *
+     * @param int $original_post_id Original post ID
+     * @param string $language_prefix Language prefix (e.g., 'fr-CA')
+     * @return int|false Translated post ID or false if not found
+     */
+    private function get_translated_post_id($original_post_id, $language_prefix)
+    {
+        if (empty($original_post_id) || empty($language_prefix)) {
+            return false;
+        }
+
+        // Check if this post is already a translated post - if so, return it as-is
+        $is_translated = get_post_meta($original_post_id, '_xf_translator_original_post_id', true) || 
+                        get_post_meta($original_post_id, '_api_translator_original_post_id', true);
+        if ($is_translated) {
+            // This is already a translated post, check if it's for the same language
+            $post_language = get_post_meta($original_post_id, '_xf_translator_language', true);
+            if ($post_language === $language_prefix) {
+                // Same language, return as-is
+                return intval($original_post_id);
+            }
+            // Different language, find the original and then the translation
+            $actual_original_id = get_post_meta($original_post_id, '_xf_translator_original_post_id', true);
+            if (!$actual_original_id) {
+                $actual_original_id = get_post_meta($original_post_id, '_api_translator_original_post_id', true);
+            }
+            if ($actual_original_id) {
+                $original_post_id = intval($actual_original_id);
+            }
+        }
+
+        // Check for translated post using meta
+        $translated_post_id = get_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, true);
+
+        if ($translated_post_id && get_post($translated_post_id)) {
+            return intval($translated_post_id);
+        }
+
+        // Also check reverse lookup
+        global $wpdb;
+        $translated_post_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT p.ID FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+                AND pm1.meta_key = '_xf_translator_original_post_id' 
+                AND pm1.meta_value = %d
+            INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+                AND pm2.meta_key = '_xf_translator_language' 
+                AND pm2.meta_value = %s
+            WHERE p.post_status = 'publish'
+            LIMIT 1",
+            $original_post_id,
+            $language_prefix
+        ));
+
+        return $translated_post_id ? intval($translated_post_id) : false;
+    }
+
+    /**
+     * Convert post IDs in a value to their translated versions
+     * Handles single post IDs, arrays of post IDs, nested arrays, ACF field structures, and post objects
+     *
+     * @param mixed $value The value that may contain post IDs
+     * @param string $language_prefix Language prefix (e.g., 'fr-CA')
+     * @param int $depth Current recursion depth (to prevent infinite loops)
+     * @return mixed Value with post IDs converted to translated versions
+     */
+    private function convert_post_ids_to_translated($value, $language_prefix, $depth = 0)
+    {
+        // Prevent infinite recursion (max depth of 10 levels)
+        if ($depth > 10) {
+            error_log('XF Translator: Maximum recursion depth reached in convert_post_ids_to_translated. Returning original value.');
+            return $value;
+        }
+
+        if (empty($value) || empty($language_prefix)) {
+            return $value;
+        }
+
+        // Handle arrays (including ACF relationship fields which store arrays of post IDs or post objects)
+        if (is_array($value)) {
+            $converted = array();
+            foreach ($value as $key => $item) {
+                // Recursively process nested arrays (increment depth)
+                if (is_array($item)) {
+                    $converted[$key] = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1);
+                } elseif (is_object($item) && isset($item->ID)) {
+                    // ACF post object - convert the ID
+                    $translated_id = $this->get_translated_post_id($item->ID, $language_prefix);
+                    if ($translated_id) {
+                        // Replace with translated post object
+                        $translated_post = get_post($translated_id);
+                        if ($translated_post) {
+                            $converted[$key] = $translated_post;
+                        } else {
+                            $converted[$key] = $item;
+                        }
+                    } else {
+                        $converted[$key] = $item;
+                    }
+                } elseif (is_numeric($item) && $item > 0) {
+                    // Check if this is a post ID
+                    $post = get_post($item);
+                    if ($post && $post->post_type !== 'attachment') {
+                        // Try to get translated version
+                        $translated_id = $this->get_translated_post_id($item, $language_prefix);
+                        $converted[$key] = $translated_id ? $translated_id : $item;
+                    } else {
+                        // Not a post ID or is attachment, keep original
+                        $converted[$key] = $item;
+                    }
+                } else {
+                    // Not a post ID, keep original
+                    $converted[$key] = $item;
+                }
+            }
+            return $converted;
+        }
+
+        // Handle post objects (ACF might return post objects instead of IDs)
+        if (is_object($value) && isset($value->ID)) {
+            $translated_id = $this->get_translated_post_id($value->ID, $language_prefix);
+            if ($translated_id) {
+                $translated_post = get_post($translated_id);
+                return $translated_post ? $translated_post : $value;
+            }
+            return $value;
+        }
+
+        // Handle single numeric value (could be a post ID)
+        if (is_numeric($value) && $value > 0) {
+            $post = get_post($value);
+            if ($post && $post->post_type !== 'attachment') {
+                // Try to get translated version
+                $translated_id = $this->get_translated_post_id($value, $language_prefix);
+                return $translated_id ? $translated_id : $value;
+            }
+        }
+
+        // Handle serialized data (though ACF usually stores arrays directly)
+        if (is_string($value) && is_serialized($value)) {
+            $unserialized = unserialize($value);
+            if (is_array($unserialized) || is_numeric($unserialized) || (is_object($unserialized) && isset($unserialized->ID))) {
+                $converted = $this->convert_post_ids_to_translated($unserialized, $language_prefix, $depth + 1);
+                return serialize($converted);
+            }
+        }
+
+        // Not a post ID or not convertible, return original
+        return $value;
     }
 
     /**
@@ -1578,6 +1813,16 @@ class Xf_Translator_Processor
     {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
+
+        // Increase PHP execution time limit for processing operations
+        // This is especially important for retry operations that may involve heavy post creation/updates
+        $processing_time_limit = 300; // 5 minutes
+        if (function_exists('set_time_limit')) {
+            @set_time_limit($processing_time_limit);
+        }
+        if (function_exists('ini_set')) {
+            @ini_set('max_execution_time', $processing_time_limit);
+        }
 
         // Get the specific queue entry
         $queue_entry = $wpdb->get_row($wpdb->prepare(
@@ -2020,12 +2265,16 @@ class Xf_Translator_Processor
                 // ACF field update
                 $acf_field_name = str_replace('acf_', '', $field);
                 if (function_exists('update_field')) {
-                    update_field($acf_field_name, $translated_data[$field], $translated_post_id);
+                    // Convert post IDs to translated versions
+                    $converted_value = $this->convert_post_ids_to_translated($translated_data[$field], $language_prefix);
+                    update_field($acf_field_name, $converted_value, $translated_post_id);
                 }
             } elseif (strpos($field, 'meta_') === 0 && isset($translated_data[$field])) {
                 // Meta field update
                 $meta_field_name = str_replace('meta_', '', $field);
-                update_post_meta($translated_post_id, $meta_field_name, $translated_data[$field]);
+                // Convert post IDs to translated versions
+                $converted_value = $this->convert_post_ids_to_translated($translated_data[$field], $language_prefix);
+                update_post_meta($translated_post_id, $meta_field_name, $converted_value);
             }
         }
 

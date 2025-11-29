@@ -1401,26 +1401,115 @@ class Xf_Translator_Admin {
             error_log('XF Translator: Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Previous status: ' . $queue_entry['status'] . ')');
         }
         
+        // Increase PHP execution time limit significantly for retry operations
+        // This helps prevent timeouts during post creation/update and meta field operations
+        $retry_time_limit = 300; // 5 minutes - enough for heavy operations
+        if (function_exists('set_time_limit')) {
+            @set_time_limit($retry_time_limit);
+        }
+        if (function_exists('ini_set')) {
+            @ini_set('max_execution_time', $retry_time_limit);
+        }
+        
+        // Start output buffering to prevent premature connection closure
+        if (!ob_get_level()) {
+            ob_start();
+        }
+        
+        // Flush output buffer periodically to keep connection alive
+        // This helps prevent 502 errors from web server timeouts
+        register_shutdown_function(function() use ($queue_entry_id) {
+            if (ob_get_level()) {
+                ob_end_flush();
+            }
+        });
+        
+        // Send initial response to keep connection alive
+        if (ob_get_level()) {
+            echo str_repeat(' ', 1024); // Send 1KB of whitespace
+            ob_flush();
+            flush();
+        }
+        
         // Process the translation immediately (this will trigger API logging)
         require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
         $processor = new Xf_Translator_Processor();
-        $result = $processor->process_queue_entry_by_id($queue_entry_id);
         
-        if ($result !== false && isset($result['success']) && $result['success']) {
-            $this->add_notice(
-                sprintf(
-                    __('Queue entry #%d has been successfully processed. Translation completed.', 'xf-translator'),
-                    $queue_entry_id
-                ),
-                'success'
+        // Track start time for timeout detection
+        $start_time = time();
+        $max_processing_time = 240; // 4 minutes max processing time
+        
+        try {
+            $result = $processor->process_queue_entry_by_id($queue_entry_id);
+            
+            // Check if processing took too long (might indicate timeout)
+            $processing_time = time() - $start_time;
+            if ($processing_time > $max_processing_time) {
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::warning('Retry processing took ' . $processing_time . ' seconds (may have timed out)');
+                } else {
+                    error_log('XF Translator: Retry processing took ' . $processing_time . ' seconds (may have timed out)');
+                }
+            }
+            
+            if ($result !== false && isset($result['success']) && $result['success']) {
+                $this->add_notice(
+                    sprintf(
+                        __('Queue entry #%d has been successfully processed. Translation completed.', 'xf-translator'),
+                        $queue_entry_id
+                    ),
+                    'success'
+                );
+            } else {
+                $error_message = $processor->get_last_error();
+                
+                // Check if error might be timeout-related
+                if (empty($error_message) || strpos(strtolower($error_message), 'timeout') !== false) {
+                    $error_message = __('Processing timed out. The queue entry has been reset to pending status and will be processed by the background queue processor.', 'xf-translator');
+                    
+                    // Ensure status is set to pending for background processing
+                    $wpdb->update(
+                        $table_name,
+                        array('status' => 'pending'),
+                        array('id' => $queue_entry_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                }
+                
+                $this->add_notice(
+                    sprintf(
+                        __('Failed to retry queue entry #%d. %s', 'xf-translator'),
+                        $queue_entry_id,
+                        $error_message ?: __('Please check the error logs for details.', 'xf-translator')
+                    ),
+                    'error'
+                );
+            }
+        } catch (Exception $e) {
+            // Catch any exceptions that might occur during processing
+            $error_message = __('An error occurred during processing: ', 'xf-translator') . $e->getMessage();
+            
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('Retry exception: ' . $e->getMessage());
+            } else {
+                error_log('XF Translator Retry Exception: ' . $e->getMessage());
+            }
+            
+            // Reset to pending so it can be retried again
+            $wpdb->update(
+                $table_name,
+                array('status' => 'pending'),
+                array('id' => $queue_entry_id),
+                array('%s'),
+                array('%d')
             );
-        } else {
-            $error_message = $processor->get_last_error();
+            
             $this->add_notice(
                 sprintf(
-                    __('Failed to retry queue entry #%d. %s', 'xf-translator'),
+                    __('Error retrying queue entry #%d. %s The entry has been reset to pending status.', 'xf-translator'),
                     $queue_entry_id,
-                    $error_message ?: __('Please check the error logs for details.', 'xf-translator')
+                    $error_message
                 ),
                 'error'
             );

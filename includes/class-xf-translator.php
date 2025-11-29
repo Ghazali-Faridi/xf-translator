@@ -234,10 +234,7 @@ class Xf_Translator {
 		$this->loader->add_filter( 'redirect_canonical', $plugin_public, 'filter_redirect_canonical', 999, 2 );
 		
 		// Filter all queries to show only content for current language
-		// Use higher priority (999) to run after other filters that might modify the query
-		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_content_by_language', 999, 1 );
-		// Also filter the results after query runs as a backup
-		$this->loader->add_filter( 'posts_results', $plugin_public, 'filter_posts_results_by_language', 10, 2 );
+		$this->loader->add_action( 'pre_get_posts', $plugin_public, 'filter_content_by_language', 5, 1 );
 		
 		// Filter menu locations to show translated menus
 		$this->loader->add_filter( 'wp_nav_menu_args', $plugin_public, 'filter_nav_menu_args', 10, 1 );

@@ -23,7 +23,7 @@ $translatable_user_meta = $settings->get_translatable_user_meta_fields();
     
     <!-- Step 1: Scan User Meta Fields -->
     <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
-        <h3><?php _e('Step 1: Scan User Meta Fields', 'xf-translator'); ?></h3>
+        <h3><?php _e('Scan User Meta Fields', 'xf-translator'); ?></h3>
         <p class="description"><?php _e('Discover available user meta fields in your database.', 'xf-translator'); ?></p>
         
         <div style="margin: 20px 0;">
@@ -46,7 +46,7 @@ $translatable_user_meta = $settings->get_translatable_user_meta_fields();
     
     <!-- Step 2: Select Fields and Language -->
     <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
-        <h3><?php _e('Step 2: Select Fields and Language', 'xf-translator'); ?></h3>
+        <h3><?php _e('Select Fields and Language', 'xf-translator'); ?></h3>
         <p class="description"><?php _e('Select which fields to translate and choose the target language.', 'xf-translator'); ?></p>
         
         <table class="form-table">
@@ -91,7 +91,7 @@ $translatable_user_meta = $settings->get_translatable_user_meta_fields();
     
     <!-- Step 3: View and Edit Translations -->
     <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
-        <h3><?php _e('Step 3: View and Edit Translations', 'xf-translator'); ?></h3>
+        <h3><?php _e('View and Edit Translations', 'xf-translator'); ?></h3>
         <p class="description"><?php _e('View all translations and edit them as needed. Use the language filter to view translations for a specific language.', 'xf-translator'); ?></p>
         
         <div style="margin: 20px 0;">
