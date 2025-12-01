@@ -260,12 +260,14 @@ class Xf_Translator_Menu_Processor {
             return $text;
         }
         
-        // Get language prefix
+        // Get language prefix and description
         $languages = $this->settings->get('languages', array());
         $target_language_prefix = '';
+        $language_description = '';
         foreach ($languages as $lang) {
             if ($lang['name'] === $target_language) {
                 $target_language_prefix = $lang['prefix'];
+                $language_description = isset($lang['description']) ? $lang['description'] : '';
                 break;
             }
         }
@@ -287,6 +289,11 @@ class Xf_Translator_Menu_Processor {
         
         // Build short, dedicated prompt for menu translation
         $prompt = "Translate the following menu item text to {$target_language}: {$text}";
+        
+        // Add language description if available
+        if (!empty($language_description)) {
+            $prompt .= "\n\nLanguage context: {$language_description}";
+        }
         
         // Add glossary exclusion if terms exist
         if (!empty($glossary_list)) {

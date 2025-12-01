@@ -326,12 +326,14 @@ class Xf_Translator_Taxonomy_Processor {
             return $text;
         }
         
-        // Get language prefix
+        // Get language prefix and description
         $languages = $this->settings->get('languages', array());
         $target_language_prefix = '';
+        $language_description = '';
         foreach ($languages as $lang) {
             if ($lang['name'] === $target_language) {
                 $target_language_prefix = $lang['prefix'];
+                $language_description = isset($lang['description']) ? $lang['description'] : '';
                 break;
             }
         }
@@ -340,24 +342,34 @@ class Xf_Translator_Taxonomy_Processor {
             return new WP_Error('invalid_language', __('Invalid target language.', 'xf-translator'));
         }
         
-        // Build simple, direct prompt for taxonomy translation
-        // This is much simpler than post translation since we're just translating category/taxonomy names
-        $prompt = "Translate the following category/taxonomy name to {$target_language}. Return ONLY the translated text, nothing else.\n\n";
-        $prompt .= "Text to translate: {$text}\n\n";
-        $prompt .= "Translation:";
-        
         // Get glossary terms to exclude from translation
         $glossary_terms = $this->settings->get('glossary_terms', array());
+        $glossary_list = '';
         if (!empty($glossary_terms)) {
             $glossary_items = array();
             foreach ($glossary_terms as $term_data) {
                 $glossary_items[] = $term_data['term'];
             }
             $glossary_list = implode(', ', $glossary_items);
-            $prompt = "Translate the following category/taxonomy name to {$target_language}. Do not translate these words {$glossary_list}. Return ONLY the translated text, nothing else.\n\n";
-            $prompt .= "Text to translate: {$text}\n\n";
-            $prompt .= "Translation:";
         }
+        
+        // Build simple, direct prompt for taxonomy translation
+        // This is much simpler than post translation since we're just translating category/taxonomy names
+        $prompt = "Translate the following category/taxonomy name to {$target_language}. Return ONLY the translated text, nothing else.\n\n";
+        
+        // Add language description if available
+        if (!empty($language_description)) {
+            $prompt .= "Language context: {$language_description}\n\n";
+        }
+        
+        $prompt .= "Text to translate: {$text}\n\n";
+        
+        // Add glossary exclusion if terms exist
+        if (!empty($glossary_list)) {
+            $prompt .= "Do not translate these words: {$glossary_list}\n\n";
+        }
+        
+        $prompt .= "Translation:";
         
         // Call API using reflection to access private method
         $reflection = new ReflectionClass($this->translation_processor);

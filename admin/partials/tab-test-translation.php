@@ -191,11 +191,11 @@ jQuery(document).ready(function($) {
         
         // Get original post content first
         $.ajax({
-            url: xfTranslator.ajaxUrl,
+            url: apiTranslator.ajaxUrl,
             type: 'POST',
             data: {
                 action: 'xf_get_post_content',
-                nonce: xfTranslator.nonce,
+                nonce: apiTranslator.nonce,
                 post_id: postId
             },
             success: function(response) {
@@ -217,8 +217,10 @@ jQuery(document).ready(function($) {
                     $('#test-translation-btn').prop('disabled', false);
                 }
             },
-            error: function() {
-                alert('<?php _e('Error loading post content.', 'xf-translator'); ?>');
+            error: function(xhr, status, error) {
+                console.error('AJAX Error:', status, error);
+                console.error('Response:', xhr.responseText);
+                alert('<?php _e('Error loading post content.', 'xf-translator'); ?>: ' + error);
                 $('#test-loading').hide();
                 $('#test-translation-btn').prop('disabled', false);
             }
@@ -247,11 +249,12 @@ jQuery(document).ready(function($) {
         var model = models[index];
         
         $.ajax({
-            url: xfTranslator.ajaxUrl,
+            url: apiTranslator.ajaxUrl,
             type: 'POST',
+            timeout: 300000, // 5 minutes timeout
             data: {
                 action: 'xf_test_translation',
-                nonce: xfTranslator.nonce,
+                nonce: apiTranslator.nonce,
                 post_id: postId,
                 target_language: targetLanguage,
                 model: model,
@@ -268,8 +271,29 @@ jQuery(document).ready(function($) {
                 // Test next model
                 testModelsSequentially(models, postId, targetLanguage, promptTemplate, customPrompt, index + 1);
             },
-            error: function() {
-                displayTestError(model, '<?php _e('API Error', 'xf-translator'); ?>');
+            error: function(xhr, status, error) {
+                console.error('Test Translation AJAX Error:', status, error);
+                console.error('Response:', xhr.responseText);
+                var errorMsg = '<?php _e('API Error', 'xf-translator'); ?>';
+                
+                if (status === 'timeout') {
+                    errorMsg = '<?php _e('Request timed out. The translation may be taking too long. Please try again or use a shorter post.', 'xf-translator'); ?>';
+                } else if (xhr.responseText) {
+                    try {
+                        var response = JSON.parse(xhr.responseText);
+                        if (response.data && response.data.message) {
+                            errorMsg = response.data.message;
+                        }
+                    } catch(e) {
+                        // Not JSON, use default message
+                        if (xhr.status === 0) {
+                            errorMsg = '<?php _e('Connection error. Please check your internet connection.', 'xf-translator'); ?>';
+                        } else if (xhr.status === 500) {
+                            errorMsg = '<?php _e('Server error. Please check the error logs.', 'xf-translator'); ?>';
+                        }
+                    }
+                }
+                displayTestError(model, errorMsg);
                 testModelsSequentially(models, postId, targetLanguage, promptTemplate, customPrompt, index + 1);
             }
         });
@@ -419,11 +443,11 @@ jQuery(document).ready(function($) {
         var model = $(this).data('model');
         if (confirm('<?php _e('Save this model as your default translation model?', 'xf-translator'); ?>')) {
             $.ajax({
-                url: xfTranslator.ajaxUrl,
+                url: apiTranslator.ajaxUrl,
                 type: 'POST',
                 data: {
                     action: 'xf_save_default_model',
-                    nonce: xfTranslator.nonce,
+                    nonce: apiTranslator.nonce,
                     model: model
                 },
                 success: function(response) {

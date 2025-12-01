@@ -43,7 +43,44 @@ $recent_old_jobs = $wpdb->get_results(
     
     <div style="margin: 20px 0; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
         <h3 style="margin-top: 0;"><?php _e('Analyze English Posts & Pages', 'xf-translator'); ?></h3>
-        <p><?php _e('Select a post type below and click the button to analyze all English content of that type and check which translations are missing. Missing translations will be added to the queue with type "OLD".', 'xf-translator'); ?></p>
+        
+        <?php
+        // Check if there's an active job
+        $active_job = get_transient('xf_analyze_active_job');
+        $cron_url = site_url('/wp-content/plugins/xf-translator/analyze-posts.php');
+        ?>
+        
+        <?php if ($active_job && $active_job['status'] === 'processing'): ?>
+            <div style="margin: 20px 0; padding: 15px; background: #fff3cd; border-left: 4px solid #ffc107; border-radius: 4px;">
+                <h4 style="margin-top: 0;"><?php _e('Active Analysis Job', 'xf-translator'); ?></h4>
+                <p><strong><?php _e('Status:', 'xf-translator'); ?></strong> <?php _e('Processing', 'xf-translator'); ?></p>
+                <p><strong><?php _e('Progress:', 'xf-translator'); ?></strong> 
+                    <?php echo number_format($active_job['processed_posts']); ?> / <?php echo number_format($active_job['total_posts']); ?> posts 
+                    (<?php echo $active_job['total_posts'] > 0 ? round(($active_job['processed_posts'] / $active_job['total_posts']) * 100) : 0; ?>%)
+                </p>
+                <p><strong><?php _e('Queue Entries Added:', 'xf-translator'); ?></strong> <?php echo number_format($active_job['added_entries']); ?></p>
+                
+                <p style="margin-top: 15px;">
+                    <strong><?php _e('Cron URL:', 'xf-translator'); ?></strong><br>
+                    <code style="display: block; padding: 10px; background: #f5f5f5; margin: 10px 0; word-break: break-all;"><?php echo esc_html($cron_url); ?></code>
+                </p>
+                
+                <p>
+                    <a href="<?php echo esc_url($cron_url); ?>" target="_blank" class="button button-primary"><?php _e('View Progress Page', 'xf-translator'); ?></a>
+                </p>
+                
+            </div>
+        <?php elseif ($active_job && $active_job['status'] === 'completed'): ?>
+            <div style="margin: 20px 0; padding: 15px; background: #d4edda; border-left: 4px solid #28a745; border-radius: 4px;">
+                <h4 style="margin-top: 0;"><?php _e('Last Analysis Job - Completed', 'xf-translator'); ?></h4>
+                <p><strong><?php _e('Processed:', 'xf-translator'); ?></strong> <?php echo number_format($active_job['processed_posts']); ?> / <?php echo number_format($active_job['total_posts']); ?> posts</p>
+                <p><strong><?php _e('Queue Entries Added:', 'xf-translator'); ?></strong> <?php echo number_format($active_job['added_entries']); ?></p>
+                <?php if (isset($active_job['completed_at'])): ?>
+                    <p><strong><?php _e('Completed:', 'xf-translator'); ?></strong> <?php echo date('Y-m-d H:i:s', strtotime($active_job['completed_at'])); ?></p>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+        <p><?php _e('Select a post type below and click the button to analyze all English content of that type and check which translations are missing.', 'xf-translator'); ?></p>
         <?php
         $selected_start_date = '';
         $selected_end_date = '';

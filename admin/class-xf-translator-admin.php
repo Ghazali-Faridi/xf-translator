@@ -669,9 +669,6 @@ class Xf_Translator_Admin {
      * Analyzes all English posts and pages and adds missing translations to queue
      */
     public function handle_analyze_posts() {
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'xf_translate_queue';
-        
         // Get selected post types from form (support both single and multiple)
         $selected_post_types = array();
         if (isset($_POST['analyze_post_type'])) {
@@ -726,258 +723,92 @@ class Xf_Translator_Admin {
             return;
         }
         
-        // Get all languages from settings
+        // Get languages
         $languages = $this->settings->get('languages', array());
-        
         if (empty($languages)) {
             $this->add_notice(__('No languages configured. Please add languages in the Settings tab.', 'xf-translator'), 'error');
             return;
         }
         
-        // Process each selected post type
-        $total_added = 0;
-        $total_posts_analyzed = 0;
-        $results_by_type = array();
+        // Check if there's already an active job
+        $existing_job = get_transient('xf_analyze_active_job');
+        if ($existing_job && $existing_job['status'] === 'processing') {
+            $this->add_notice(
+                __('An analysis job is already running. Please wait for it to complete or clear it first.', 'xf-translator'),
+                'warning'
+            );
+            return;
+        }
         
-        foreach ($selected_post_types as $selected_post_type) {
-            // Get post type object for display name
-            $post_type_obj = get_post_type_object($selected_post_type);
-            $post_type_label = $post_type_obj ? $post_type_obj->label : $selected_post_type;
-            
-            // Get all published posts of selected type that are NOT translations (English posts/pages)
-            // Posts that have _xf_translator_original_post_id or _xf_translator_language are translations, so we exclude them
+        // Count total posts to analyze
+        $total_posts = 0;
+        foreach ($selected_post_types as $post_type) {
             $args = array(
-                'post_type' => $selected_post_type,
+                'post_type' => $post_type,
                 'post_status' => 'publish',
                 'posts_per_page' => -1,
+                'fields' => 'ids',
                 'meta_query' => array(
                     'relation' => 'AND',
-                    array(
-                        'key' => '_xf_translator_original_post_id',
-                        'compare' => 'NOT EXISTS'
-                    ),
-                    array(
-                        'key' => '_api_translator_original_post_id',
-                        'compare' => 'NOT EXISTS'
-                    ),
-                    array(
-                        'key' => '_xf_translator_language',
-                        'compare' => 'NOT EXISTS'
-                    )
+                    array('key' => '_xf_translator_original_post_id', 'compare' => 'NOT EXISTS'),
+                    array('key' => '_api_translator_original_post_id', 'compare' => 'NOT EXISTS'),
+                    array('key' => '_xf_translator_language', 'compare' => 'NOT EXISTS')
                 )
             );
-
-            if ($start_datetime || $end_datetime) {
-                $range = array(
-                    'inclusive' => true
-                );
-
-                if ($start_datetime) {
-                    $range['after'] = $start_datetime->format('Y-m-d H:i:s');
+            
+            // Add date filters if provided
+            if (!empty($start_date) || !empty($end_date)) {
+                $range = array('inclusive' => true);
+                if (!empty($start_date)) {
+                    $range['after'] = $start_date . ' 00:00:00';
                 }
-
-                if ($end_datetime) {
-                    $range['before'] = $end_datetime->format('Y-m-d H:i:s');
+                if (!empty($end_date)) {
+                    $range['before'] = $end_date . ' 23:59:59';
                 }
-
                 $args['date_query'] = array($range);
             }
             
-            $english_posts = get_posts($args);
-            
-            if (empty($english_posts)) {
-                $results_by_type[$selected_post_type] = array(
-                    'label' => $post_type_label,
-                    'analyzed' => 0,
-                    'added' => 0
-                );
-                continue;
-            }
-            
-            $posts_analyzed = 0;
-            $added_for_type = 0;
-            
-            foreach ($english_posts as $post) {
-                $posts_analyzed++;
-                $missing_languages = array();
-                
-                // Check which languages have translations for this post
-                foreach ($languages as $language) {
-                    $language_prefix = $language['prefix'];
-                    $has_translation = false;
-                    
-                    // Method 1: Check meta key on original post (forward link)
-                    $translated_post_id = get_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, true);
-                    if (!empty($translated_post_id) && get_post($translated_post_id)) {
-                        $has_translation = true;
-                    }
-                    
-                    // Method 2: Reverse lookup - check if any translated post exists with this as original
-                    // This catches cases where the forward meta key might not be set
-                    if (!$has_translation) {
-                        $translated_posts = get_posts(array(
-                            'post_type' => $post->post_type,
-                            'post_status' => 'publish',
-                            'posts_per_page' => 1,
-                            'meta_query' => array(
-                                'relation' => 'AND',
-                                array(
-                                    'key' => '_xf_translator_original_post_id',
-                                    'value' => $post->ID,
-                                    'compare' => '='
-                                ),
-                                array(
-                                    'key' => '_xf_translator_language',
-                                    'value' => $language_prefix,
-                                    'compare' => '='
-                                )
-                            )
-                        ));
-                        
-                        if (!empty($translated_posts)) {
-                            $has_translation = true;
-                            // Optionally, set the forward link for future reference
-                            update_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, $translated_posts[0]->ID);
-                        }
-                    }
-                    
-                    // Also check for old meta key format (_api_translator_original_post_id)
-                    if (!$has_translation) {
-                        $translated_posts = get_posts(array(
-                            'post_type' => $post->post_type,
-                            'post_status' => 'publish',
-                            'posts_per_page' => 1,
-                            'meta_query' => array(
-                                'relation' => 'AND',
-                                array(
-                                    'key' => '_api_translator_original_post_id',
-                                    'value' => $post->ID,
-                                    'compare' => '='
-                                ),
-                                array(
-                                    'key' => '_xf_translator_language',
-                                    'value' => $language_prefix,
-                                    'compare' => '='
-                                )
-                            )
-                        ));
-                        
-                        if (!empty($translated_posts)) {
-                            $has_translation = true;
-                            // Optionally, set the forward link for future reference
-                            update_post_meta($post->ID, '_xf_translator_translated_post_' . $language_prefix, $translated_posts[0]->ID);
-                        }
-                    }
-                    
-                    // If no translation exists, add to missing languages
-                    if (!$has_translation) {
-                        $missing_languages[] = $language;
-                    }
-                }
-                
-                // Add missing languages to queue with type 'OLD'
-                foreach ($missing_languages as $language) {
-                    // Check if queue entry already exists for this post and language (any type)
-                    // This prevents duplicates if the post already has 'NEW' or 'OLD' entries
-                    $existing_entry = $wpdb->get_var($wpdb->prepare(
-                        "SELECT COUNT(*) FROM $table_name 
-                         WHERE parent_post_id = %d 
-                         AND lng = %s",
-                        $post->ID,
-                        $language['name']
-                    ));
-                    
-                    // Only add if it doesn't already exist (regardless of type)
-                    if ($existing_entry == 0) {
-                        $result = $wpdb->insert(
-                            $table_name,
-                            array(
-                                'parent_post_id' => $post->ID,
-                                'translated_post_id' => null,
-                                'lng' => $language['name'],
-                                'status' => 'pending',
-                                'type' => 'OLD',
-                                'created' => current_time('mysql')
-                            ),
-                            array('%d', '%d', '%s', '%s', '%s', '%s')
-                        );
-                        
-                        if ($result !== false) {
-                            $total_added++;
-                            $added_for_type++;
-                        } else {
-                            error_log('XF Translator: Failed to insert queue entry for post ' . $post->ID . ', language: ' . $language['name']);
-                        }
-                    }
-                }
-            } // End foreach post
-            
-            // Store results for this post type
-            $results_by_type[$selected_post_type] = array(
-                'label' => $post_type_label,
-                'analyzed' => $posts_analyzed,
-                'added' => $added_for_type
-            );
-            
-            $total_posts_analyzed += $posts_analyzed;
-        } // End foreach post type
-        
-        // Build success message
-        $message_parts = array();
-        foreach ($results_by_type as $post_type => $result) {
-            if ($result['analyzed'] > 0) {
-                $message_parts[] = sprintf(
-                    '%d %s (%d added)',
-                    $result['analyzed'],
-                    strtolower($result['label']),
-                    $result['added']
-                );
-            }
+            $posts = get_posts($args);
+            $total_posts += count($posts);
         }
         
-        if (empty($message_parts)) {
+        if ($total_posts === 0) {
             $this->add_notice(
                 __('No English posts found to analyze in the selected post types.', 'xf-translator'),
                 'info'
             );
-        } else {
-            $this->add_notice(
-                sprintf(
-                    __('Analysis complete.', 'xf-translator'),
-                    implode(', ', $message_parts),
-                    $total_added
-                ),
-                'success'
-            );
-
-            if ($start_datetime || $end_datetime) {
-                $range_text = '';
-                if ($start_datetime && $end_datetime) {
-                    $range_text = sprintf(
-                        __('between %1$s and %2$s', 'xf-translator'),
-                        date_i18n(get_option('date_format'), $start_datetime->getTimestamp()),
-                        date_i18n(get_option('date_format'), $end_datetime->getTimestamp())
-                    );
-                } elseif ($start_datetime) {
-                    $range_text = sprintf(
-                        __('on or after %s', 'xf-translator'),
-                        date_i18n(get_option('date_format'), $start_datetime->getTimestamp())
-                    );
-                } elseif ($end_datetime) {
-                    $range_text = sprintf(
-                        __('on or before %s', 'xf-translator'),
-                        date_i18n(get_option('date_format'), $end_datetime->getTimestamp())
-                    );
-                }
-
-                if (!empty($range_text)) {
-                    $this->add_notice(
-                        sprintf(__('Date filter applied: %s.', 'xf-translator'), $range_text),
-                        'info'
-                    );
-                }
-            }
+            return;
         }
+        
+        // Create job record
+        $job_data = array(
+            'job_id' => wp_generate_uuid4(),
+            'post_types' => $selected_post_types,
+            'start_date' => $start_date,
+            'end_date' => $end_date,
+            'total_posts' => $total_posts,
+            'processed_posts' => 0,
+            'added_entries' => 0,
+            'processed_post_ids' => array(), // Track processed post IDs
+            'status' => 'processing',
+            'created_at' => current_time('mysql'),
+            'last_updated' => current_time('mysql')
+        );
+        
+        // Store job with fixed key (only one active job at a time)
+        set_transient('xf_analyze_active_job', $job_data, DAY_IN_SECONDS);
+        
+        // Get cron URL
+        $cron_url = site_url('/wp-content/plugins/xf-translator/analyze-posts.php');
+        
+        $this->add_notice(
+            sprintf(
+                __('Analysis job created! Total posts to analyze: %d. The job will process 50 posts per run. Add the cron URL to your system cron to start processing.', 'xf-translator'),
+                $total_posts
+            ) . '<br><br><strong>' . __('Cron URL:', 'xf-translator') . '</strong> <code>' . esc_html($cron_url) . '</code><br>' .
+            '<a href="' . esc_url($cron_url) . '" target="_blank" class="button">' . __('View Progress', 'xf-translator') . '</a>',
+            'success'
+        );
     }
     
     /**
@@ -1247,7 +1078,7 @@ class Xf_Translator_Admin {
     /**
      * Bulk fetch translation meta for multiple posts and languages
      */
-    private function bulk_get_translation_meta($post_ids, $languages) {
+    public function bulk_get_translation_meta($post_ids, $languages) {
         if (empty($post_ids) || empty($languages)) {
             return array();
         }
@@ -1305,7 +1136,7 @@ class Xf_Translator_Admin {
     /**
      * Bulk check existing queue entries for multiple posts and languages
      */
-    private function bulk_check_existing_entries($post_ids, $languages) {
+    public function bulk_check_existing_entries($post_ids, $languages) {
         if (empty($post_ids) || empty($languages)) {
             return array();
         }
@@ -2378,9 +2209,20 @@ class Xf_Translator_Admin {
      * AJAX handler to test translation
      */
     public function ajax_test_translation() {
-        check_ajax_referer('xf_translator_ajax', 'nonce');
+        // Increase execution time for test translation
+        @set_time_limit(300);
+        
+        error_log('XF Translator: Test translation AJAX called');
+        
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            error_log('XF Translator: Invalid nonce in test translation');
+            wp_send_json_error(array('message' => __('Invalid nonce', 'xf-translator')));
+            return;
+        }
         
         if (!current_user_can('manage_options')) {
+            error_log('XF Translator: Unauthorized test translation attempt');
             wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
             return;
         }
@@ -2391,7 +2233,10 @@ class Xf_Translator_Admin {
         $prompt_template = isset($_POST['prompt_template']) ? sanitize_text_field($_POST['prompt_template']) : 'current';
         $custom_prompt = isset($_POST['custom_prompt']) ? sanitize_textarea_field($_POST['custom_prompt']) : '';
         
+        error_log('XF Translator: Test translation params - Post ID: ' . $post_id . ', Language: ' . $target_language . ', Model: ' . $model);
+        
         if (!$post_id || !$target_language || !$model) {
+            error_log('XF Translator: Missing required parameters in test translation');
             wp_send_json_error(array('message' => __('Missing required parameters', 'xf-translator')));
             return;
         }
@@ -2401,21 +2246,29 @@ class Xf_Translator_Admin {
         
         $start_time = microtime(true);
         
+        error_log('XF Translator: Starting test translation...');
+        
         // Test translation (doesn't create posts)
         $result = $processor->test_translation($post_id, $target_language, $model, $prompt_template, $custom_prompt);
         
         $end_time = microtime(true);
         $response_time = round($end_time - $start_time, 2);
         
+        error_log('XF Translator: Test translation completed. Response time: ' . $response_time . ' seconds');
+        
         if (is_wp_error($result)) {
+            error_log('XF Translator: Test translation error: ' . $result->get_error_message());
             wp_send_json_error(array('message' => $result->get_error_message()));
             return;
         }
         
         if (!$result) {
+            error_log('XF Translator: Test translation returned false');
             wp_send_json_error(array('message' => __('Translation failed', 'xf-translator')));
             return;
         }
+        
+        error_log('XF Translator: Test translation successful');
         
         wp_send_json_success(array(
             'translated_title' => $result['title'] ?? '',

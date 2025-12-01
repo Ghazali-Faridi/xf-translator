@@ -84,6 +84,11 @@ class Xf_Translator_Public {
 		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
 		add_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 20, 3);
 		add_filter('the_author_meta', array($this, 'filter_the_author_meta_output'), 20, 2);
+		
+		// Filter ACF fields to convert post IDs to translated versions on frontend
+		if (function_exists('get_field')) {
+			add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
+		}
 
 	}
 
@@ -2043,6 +2048,143 @@ class Xf_Translator_Public {
 		}
 		
 		return $meta_key;
+	}
+	
+	/**
+	 * Filter ACF field values to convert post IDs to translated versions on frontend
+	 * This ensures "you may like" and other relationship fields show translated posts
+	 *
+	 * @param mixed $value The field value
+	 * @param int $post_id The post ID
+	 * @param array $field The ACF field array
+	 * @return mixed Converted value with translated post IDs
+	 */
+	public function filter_acf_load_value($value, $post_id, $field) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Skip if value is empty
+		if (empty($value)) {
+			return $value;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		
+		// If no language prefix, we're on English/default - no conversion needed
+		if (empty($lang_prefix)) {
+			return $value;
+		}
+		
+		// Get the current post (might be different from $post_id if field is from another post)
+		global $post;
+		$current_post_id = $post ? $post->ID : $post_id;
+		
+		// Check if we're viewing a translated post
+		$is_translated_post = get_post_meta($current_post_id, '_xf_translator_language', true);
+		
+		// Only convert if we're on a translated post/page
+		if ($is_translated_post !== $lang_prefix) {
+			return $value;
+		}
+		
+		// Convert post IDs in the field value
+		$converted_value = $this->convert_post_ids_to_translated($value, $lang_prefix);
+		
+		return $converted_value;
+	}
+	
+	/**
+	 * Convert post IDs in a value to their translated versions (on-demand check)
+	 * This is used for ACF fields on frontend to dynamically convert post IDs
+	 *
+	 * @param mixed $value The value that may contain post IDs
+	 * @param string $language_prefix Language prefix (e.g., 'fr-CA')
+	 * @param int $depth Current recursion depth (to prevent infinite loops)
+	 * @return mixed Value with post IDs converted to translated versions
+	 */
+	private function convert_post_ids_to_translated($value, $language_prefix, $depth = 0) {
+		// Prevent infinite recursion (max depth of 10 levels)
+		if ($depth > 10) {
+			return $value;
+		}
+
+		if (empty($value) || empty($language_prefix)) {
+			return $value;
+		}
+
+		// Handle arrays (including ACF relationship fields which store arrays of post IDs or post objects)
+		if (is_array($value)) {
+			$converted = array();
+			foreach ($value as $key => $item) {
+				// Recursively process nested arrays (increment depth)
+				if (is_array($item)) {
+					$converted[$key] = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1);
+				} elseif (is_object($item) && isset($item->ID)) {
+					// ACF post object - convert the ID
+					$translated_id = $this->get_translated_post_id($item->ID, $language_prefix);
+					if ($translated_id) {
+						// Replace with translated post object
+						$translated_post = get_post($translated_id);
+						if ($translated_post) {
+							$converted[$key] = $translated_post;
+						} else {
+							$converted[$key] = $item;
+						}
+					} else {
+						$converted[$key] = $item;
+					}
+				} elseif (is_numeric($item) && $item > 0) {
+					// Check if this is a post ID
+					$post = get_post($item);
+					if ($post && $post->post_type !== 'attachment') {
+						// Try to get translated version
+						$translated_id = $this->get_translated_post_id($item, $language_prefix);
+						$converted[$key] = $translated_id ? $translated_id : $item;
+					} else {
+						// Not a post ID or is attachment, keep original
+						$converted[$key] = $item;
+					}
+				} else {
+					// Not a post ID, keep original
+					$converted[$key] = $item;
+				}
+			}
+			return $converted;
+		}
+
+		// Handle post objects (ACF might return post objects instead of IDs)
+		if (is_object($value) && isset($value->ID)) {
+			$translated_id = $this->get_translated_post_id($value->ID, $language_prefix);
+			if ($translated_id) {
+				$translated_post = get_post($translated_id);
+				return $translated_post ? $translated_post : $value;
+			}
+			return $value;
+		}
+
+		// Handle single numeric value (could be a post ID)
+		if (is_numeric($value) && $value > 0) {
+			$post = get_post($value);
+			if ($post && $post->post_type !== 'attachment') {
+				// Try to get translated version
+				$translated_id = $this->get_translated_post_id($value, $language_prefix);
+				return $translated_id ? $translated_id : $value;
+			}
+		}
+
+		// Handle serialized data (though ACF usually stores arrays directly)
+		if (is_string($value) && is_serialized($value)) {
+			$unserialized = unserialize($value);
+			if (is_array($unserialized) || is_numeric($unserialized) || (is_object($unserialized) && isset($unserialized->ID))) {
+				$converted = $this->convert_post_ids_to_translated($unserialized, $language_prefix, $depth + 1);
+				return serialize($converted);
+			}
+		}
+
+		return $value;
 	}
 	
 	/**
