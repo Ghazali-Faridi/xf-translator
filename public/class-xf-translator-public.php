@@ -85,6 +85,25 @@ class Xf_Translator_Public {
 		add_filter('get_the_author_meta', array($this, 'filter_get_the_author_meta'), 20, 3);
 		add_filter('the_author_meta', array($this, 'filter_the_author_meta_output'), 20, 2);
 		
+		// Filter user_description field for direct property access (e.g., $userdata->description)
+		// This handles cases where themes use get_userdata() and access properties directly
+		// WordPress applies this filter via sanitize_user_field() when $user->filter is set
+		add_filter('user_description', array($this, 'filter_user_description_property'), 10, 2);
+		
+		// Modify WP_User object data property directly after it's created
+		// This is needed because $userdata->description accesses $this->data->description directly
+		add_filter('get_user_metadata', array($this, 'filter_user_metadata_for_cache'), 10, 4);
+		
+		// Intercept when user data is loaded and modify the description in the data object
+		// Use 'template_redirect' which fires early but after query is set up
+		add_action('template_redirect', array($this, 'modify_user_data_on_page_load'), 1);
+		
+		// Also hook into get_userdata to modify the object immediately after creation
+		add_filter('get_user_metadata', array($this, 'modify_user_data_in_metadata'), 999, 4);
+		
+		// Hook into the loop_start to modify user data for all authors in the loop
+		add_action('loop_start', array($this, 'modify_user_data_in_loop'), 1);
+		
 		// Filter ACF fields to convert post IDs to translated versions on frontend
 		if (function_exists('get_field')) {
 			add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
@@ -1094,6 +1113,15 @@ class Xf_Translator_Public {
 			}
 		}
 		
+		// Debug logging for language detection (only log once per request to avoid spam)
+		static $logged = false;
+		if (defined('WP_DEBUG') && WP_DEBUG && !$logged) {
+			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+			$path = parse_url($request_uri, PHP_URL_PATH);
+			error_log('XF Translator Language Detection: REQUEST_URI=' . $request_uri . ', path=' . $path . ', detected_prefix=' . ($lang_prefix ?: 'empty') . ', query_var=' . get_query_var('xf_lang_prefix'));
+			$logged = true;
+		}
+		
 		return $lang_prefix ?: '';
 	}
 	
@@ -1974,9 +2002,19 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
+		// Debug logging for description field
+		static $logged_meta_keys = array();
+		if (($meta_key === 'description' || $meta_key === 'user_description') && !isset($logged_meta_keys[$user_id . '_' . $meta_key])) {
+			error_log('XF Translator User Meta: filter_get_user_meta called - meta_key: "' . $meta_key . '", user_id: ' . $user_id);
+			$logged_meta_keys[$user_id . '_' . $meta_key] = true;
+		}
+		
 		// Get current language prefix
 		$lang_prefix = $this->get_current_language_prefix();
 		if (empty($lang_prefix)) {
+			if (($meta_key === 'description' || $meta_key === 'user_description') && isset($logged_meta_keys[$user_id . '_' . $meta_key])) {
+				error_log('XF Translator User Meta: No language prefix in filter_get_user_meta');
+			}
 			return $value;
 		}
 		
@@ -2078,6 +2116,88 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
+		// Check if this is an ACF options page (post_id will be a string like 'option', 'options', 'footer-options', etc.)
+		if (is_string($post_id) && !is_numeric($post_id)) {
+			// This is an ACF options page field
+			$field_key = isset($field['name']) ? $field['name'] : '';
+			
+			// If field name not available, try to get it from field key
+			if (empty($field_key) && isset($field['key']) && function_exists('acf_get_field')) {
+				$field_obj = acf_get_field($field['key']);
+				if ($field_obj && isset($field_obj['name'])) {
+					$field_key = $field_obj['name'];
+				}
+			}
+			
+			// Debug logging
+			error_log('XF Translator ACF Options: Filter called - post_id: ' . $post_id . ', field_key: ' . $field_key . ', lang_prefix: ' . $lang_prefix . ', field array keys: ' . (is_array($field) ? implode(', ', array_keys($field)) : 'not array'));
+			
+			if (!empty($field_key)) {
+				// Normalize option name
+				$option_name = $post_id;
+				$acf_option_key = ($option_name === 'option' || $option_name === '') ? 'options' : $option_name;
+				
+				// Try to get translated value from options table
+				$xf_option_key = '_xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $lang_prefix;
+				error_log('XF Translator ACF Options: Looking for translation with key: ' . $xf_option_key);
+				
+				$translated_value = get_option($xf_option_key, '');
+				
+				// Also try with 'option' instead of 'options' in case it was saved differently
+				if (empty($translated_value) && $acf_option_key === 'options') {
+					$xf_option_key_alt = '_xf_translator_acf_options_option_' . $field_key . '_' . $lang_prefix;
+					error_log('XF Translator ACF Options: Trying alternative key: ' . $xf_option_key_alt);
+					$translated_value = get_option($xf_option_key_alt, '');
+				}
+				
+				if (!empty($translated_value)) {
+					error_log('XF Translator ACF Options: Found translation in options table, length: ' . strlen($translated_value));
+					return $translated_value;
+				}
+				
+				// If not found in options table, try to get from ACF directly (in case it was saved via update_field)
+				if (empty($translated_value) && function_exists('get_field')) {
+					// Try with the normalized key
+					$acf_lookup_key = $acf_option_key . '_' . $lang_prefix;
+					error_log('XF Translator ACF Options: Trying ACF direct lookup with key: ' . $acf_lookup_key);
+					$translated_value = get_field($field_key, $acf_lookup_key);
+					
+					// Also try with 'option' instead of 'options'
+					if (empty($translated_value) && $acf_option_key === 'options') {
+						$acf_lookup_key_alt = 'option_' . $lang_prefix;
+						error_log('XF Translator ACF Options: Trying ACF direct lookup with alternative key: ' . $acf_lookup_key_alt);
+						$translated_value = get_field($field_key, $acf_lookup_key_alt);
+					}
+					
+					if (!empty($translated_value)) {
+						error_log('XF Translator ACF Options: Found translation in ACF, length: ' . strlen($translated_value));
+						return $translated_value;
+					}
+				}
+				
+				// Debug: Check what options exist in the database
+				global $wpdb;
+				$all_options = $wpdb->get_results($wpdb->prepare(
+					"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+					'_xf_translator_acf_options_%' . $field_key . '%'
+				));
+				if (!empty($all_options)) {
+					$option_names = array_map(function($o) { return $o->option_name; }, $all_options);
+					error_log('XF Translator ACF Options: Found related options in DB: ' . implode(', ', $option_names));
+				} else {
+					error_log('XF Translator ACF Options: No related options found in DB for field: ' . $field_key);
+				}
+				
+				error_log('XF Translator ACF Options: No translation found for field: ' . $field_key);
+			} else {
+				error_log('XF Translator ACF Options: Field key is empty, field array: ' . print_r($field, true));
+			}
+			
+			// If no translation found for options page, return original value
+			return $value;
+		}
+		
+		// For regular post fields, handle post ID conversion
 		// Get the current post (might be different from $post_id if field is from another post)
 		global $post;
 		$current_post_id = $post ? $post->ID : $post_id;
@@ -2226,24 +2346,50 @@ class Xf_Translator_Public {
 		// Remove duplicates while preserving order
 		$keys_to_try = array_values(array_unique($keys_to_try));
 		
-		// Try each key
+		// Build list of language prefixes to try
+		// Sometimes translations are stored with different prefix variations (e.g., "fr" vs "fr-CA")
+		$lang_prefixes_to_try = array($lang_prefix);
+		
+		// If lang_prefix contains a hyphen (e.g., "fr-CA"), also try without it (e.g., "fr")
+		if (strpos($lang_prefix, '-') !== false) {
+			$parts = explode('-', $lang_prefix);
+			$lang_prefixes_to_try[] = $parts[0]; // e.g., "fr" from "fr-CA"
+		}
+		
+		// Also try URL-safe version (removes hyphens)
+		$url_safe_prefix = preg_replace('/[^A-Za-z0-9]/', '', $lang_prefix);
+		if ($url_safe_prefix !== $lang_prefix && !in_array($url_safe_prefix, $lang_prefixes_to_try)) {
+			$lang_prefixes_to_try[] = $url_safe_prefix;
+		}
+		
+		// Remove duplicates
+		$lang_prefixes_to_try = array_values(array_unique($lang_prefixes_to_try));
+		
+		// Try each key with each language prefix variation
 		foreach ($keys_to_try as $key) {
-			$translated_meta_key = '_xf_translator_user_meta_' . $key . '_' . $lang_prefix;
-			// Bypass our own filter to avoid recursion
-			remove_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10);
-			$translated_value = get_user_meta($user_id, $translated_meta_key, $single);
-			add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
-			
-			// Check if we got a valid translated value
-			// For single values, check if it's not empty and not false
-			// For arrays, check if it's not empty
-			if ($single) {
-				if ($translated_value !== false && $translated_value !== '' && $translated_value !== null) {
-					return $translated_value;
+			foreach ($lang_prefixes_to_try as $prefix) {
+				$translated_meta_key = '_xf_translator_user_meta_' . $key . '_' . $prefix;
+				// Bypass our own filter to avoid recursion
+				remove_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10);
+				$translated_value = get_user_meta($user_id, $translated_meta_key, $single);
+				add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
+				
+				// Debug logging for description field
+				if ($normalized_key === 'description' || in_array('description', $keys_to_try) || in_array('user_description', $keys_to_try)) {
+					error_log('XF Translator User Meta: Trying key "' . $key . '" with prefix "' . $prefix . '" (meta_key: "' . $translated_meta_key . '") - found: ' . ($translated_value !== false && !empty($translated_value) ? 'YES' : 'NO'));
 				}
-			} else {
-				if (!empty($translated_value) && is_array($translated_value)) {
-					return $translated_value;
+				
+				// Check if we got a valid translated value
+				// For single values, check if it's not empty and not false
+				// For arrays, check if it's not empty
+				if ($single) {
+					if ($translated_value !== false && $translated_value !== '' && $translated_value !== null) {
+						return $translated_value;
+					}
+				} else {
+					if (!empty($translated_value) && is_array($translated_value)) {
+						return $translated_value;
+					}
 				}
 			}
 		}
@@ -2271,20 +2417,42 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
+		// Debug logging for ALL fields to see what's being called
+		static $logged_fields = array();
+		if (!isset($logged_fields[$field])) {
+			error_log('XF Translator User Meta: filter_get_the_author_meta called - field: "' . $field . '", user_id: ' . $user_id);
+			$logged_fields[$field] = true;
+		}
+		
 		// Get current language prefix
 		$lang_prefix = $this->get_current_language_prefix();
+		
+		// Debug logging for user meta translation
+		if ($field === 'description' || $field === 'user_description') {
+			error_log('XF Translator User Meta: Processing description field - user_id: ' . $user_id . ', lang_prefix: ' . ($lang_prefix ?: 'empty') . ', value length: ' . strlen((string)$value));
+		}
+		
 		if (empty($lang_prefix)) {
+			if ($field === 'description' || $field === 'user_description') {
+				error_log('XF Translator User Meta: No language prefix detected, returning original value');
+			}
 			return $value;
 		}
 		
 		// Check if this meta field should be translated
 		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
 		if (empty($translatable_fields)) {
+			if ($field === 'description' || $field === 'user_description') {
+				error_log('XF Translator User Meta: No translatable fields configured');
+			}
 			return $value;
 		}
 		
 		// Check if this field is in the translatable fields list
 		if (!$this->is_field_translatable($field, $translatable_fields)) {
+			if ($field === 'description' || $field === 'user_description') {
+				error_log('XF Translator User Meta: Field "' . $field . '" is not in translatable fields list: ' . print_r($translatable_fields, true));
+			}
 			return $value;
 		}
 		
@@ -2295,6 +2463,10 @@ class Xf_Translator_Public {
 		remove_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10);
 		$translated_value = $this->get_translated_user_meta($user_id, $field, $normalized_key, $lang_prefix, true, $translatable_fields);
 		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
+		
+		if ($field === 'description' || $field === 'user_description') {
+			error_log('XF Translator User Meta: Translated value found: ' . (!empty($translated_value) ? 'YES (length: ' . strlen((string)$translated_value) . ')' : 'NO'));
+		}
 		
 		// Return translated value if available, otherwise original
 		return !empty($translated_value) ? $translated_value : $value;
@@ -2330,5 +2502,240 @@ class Xf_Translator_Public {
 		return $this->filter_get_the_author_meta($value, $user_id, $field);
 	}
 	
+	/**
+	 * Filter user_description property for direct object access (e.g., $userdata->description)
+	 * This handles cases where themes use get_userdata() and access properties directly
+	 *
+	 * @param string $value The description value
+	 * @param int $user_id User ID
+	 * @return string Translated description or original value
+	 */
+	public function filter_user_description_property($value, $user_id)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return $value;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
+		if (empty($translatable_fields)) {
+			return $value;
+		}
+		
+		// Check if description is in translatable fields
+		if (!in_array('description', $translatable_fields) && !in_array('user_description', $translatable_fields)) {
+			return $value;
+		}
+		
+		// Get normalized meta key
+		$normalized_key = 'description'; // Always use 'description' as the normalized key
+		
+		// Try to get translated value
+		$translated_value = $this->get_translated_user_meta($user_id, 'description', $normalized_key, $lang_prefix, true, $translatable_fields);
+		
+		// Return translated value if available, otherwise original
+		return !empty($translated_value) ? $translated_value : $value;
+	}
+	
+	/**
+	 * Modify user data on page load to update description property
+	 * This handles cases where themes use $userdata->description directly
+	 */
+	public function modify_user_data_on_page_load()
+	{
+		// Only on frontend
+		if (is_admin()) {
+			return;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
+		if (empty($translatable_fields)) {
+			return;
+		}
+		
+		// Check if description is in translatable fields
+		if (!in_array('description', $translatable_fields) && !in_array('user_description', $translatable_fields)) {
+			return;
+		}
+		
+		// Get the current post's author
+		global $post, $author;
+		$user_id = 0;
+		
+		if ($post && $post->post_author) {
+			$user_id = $post->post_author;
+		} elseif (!empty($author)) {
+			$user_id = $author;
+		}
+		
+		if (!$user_id) {
+			return;
+		}
+		
+		// Get translated description
+		$normalized_key = 'description';
+		$translated_value = $this->get_translated_user_meta($user_id, 'description', $normalized_key, $lang_prefix, true, $translatable_fields);
+		
+		if (!empty($translated_value)) {
+			// Modify the user object's data property directly
+			$user = get_userdata($user_id);
+			if ($user) {
+				// Modify the data object
+				if (isset($user->data->description)) {
+					$user->data->description = $translated_value;
+				}
+				// Also set it as a direct property for immediate access
+				$user->description = $translated_value;
+				error_log('XF Translator: Modified user ' . $user_id . ' description to translated version (length: ' . strlen($translated_value) . ')');
+			}
+		}
+	}
+	
+	/**
+	 * Modify user data when metadata is retrieved
+	 * This intercepts get_user_metadata to modify the description before it's cached
+	 */
+	public function modify_user_data_in_metadata($value, $user_id, $meta_key, $single)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Only handle description field
+		if ($meta_key !== 'description' && $meta_key !== 'user_description') {
+			return $value;
+		}
+		
+		// Use the existing filter logic
+		return $this->filter_user_metadata_for_cache($value, $user_id, $meta_key, $single);
+	}
+	
+	/**
+	 * Modify user data in the loop to catch authors loaded during post rendering
+	 */
+	public function modify_user_data_in_loop($query)
+	{
+		// Only on frontend
+		if (is_admin()) {
+			return;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
+		if (empty($translatable_fields)) {
+			return;
+		}
+		
+		// Check if description is in translatable fields
+		if (!in_array('description', $translatable_fields) && !in_array('user_description', $translatable_fields)) {
+			return;
+		}
+		
+		// Get the current post's author
+		global $post, $author;
+		$user_id = 0;
+		
+		if ($post && $post->post_author) {
+			$user_id = $post->post_author;
+		} elseif (!empty($author)) {
+			$user_id = $author;
+		}
+		
+		if (!$user_id) {
+			return;
+		}
+		
+		// Get translated description
+		$normalized_key = 'description';
+		$translated_value = $this->get_translated_user_meta($user_id, 'description', $normalized_key, $lang_prefix, true, $translatable_fields);
+		
+		if (!empty($translated_value)) {
+			// Modify the user object's data property directly
+			$user = get_userdata($user_id);
+			if ($user) {
+				// Modify the data object
+				if (isset($user->data->description)) {
+					$user->data->description = $translated_value;
+				}
+				// Also set it as a direct property for immediate access
+				$user->description = $translated_value;
+			}
+			
+			// Also modify the global $author variable if it exists
+			if (!empty($author) && $author == $user_id) {
+				$userdata = get_userdata($author);
+				if ($userdata) {
+					if (isset($userdata->data->description)) {
+						$userdata->data->description = $translated_value;
+					}
+					$userdata->description = $translated_value;
+				}
+			}
+		}
+	}
+	
+	/**
+	 * Filter user metadata to modify description in cached user data
+	 * This intercepts when user meta is loaded into the WP_User object
+	 */
+	public function filter_user_metadata_for_cache($value, $user_id, $meta_key, $single)
+	{
+		// Only filter on frontend
+		if (is_admin()) {
+			return $value;
+		}
+		
+		// Only handle description field
+		if ($meta_key !== 'description' && $meta_key !== 'user_description') {
+			return $value;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		if (empty($lang_prefix)) {
+			return $value;
+		}
+		
+		// Check if this meta field should be translated
+		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
+		if (empty($translatable_fields)) {
+			return $value;
+		}
+		
+		// Check if description is in translatable fields
+		if (!in_array('description', $translatable_fields) && !in_array('user_description', $translatable_fields)) {
+			return $value;
+		}
+		
+		// Get normalized meta key
+		$normalized_key = 'description';
+		
+		// Try to get translated value
+		$translated_value = $this->get_translated_user_meta($user_id, 'description', $normalized_key, $lang_prefix, true, $translatable_fields);
+		
+		// Return translated value if available, otherwise original
+		return !empty($translated_value) ? $translated_value : $value;
+	}
 
 }

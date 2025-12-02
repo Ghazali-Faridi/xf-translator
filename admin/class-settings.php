@@ -31,7 +31,8 @@ class Settings {
         'glossary_terms' => array(),
         'processing_delay_minutes' => 0,
         'translatable_post_meta_fields' => array(),
-        'translatable_user_meta_fields' => array('description', 'user_description')
+        'translatable_user_meta_fields' => array('description', 'user_description'),
+        'translatable_acf_fields' => array()
     );
     
     /**
@@ -389,6 +390,26 @@ class Settings {
     public function update_translatable_user_meta_fields($fields) {
         $sanitized = array_map('sanitize_text_field', $fields);
         return $this->update('translatable_user_meta_fields', array_unique($sanitized));
+    }
+
+    /**
+     * Get translatable ACF fields
+     *
+     * @return array Array of ACF field keys
+     */
+    public function get_translatable_acf_fields() {
+        return $this->get('translatable_acf_fields', array());
+    }
+
+    /**
+     * Update translatable ACF fields
+     *
+     * @param array $fields Array of ACF field keys
+     * @return bool
+     */
+    public function update_translatable_acf_fields($fields) {
+        $sanitized = array_map('sanitize_text_field', $fields);
+        return $this->update('translatable_acf_fields', array_unique($sanitized));
     }
 }
 

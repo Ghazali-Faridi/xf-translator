@@ -4,8 +4,45 @@
  * @package API_Translator
  */
 
- .api-translator-settings {
-    /* max-width: 1200px; */
+/* Full width settings for XF Translator */
+.api-translator-settings {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.api-translator-settings .wrap {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 20px !important;
+}
+
+.api-translator-settings .api-translator-content {
+    max-width: none !important;
+    width: 100% !important;
+}
+
+.api-translator-settings .api-translator-section {
+    max-width: none !important;
+    width: 100% !important;
+    box-sizing: border-box;
+}
+
+/* Override WordPress admin constraints */
+body.toplevel_page_xf-translator .wrap {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+}
+
+body.toplevel_page_xf-translator #wpcontent {
+    padding-left: 0 !important;
+}
+
+body.toplevel_page_xf-translator #wpbody-content {
+    padding-bottom: 0 !important;
 }
 
 .api-translator-content {

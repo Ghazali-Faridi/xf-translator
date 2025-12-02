@@ -148,6 +148,7 @@ class Xf_Translator_Admin {
             'translation-rules' => __('Translation Rules', 'api-translator'),
             'menu-translation' => __('Menu Translation', 'api-translator'),
             'taxonomy-translation' => __('Taxonomy Translation', 'api-translator'),
+            'acf-translation' => __('ACF Translation', 'api-translator'),
             'user-meta-translation' => __('User Meta Translation', 'api-translator'),
             'logs' => __('Logs', 'api-translator')
         );
@@ -202,7 +203,11 @@ class Xf_Translator_Admin {
             case 'delete_glossary_term':
                 $this->handle_delete_glossary_term();
                 break;
-                
+
+            case 'save_acf_settings':
+                $this->save_acf_settings();
+                break;
+
             case 'process_queue':
                 $this->handle_process_queue();
                 break;
@@ -442,7 +447,18 @@ class Xf_Translator_Admin {
             $this->add_notice(__('Brand tone saved successfully.', 'api-translator'), 'success');
         }
     }
-    
+
+    /**
+     * Save ACF settings
+     */
+    private function save_acf_settings() {
+        if (isset($_POST['translatable_acf_fields'])) {
+            $fields = array_map('sanitize_text_field', $_POST['translatable_acf_fields']);
+            $this->settings->update_translatable_acf_fields($fields);
+            $this->add_notice(__('ACF translation settings saved successfully.', 'api-translator'), 'success');
+        }
+    }
+
     /**
      * Handle add exclude path
      */
@@ -3017,7 +3033,992 @@ class Xf_Translator_Admin {
             'language_prefix' => $language_prefix
         ));
     }
-    
+
+    /**
+     * AJAX handler to get ACF field groups
+     */
+    public function ajax_get_acf_field_groups() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+
+        if (!function_exists('acf_get_field_groups')) {
+            wp_send_json_error(array('message' => 'ACF functions not available'));
+            return;
+        }
+
+        // Get all ACF field groups
+        $field_groups = acf_get_field_groups();
+        $groups_data = array();
+
+        error_log('XF Translator ACF: Found ' . count($field_groups) . ' ACF field groups');
+
+        foreach ($field_groups as $group) {
+            $location_info = isset($group['location']) ? $group['location'] : array();
+            error_log('XF Translator ACF: Field group "' . $group['title'] . '" (key: ' . $group['key'] . ') location: ' . print_r($location_info, true));
+
+            $groups_data[] = array(
+                'key' => $group['key'],
+                'title' => $group['title'],
+                'location' => $location_info
+            );
+        }
+
+        wp_send_json_success(array('groups' => $groups_data));
+    }
+
+    /**
+     * AJAX handler to scan ACF fields by field group
+     */
+    public function ajax_scan_acf_fields_by_group() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+
+        $group_key = isset($_POST['group_key']) ? sanitize_text_field($_POST['group_key']) : '';
+
+        if (empty($group_key)) {
+            wp_send_json_error(array('message' => 'Field group key is required'));
+            return;
+        }
+
+        if (!function_exists('acf_get_fields')) {
+            wp_send_json_error(array('message' => 'ACF functions not available'));
+            return;
+        }
+
+        // Get fields for this specific field group
+        $fields = acf_get_fields($group_key);
+        $acf_fields = array();
+
+        error_log('XF Translator ACF: Scanning field group "' . $group_key . '" - found ' . (is_array($fields) ? count($fields) : 0) . ' total fields');
+
+        if ($fields && is_array($fields)) {
+            foreach ($fields as $field) {
+                $field_type = isset($field['type']) ? $field['type'] : 'unknown';
+                error_log('XF Translator ACF: Field "' . $field['name'] . '" type: ' . $field_type);
+
+                // Only include text-based fields that can be translated
+                $translatable_types = array('text', 'textarea', 'wysiwyg', 'email', 'url', 'number');
+
+                if (in_array($field_type, $translatable_types)) {
+                    // Get sample data from existing posts (optional)
+                    $sample_value = $this->get_acf_field_sample($field['name']);
+                    error_log('XF Translator ACF: Added translatable field "' . $field['name'] . '" with sample: "' . substr($sample_value, 0, 50) . '"');
+
+                    $acf_fields[] = array(
+                        'key' => $field['name'],
+                        'label' => $field['label'],
+                        'type' => $field_type,
+                        'sample' => $sample_value,
+                        'instructions' => isset($field['instructions']) ? $field['instructions'] : ''
+                    );
+                } else {
+                    error_log('XF Translator ACF: Skipped non-translatable field "' . $field['name'] . '" type: ' . $field_type);
+                }
+            }
+        }
+
+        error_log('XF Translator ACF: Returning ' . count($acf_fields) . ' translatable fields for group "' . $group_key . '"');
+
+        wp_send_json_success(array('fields' => $acf_fields));
+    }
+
+    /**
+     * AJAX handler to test ACF detection
+     */
+    public function ajax_test_acf_detection() {
+        try {
+            // Verify nonce
+            if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+                wp_send_json_error(array('message' => 'Invalid nonce'));
+                return;
+            }
+
+            // Check user permissions
+            if (!current_user_can('manage_options')) {
+                wp_send_json_error(array('message' => 'Insufficient permissions'));
+                return;
+            }
+
+            $result = array(
+                'acf_active' => function_exists('get_fields'),
+                'field_groups_count' => 0,
+                'options_pages_checked' => array('footer-options', 'header-options', 'theme-options'),
+                'fields_in_options' => 0,
+                'posts_checked' => 0,
+                'post_types_found' => array()
+            );
+
+            // Check ACF field groups
+            if (function_exists('acf_get_field_groups')) {
+                $field_groups = acf_get_field_groups();
+                $result['field_groups_count'] = count($field_groups);
+            }
+
+            // Check options pages for ACF fields
+            $options_pages = array('footer-options', 'header-options', 'theme-options');
+            foreach ($options_pages as $option_page) {
+                try {
+                    $fields = get_fields($option_page);
+                    if ($fields && is_array($fields)) {
+                        $result['fields_in_options'] += count($fields);
+                    }
+                } catch (Exception $e) {
+                    // Ignore errors for individual option pages
+                }
+            }
+
+            // Check a few posts for ACF fields
+            $args = array(
+                'post_type' => 'any',
+                'posts_per_page' => 10,
+                'post_status' => 'publish'
+            );
+
+            $posts = get_posts($args);
+            $result['posts_checked'] = count($posts);
+
+            foreach ($posts as $post) {
+                $post_type = $post->post_type;
+                $result['post_types_found'][$post_type] = ($result['post_types_found'][$post_type] ?? 0) + 1;
+
+                // Check if post has ACF fields
+                try {
+                    $fields = get_fields($post->ID);
+                    if ($fields && is_array($fields) && !empty($fields)) {
+                        $result['posts_with_acf_fields'] = ($result['posts_with_acf_fields'] ?? 0) + 1;
+                    }
+                } catch (Exception $e) {
+                    // Ignore errors for individual posts
+                }
+            }
+
+            wp_send_json_success($result);
+
+        } catch (Exception $e) {
+            error_log('XF Translator ACF: Error in ACF detection test: ' . $e->getMessage());
+            wp_send_json_error(array('message' => 'Test failed: ' . $e->getMessage()));
+        }
+    }
+
+    /**
+     * Helper method to get sample ACF field value
+     */
+    private function get_acf_field_sample($field_name) {
+        // Get a recent post that has this field
+        $args = array(
+            'post_type' => 'any',
+            'posts_per_page' => 1,
+            'post_status' => 'publish',
+            'meta_query' => array(
+                array(
+                    'key' => $field_name,
+                    'compare' => 'EXISTS'
+                )
+            ),
+            'orderby' => 'modified',
+            'order' => 'DESC'
+        );
+
+        $posts = get_posts($args);
+
+        if (!empty($posts)) {
+            $value = get_field($field_name, $posts[0]->ID);
+            if (is_string($value) || is_numeric($value)) {
+                return substr((string)$value, 0, 100);
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * AJAX handler to scan ACF fields (legacy - now replaced by group-based scanning)
+     */
+    public function ajax_scan_acf_fields() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+
+        if (!function_exists('get_fields')) {
+            wp_send_json_error(array('message' => 'ACF plugin is not active'));
+            return;
+        }
+
+        // Additional ACF check - try to get fields from a test post
+        $test_post_id = get_option('page_on_front'); // Use front page as test
+        if ($test_post_id) {
+            $test_fields = get_fields($test_post_id);
+            if ($test_fields === false) {
+                wp_send_json_error(array('message' => 'ACF functions are available but not returning data. Check ACF configuration.'));
+                return;
+            }
+        }
+
+        // Get posts to scan for ACF fields (limit to recent posts for performance)
+        $args = array(
+            'post_type' => 'any',
+            'posts_per_page' => 50, // Limit for performance
+            'post_status' => 'publish',
+            'orderby' => 'modified',
+            'order' => 'DESC'
+        );
+
+        $posts = get_posts($args);
+        $acf_fields = array();
+        $posts_checked = 0;
+
+        foreach ($posts as $post) {
+            $posts_checked++;
+            $fields = get_fields($post->ID);
+
+            // Debug: Check if get_fields returned anything
+            if (empty($fields)) {
+                continue; // No ACF fields on this post
+            }
+
+            if ($fields && is_array($fields)) {
+                foreach ($fields as $field_key => $field_value) {
+                    // Skip internal ACF fields (field keys that start with underscore)
+                    if (strpos($field_key, '_') === 0) {
+                        continue;
+                    }
+
+                    // Only include text/numeric fields for translation
+                    if (!is_string($field_value) && !is_numeric($field_value)) {
+                        continue;
+                    }
+
+                    // Skip empty values
+                    if (empty(trim($field_value))) {
+                        continue;
+                    }
+
+                    if (!isset($acf_fields[$field_key])) {
+                        // Try to get field label from ACF
+                        $field_object = get_field_object($field_key, $post->ID);
+                        $label = $field_object && isset($field_object['label']) ? $field_object['label'] : $field_key;
+
+                        $acf_fields[$field_key] = array(
+                            'key' => $field_key,
+                            'label' => $label,
+                            'sample' => substr((string)$field_value, 0, 100)
+                        );
+                    }
+                }
+            }
+
+            // Break if we have enough fields (performance optimization)
+            if (count($acf_fields) >= 20) {
+                break;
+            }
+        }
+
+        // If no fields found through get_fields(), try alternative method
+        if (empty($acf_fields)) {
+            global $wpdb;
+
+            // Look for ACF meta keys (they start with underscore)
+            $acf_meta_keys = $wpdb->get_col("
+                SELECT DISTINCT meta_key
+                FROM {$wpdb->postmeta}
+                WHERE meta_key LIKE '\_%'
+                AND meta_key NOT LIKE '\_wp%'
+                AND meta_key NOT LIKE '\_edit%'
+                LIMIT 50
+            ");
+
+            if (!empty($acf_meta_keys)) {
+                // Get sample values for these fields
+                foreach ($acf_meta_keys as $meta_key) {
+                    // Remove underscore to get field name
+                    $field_key = substr($meta_key, 1);
+
+                    // Get a sample post that has this field
+                    $sample_post_id = $wpdb->get_var($wpdb->prepare("
+                        SELECT post_id
+                        FROM {$wpdb->postmeta}
+                        WHERE meta_key = %s
+                        AND meta_value != ''
+                        LIMIT 1
+                    ", $meta_key));
+
+                    if ($sample_post_id) {
+                        $sample_value = get_post_meta($sample_post_id, $meta_key, true);
+
+                        if (!empty($sample_value) && (is_string($sample_value) || is_numeric($sample_value))) {
+                            // Try to get field label
+                            $field_object = get_field_object($field_key, $sample_post_id);
+                            $label = $field_object && isset($field_object['label']) ? $field_object['label'] : $field_key;
+
+                            $acf_fields[$field_key] = array(
+                                'key' => $field_key,
+                                'label' => $label,
+                                'sample' => substr((string)$sample_value, 0, 100)
+                            );
+                        }
+                    }
+
+                    if (count($acf_fields) >= 20) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        wp_send_json_success(array(
+            'fields' => array_values($acf_fields),
+            'posts_checked' => $posts_checked,
+            'total_found' => count($acf_fields)
+        ));
+    }
+
+    /**
+     * AJAX handler to translate ACF fields in bulk
+     */
+    public function ajax_translate_acf_bulk() {
+        try {
+            // Verify nonce
+            if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+                wp_send_json_error(array('message' => 'Invalid nonce'));
+                return;
+            }
+
+            // Check user permissions
+            if (!current_user_can('manage_options')) {
+                wp_send_json_error(array('message' => 'Insufficient permissions'));
+                return;
+            }
+
+            $language_prefix = isset($_POST['language_prefix']) ? sanitize_text_field($_POST['language_prefix']) : '';
+            $selected_fields = isset($_POST['fields']) ? array_map('sanitize_text_field', $_POST['fields']) : array();
+
+            if (empty($language_prefix)) {
+                wp_send_json_error(array('message' => 'Language is required'));
+                return;
+            }
+
+            if (empty($selected_fields)) {
+                wp_send_json_error(array('message' => 'No fields selected'));
+                return;
+            }
+
+            // Get language name
+            $languages = $this->settings->get('languages', array());
+            $target_language_name = '';
+            foreach ($languages as $lang) {
+                if ($lang['prefix'] === $language_prefix) {
+                    $target_language_name = $lang['name'];
+                    break;
+                }
+            }
+
+            if (empty($target_language_name)) {
+                wp_send_json_error(array('message' => 'Invalid language'));
+                return;
+            }
+
+        // First check ACF options pages for the selected fields
+        $options_results = array();
+        foreach ($selected_fields as $field_key) {
+            // Check common ACF options pages
+            $options_pages = array('', 'options', 'acf-options', 'footer-options', 'header-options', 'theme-options');
+
+            foreach ($options_pages as $options_page) {
+                try {
+                    $option_name = $options_page ? $options_page : 'option';
+                    $field_value = get_field($field_key, $option_name);
+
+                    error_log('XF Translator ACF: Checking field "' . $field_key . '" in options page "' . $option_name . '", value: ' . (is_string($field_value) ? substr($field_value, 0, 50) : json_encode($field_value)));
+
+                    if ($field_value !== null && $field_value !== false && (!empty($field_value) || is_numeric($field_value))) {
+                        $options_results[] = array(
+                            'option_name' => $option_name,
+                            'field' => $field_key,
+                            'field_label' => $this->get_acf_field_label($field_key, false), // No post ID for options
+                            'original' => $field_value,
+                            'translated' => '',
+                            'success' => false,
+                            'error' => 'Ready for translation'
+                        );
+                        error_log('XF Translator ACF: Found field "' . $field_key . '" in ACF options page "' . $option_name . '": ' . substr((string)$field_value, 0, 50));
+                        break; // Found it, no need to check other option pages
+                    }
+                } catch (Exception $e) {
+                    error_log('XF Translator ACF: Error checking field "' . $field_key . '" in options page "' . $option_name . '": ' . $e->getMessage());
+                }
+            }
+        }
+
+        // If we found options page results, translate them
+        if (!empty($options_results)) {
+            error_log('XF Translator ACF: Translating ACF fields in options pages');
+
+            $translated_options_results = array();
+            foreach ($options_results as $option_result) {
+                $field_key = $option_result['field'];
+                $original_value = $option_result['original'];
+                $option_name = $option_result['option_name'];
+
+                try {
+                    // Translate the field
+                    require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+                    $processor = new Xf_Translator_Processor();
+                    
+                    // Use Reflection to access protected methods
+                    $reflection = new ReflectionClass($processor);
+                    
+                    // Build prompt from ACF field data
+                    $acf_data = array('acf_' . $field_key => $original_value);
+                    $build_prompt_method = $reflection->getMethod('build_translation_prompt');
+                    $build_prompt_method->setAccessible(true);
+                    $prompt_data = $build_prompt_method->invoke($processor, $acf_data, $target_language_name);
+                    $prompt = $prompt_data['prompt'];
+                    $placeholders_map = $prompt_data['placeholders_map'];
+                    
+                    // Call translation API with prompt string and language prefix
+                    $call_api_method = $reflection->getMethod('call_translation_api');
+                    $call_api_method->setAccessible(true);
+                    $translation_result = $call_api_method->invoke($processor, $prompt, $language_prefix, 0, 0);
+
+                    if ($translation_result !== false) {
+                        // Parse the translation response
+                        $parse_method = $reflection->getMethod('parse_translation_response');
+                        $parse_method->setAccessible(true);
+                        $parsed_translation = $parse_method->invoke($processor, $translation_result, $acf_data);
+                        
+                        // Restore HTML tags and URLs from placeholders
+                        if (!empty($parsed_translation) && !empty($placeholders_map)) {
+                            $field_key_with_prefix = 'acf_' . $field_key;
+                            if (isset($parsed_translation[$field_key_with_prefix]) && isset($placeholders_map[$field_key_with_prefix])) {
+                                $restore_method = $reflection->getMethod('restore_html_and_urls');
+                                $restore_method->setAccessible(true);
+                                $parsed_translation[$field_key_with_prefix] = $restore_method->invoke(
+                                    $processor,
+                                    $parsed_translation[$field_key_with_prefix],
+                                    $placeholders_map[$field_key_with_prefix]
+                                );
+                            }
+                        }
+                        
+                        if (isset($parsed_translation['acf_' . $field_key])) {
+                            $translated_value = $parsed_translation['acf_' . $field_key];
+
+                        // Save to ACF options with language prefix
+                            // Normalize option name: 'option' or empty string becomes 'options'
+                            $acf_option_key = ($option_name === 'option' || $option_name === '') ? 'options' : $option_name;
+
+                        error_log('XF Translator ACF: Saving translated field "' . $field_key . '" to options page "' . $acf_option_key . '_' . $language_prefix . '"');
+
+                        // Try to save with ACF update_field
+                        $save_result = update_field($field_key, $translated_value, $acf_option_key . '_' . $language_prefix);
+
+                            // Also save to options table with a consistent key format for retrieval
+                            // Format: _xf_translator_acf_options_{option_name}_{field_key}_{language_prefix}
+                            $xf_option_key = '_xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $language_prefix;
+                            update_option($xf_option_key, $translated_value);
+                            
+                            // Also save the option name for easy retrieval
+                            update_option($xf_option_key . '_option_name', $option_name);
+
+                            if ($save_result === false) {
+                                error_log('XF Translator ACF: update_field failed, but saved to options table with key: ' . $xf_option_key);
+                        }
+
+                        $translated_options_results[] = array(
+                            'option_name' => $option_name,
+                            'field' => $field_key,
+                            'field_label' => $option_result['field_label'],
+                            'original' => $original_value,
+                            'translated' => $translated_value,
+                            'success' => true
+                        );
+                    } else {
+                            error_log('XF Translator ACF: Translation response did not contain field "' . $field_key . '"');
+                        $translated_options_results[] = array(
+                            'option_name' => $option_name,
+                            'field' => $field_key,
+                            'field_label' => $option_result['field_label'],
+                            'original' => $original_value,
+                            'translated' => '',
+                            'success' => false,
+                                'error' => 'Translation response parsing failed'
+                            );
+                        }
+                    } else {
+                        error_log('XF Translator ACF: Translation API call failed for field "' . $field_key . '"');
+                        $translated_options_results[] = array(
+                            'option_name' => $option_name,
+                            'field' => $field_key,
+                            'field_label' => $option_result['field_label'],
+                            'original' => $original_value,
+                            'translated' => '',
+                            'success' => false,
+                            'error' => 'Translation API call failed'
+                        );
+                    }
+                } catch (Exception $e) {
+                    error_log('XF Translator ACF: Exception during translation of field "' . $field_key . '": ' . $e->getMessage());
+                    $translated_options_results[] = array(
+                        'option_name' => $option_name,
+                        'field' => $field_key,
+                        'field_label' => $option_result['field_label'],
+                        'original' => $original_value,
+                        'translated' => '',
+                        'success' => false,
+                        'error' => 'Exception: ' . $e->getMessage()
+                    );
+                }
+            }
+
+            wp_send_json_success(array(
+                'results' => array(array(
+                    'post_id' => 0, // Special ID for options
+                    'post_title' => 'ACF Options Pages',
+                    'fields' => $translated_options_results
+                )),
+                'language' => $target_language_name,
+                'language_prefix' => $language_prefix,
+                'debug' => array(
+                    'posts_checked' => 0,
+                    'total_posts_found' => 0,
+                    'posts_with_fields' => 0,
+                    'selected_fields' => $selected_fields,
+                    'processed_count' => 1,
+                    'options_found' => count($translated_options_results),
+                    'message' => 'Translated ACF fields in options pages'
+                )
+            ));
+            return;
+        }
+        } catch (Exception $e) {
+            error_log('XF Translator ACF: Critical error in ajax_translate_acf_bulk: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            wp_send_json_error(array('message' => 'Critical error: ' . $e->getMessage()));
+            return;
+        }
+
+        try {
+            // Get posts to check for ACF fields (can't reliably query ACF fields with meta_query)
+            // Include all post types to be comprehensive
+            $args = array(
+                'post_type' => 'any',
+                'posts_per_page' => 500, // Check more posts to be thorough
+                'post_status' => 'publish',
+                'orderby' => 'modified',
+                'order' => 'DESC'
+            );
+
+            $all_posts = get_posts($args);
+            $posts = array(); // Posts that actually have the selected ACF fields
+
+            // Debug: Log post types found
+            $post_types_found = array();
+            foreach ($all_posts as $post) {
+                $post_types_found[$post->post_type] = ($post_types_found[$post->post_type] ?? 0) + 1;
+            }
+            error_log('XF Translator ACF: Post types found: ' . print_r($post_types_found, true));
+
+            // Filter posts to only include those that have the selected ACF fields
+            $checked_posts = 0;
+            foreach ($all_posts as $post) {
+                $checked_posts++;
+                $has_any_field = false;
+
+                foreach ($selected_fields as $field_key) {
+                    $field_value = get_field($field_key, $post->ID);
+                    if ($field_value !== null && $field_value !== false && (!empty($field_value) || is_numeric($field_value))) {
+                        $has_any_field = true;
+                        error_log('XF Translator ACF: Found field "' . $field_key . '" in post ' . $post->ID . ' (' . $post->post_type . '): ' . substr((string)$field_value, 0, 50));
+                        break;
+                    }
+                }
+
+                if ($has_any_field) {
+                    $posts[] = $post;
+                }
+
+                // Limit to reasonable number for performance
+                if (count($posts) >= 50) {
+                    break;
+                }
+
+                // Also limit total checking for performance
+                if ($checked_posts >= 200) {
+                    break;
+                }
+            }
+
+            // Debug: Log what we found
+            error_log('XF Translator ACF: Checked ' . $checked_posts . ' posts total');
+            error_log('XF Translator ACF: Found ' . count($posts) . ' posts with selected ACF fields');
+            error_log('XF Translator ACF: Selected fields: ' . implode(', ', $selected_fields));
+
+            $results = array();
+            $processed_count = 0;
+
+            foreach ($posts as $post) {
+                $post_results = array();
+                $has_translations = false;
+
+                foreach ($selected_fields as $field_key) {
+                    $original_value = get_field($field_key, $post->ID);
+
+                    // Skip if field doesn't exist or is empty
+                    if ($original_value === null || $original_value === false || (empty($original_value) && !is_numeric($original_value))) {
+                        continue;
+                    }
+
+                    // Only process text/numeric fields
+                    if (!is_string($original_value) && !is_numeric($original_value)) {
+                        continue;
+                    }
+
+                    // Check if translation already exists
+                    $translated_meta_key = '_xf_translator_acf_' . $field_key . '_' . $language_prefix;
+                    $existing_translation = get_post_meta($post->ID, $translated_meta_key, true);
+
+                    if (!empty($existing_translation)) {
+                        // Already translated
+                        $post_results[] = array(
+                            'field' => $field_key,
+                            'field_label' => $this->get_acf_field_label($field_key, $post->ID),
+                            'original' => $original_value,
+                            'translated' => $existing_translation,
+                            'success' => true,
+                            'skipped' => true
+                        );
+                        $has_translations = true;
+                        continue;
+                    }
+
+                    // Translate the field
+                    require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+                    $processor = new Xf_Translator_Processor();
+                    
+                    // Use Reflection to access protected methods
+                    $reflection = new ReflectionClass($processor);
+                    
+                    // Build prompt from ACF field data
+                    $acf_data = array('acf_' . $field_key => $original_value);
+                    $build_prompt_method = $reflection->getMethod('build_translation_prompt');
+                    $build_prompt_method->setAccessible(true);
+                    $prompt_data = $build_prompt_method->invoke($processor, $acf_data, $target_language_name);
+                    $prompt = $prompt_data['prompt'];
+                    $placeholders_map = $prompt_data['placeholders_map'];
+                    
+                    // Call translation API with prompt string and language prefix
+                    $call_api_method = $reflection->getMethod('call_translation_api');
+                    $call_api_method->setAccessible(true);
+                    $translation_result = $call_api_method->invoke($processor, $prompt, $language_prefix, 0, $post->ID);
+
+                    if ($translation_result !== false) {
+                        // Parse the translation response
+                        $parse_method = $reflection->getMethod('parse_translation_response');
+                        $parse_method->setAccessible(true);
+                        $parsed_translation = $parse_method->invoke($processor, $translation_result, $acf_data);
+                        
+                        // Restore HTML tags and URLs from placeholders
+                        if (!empty($parsed_translation) && !empty($placeholders_map)) {
+                            $field_key_with_prefix = 'acf_' . $field_key;
+                            if (isset($parsed_translation[$field_key_with_prefix]) && isset($placeholders_map[$field_key_with_prefix])) {
+                                $restore_method = $reflection->getMethod('restore_html_and_urls');
+                                $restore_method->setAccessible(true);
+                                $parsed_translation[$field_key_with_prefix] = $restore_method->invoke(
+                                    $processor,
+                                    $parsed_translation[$field_key_with_prefix],
+                                    $placeholders_map[$field_key_with_prefix]
+                                );
+                            }
+                        }
+                        
+                        if (isset($parsed_translation['acf_' . $field_key])) {
+                            $translated_value = $parsed_translation['acf_' . $field_key];
+
+                        // Save translation
+                        update_post_meta($post->ID, $translated_meta_key, $translated_value);
+
+                        $post_results[] = array(
+                            'field' => $field_key,
+                            'field_label' => $this->get_acf_field_label($field_key, $post->ID),
+                            'original' => $original_value,
+                            'translated' => $translated_value,
+                            'success' => true
+                        );
+                        $has_translations = true;
+                    } else {
+                        $post_results[] = array(
+                            'field' => $field_key,
+                            'field_label' => $this->get_acf_field_label($field_key, $post->ID),
+                            'original' => $original_value,
+                            'translated' => '',
+                            'success' => false,
+                                'error' => 'Translation response parsing failed'
+                            );
+                        }
+                    } else {
+                        $post_results[] = array(
+                            'field' => $field_key,
+                            'field_label' => $this->get_acf_field_label($field_key, $post->ID),
+                            'original' => $original_value,
+                            'translated' => '',
+                            'success' => false,
+                            'error' => 'Translation API call failed'
+                        );
+                    }
+                }
+
+                if ($has_translations) {
+                    $results[] = array(
+                        'post_id' => $post->ID,
+                        'post_title' => $post->post_title,
+                        'fields' => $post_results
+                    );
+                    $processed_count++;
+                }
+
+                // Limit results for performance
+                if ($processed_count >= 20) {
+                    break;
+                }
+            }
+
+            wp_send_json_success(array(
+                'results' => $results,
+                'language' => $target_language_name,
+                'language_prefix' => $language_prefix,
+                'debug' => array(
+                    'posts_checked' => $checked_posts,
+                    'total_posts_found' => count($all_posts),
+                    'posts_with_fields' => count($posts),
+                    'selected_fields' => $selected_fields,
+                    'processed_count' => $processed_count,
+                    'post_types_found' => $post_types_found
+                )
+            ));
+        } catch (Exception $e) {
+            error_log('XF Translator ACF: Error in post checking: ' . $e->getMessage());
+            wp_send_json_error(array('message' => 'Error checking posts: ' . $e->getMessage()));
+        }
+    }
+
+    /**
+     * AJAX handler to save ACF field translation
+     */
+    public function ajax_save_acf_translation() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+
+        $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+        $field_key = isset($_POST['field_key']) ? sanitize_text_field($_POST['field_key']) : '';
+        $language_prefix = isset($_POST['language_prefix']) ? sanitize_text_field($_POST['language_prefix']) : '';
+        $translated_value = isset($_POST['translated_value']) ? wp_kses_post($_POST['translated_value']) : '';
+
+        if (!$post_id || empty($field_key) || empty($language_prefix)) {
+            wp_send_json_error(array('message' => 'Missing required parameters'));
+            return;
+        }
+
+        $translated_meta_key = '_xf_translator_acf_' . $field_key . '_' . $language_prefix;
+        update_post_meta($post_id, $translated_meta_key, $translated_value);
+
+        wp_send_json_success(array('message' => 'Translation saved'));
+    }
+
+    /**
+     * AJAX handler to load ACF field translations
+     */
+    public function ajax_load_acf_translations() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+
+        $language_prefix = isset($_POST['language_prefix']) ? sanitize_text_field($_POST['language_prefix']) : '';
+        $selected_fields = isset($_POST['fields']) ? array_map('sanitize_text_field', $_POST['fields']) : array();
+
+        if (empty($language_prefix)) {
+            wp_send_json_error(array('message' => 'Language is required'));
+            return;
+        }
+
+        // Get language name
+        $languages = $this->settings->get('languages', array());
+        $target_language_name = '';
+        foreach ($languages as $lang) {
+            if ($lang['prefix'] === $language_prefix) {
+                $target_language_name = $lang['name'];
+                break;
+            }
+        }
+
+        // If no fields specified, use configured translatable fields
+        if (empty($selected_fields)) {
+            $selected_fields = $this->settings->get_translatable_acf_fields();
+        }
+
+        if (empty($selected_fields)) {
+            wp_send_json_error(array('message' => 'No fields configured'));
+            return;
+        }
+
+        $results = array();
+
+        // First, check for ACF options page translations
+        $options_results = array();
+        $options_pages = array('', 'options', 'acf-options', 'footer-options', 'header-options', 'theme-options');
+        
+        foreach ($selected_fields as $field_key) {
+            foreach ($options_pages as $options_page) {
+                $option_name = $options_page ? $options_page : 'option';
+                // Normalize option name: 'option' or empty string becomes 'options'
+                $acf_option_key = ($option_name === 'option' || $option_name === '') ? 'options' : $option_name;
+                
+                // Check if translation exists in options table
+                $xf_option_key = '_xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $language_prefix;
+                $translated_value = get_option($xf_option_key, '');
+                
+                // If not found in options table, try to get from ACF directly (in case it was saved via update_field)
+                if (empty($translated_value) && function_exists('get_field')) {
+                    $translated_value = get_field($field_key, $acf_option_key . '_' . $language_prefix);
+                }
+                
+                if (!empty($translated_value)) {
+                    // Get original value from ACF options
+                    $original_value = get_field($field_key, $option_name);
+                    
+                    if ($original_value !== null && $original_value !== false) {
+                        $options_results[] = array(
+                            'option_name' => $option_name,
+                            'field' => $field_key,
+                            'field_label' => $this->get_acf_field_label($field_key, false),
+                            'original' => $original_value,
+                            'translated' => $translated_value,
+                            'success' => true
+                        );
+                        break; // Found it, no need to check other option pages
+                    }
+                }
+            }
+        }
+        
+        // Add options page results if any found
+        if (!empty($options_results)) {
+            $results[] = array(
+                'post_id' => 0, // Special ID for options pages
+                'post_title' => 'ACF Options Pages',
+                'fields' => $options_results
+            );
+        }
+
+        // Get posts that have ACF field translations (limit for performance)
+        $args = array(
+            'post_type' => 'any',
+            'posts_per_page' => 100,
+            'post_status' => 'publish',
+            'meta_query' => array(
+                'relation' => 'OR'
+            )
+        );
+
+        // Add meta query for each field
+        foreach ($selected_fields as $field_key) {
+            $args['meta_query'][] = array(
+                'key' => '_xf_translator_acf_' . $field_key . '_' . $language_prefix,
+                'compare' => 'EXISTS'
+            );
+        }
+
+        $posts = get_posts($args);
+
+        foreach ($posts as $post) {
+            $post_results = array();
+
+            foreach ($selected_fields as $field_key) {
+                $translated_meta_key = '_xf_translator_acf_' . $field_key . '_' . $language_prefix;
+                $translated_value = get_post_meta($post->ID, $translated_meta_key, true);
+                $original_value = get_field($field_key, $post->ID);
+
+                if (!empty($translated_value)) {
+                    $post_results[] = array(
+                        'field' => $field_key,
+                        'field_label' => $this->get_acf_field_label($field_key, $post->ID),
+                        'original' => $original_value,
+                        'translated' => $translated_value,
+                        'success' => true
+                    );
+                }
+            }
+
+            if (!empty($post_results)) {
+                $results[] = array(
+                    'post_id' => $post->ID,
+                    'post_title' => $post->post_title,
+                    'fields' => $post_results
+                );
+            }
+        }
+
+        wp_send_json_success(array(
+            'results' => $results,
+            'language' => $target_language_name,
+            'language_prefix' => $language_prefix
+        ));
+    }
+
+    /**
+     * Helper method to get ACF field label
+     */
+    private function get_acf_field_label($field_key, $post_id) {
+        if (function_exists('get_field_object')) {
+            $field_object = get_field_object($field_key, $post_id);
+            if ($field_object && isset($field_object['label'])) {
+                return $field_object['label'];
+            }
+        }
+        return $field_key;
+    }
+
     /**
      * AJAX handler to check path availability
      */

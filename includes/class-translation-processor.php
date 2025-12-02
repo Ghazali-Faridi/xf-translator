@@ -311,10 +311,33 @@ class Xf_Translator_Processor
         if (!empty($translatable_meta_fields)) {
             foreach ($translatable_meta_fields as $meta_key) {
                 $value = get_post_meta($post_id, $meta_key, true);
-                
+
                 // Only include if value is not empty and is a string/numeric
                 if (!empty($value) && (is_string($value) || is_numeric($value))) {
                     $data['meta_' . $meta_key] = $value;
+                }
+            }
+        }
+
+        // Get translatable ACF fields
+        if (function_exists('get_fields')) {
+            $translatable_acf_fields = $this->settings->get_translatable_acf_fields();
+
+            if (!empty($translatable_acf_fields)) {
+                $acf_fields = get_fields($post_id);
+
+                if ($acf_fields && is_array($acf_fields)) {
+                    foreach ($translatable_acf_fields as $acf_field_key) {
+                        if (isset($acf_fields[$acf_field_key])) {
+                            $acf_value = $acf_fields[$acf_field_key];
+
+                            // Only include ACF fields that contain text content (string/numeric)
+                            // Skip complex fields like images, galleries, etc.
+                            if (!empty($acf_value) && (is_string($acf_value) || is_numeric($acf_value))) {
+                                $data['acf_' . $acf_field_key] = $acf_value;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -443,7 +466,7 @@ class Xf_Translator_Processor
      * @param array $placeholders Map of placeholders to original content (only URLs now)
      * @return string Content with placeholders restored
      */
-    private function restore_html_and_urls($content, $placeholders)
+    protected function restore_html_and_urls($content, $placeholders)
     {
         // Restore in reverse order to handle nested placeholders correctly
         // Only URLs are in placeholders now, HTML tags remain in content
@@ -460,7 +483,7 @@ class Xf_Translator_Processor
      * @param string $target_language Target language name
      * @return array Array with 'prompt' and 'placeholders_map' (field => placeholders)
      */
-    private function build_translation_prompt($post_data, $target_language)
+    protected function build_translation_prompt($post_data, $target_language)
     {
         // Get brand tone prompt template
         $brand_tone_template = $this->settings->get('brand_tone', '');
@@ -566,7 +589,7 @@ class Xf_Translator_Processor
      * @param int $post_id Post ID for logging
      * @return string|false Translated content or false on failure
      */
-    private function call_translation_api($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0)
+    protected function call_translation_api($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0)
     {
         $model = $this->settings->get('selected_model', 'gpt-4o');
         $is_deepseek = strpos($model, 'deepseek') !== false;
@@ -924,7 +947,7 @@ class Xf_Translator_Processor
      * @param array $original_data Original post data structure
      * @return array|false Parsed translation data or false on failure
      */
-    private function parse_translation_response($translation_response, $original_data)
+    protected function parse_translation_response($translation_response, $original_data)
     {
         $parsed = array();
 

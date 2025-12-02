@@ -174,6 +174,14 @@ class Xf_Translator {
         $this->loader->add_action('wp_ajax_xf_translate_user_meta_bulk', $plugin_admin, 'ajax_translate_user_meta_bulk');
         $this->loader->add_action('wp_ajax_xf_save_user_meta_translation', $plugin_admin, 'ajax_save_user_meta_translation');
         $this->loader->add_action('wp_ajax_xf_load_user_meta_translations', $plugin_admin, 'ajax_load_user_meta_translations');
+
+        // ACF translation AJAX handlers
+        $this->loader->add_action('wp_ajax_xf_get_acf_field_groups', $plugin_admin, 'ajax_get_acf_field_groups');
+        $this->loader->add_action('wp_ajax_xf_scan_acf_fields_by_group', $plugin_admin, 'ajax_scan_acf_fields_by_group');
+        $this->loader->add_action('wp_ajax_xf_translate_acf_bulk', $plugin_admin, 'ajax_translate_acf_bulk');
+        $this->loader->add_action('wp_ajax_xf_save_acf_translation', $plugin_admin, 'ajax_save_acf_translation');
+        $this->loader->add_action('wp_ajax_xf_load_acf_translations', $plugin_admin, 'ajax_load_acf_translations');
+        $this->loader->add_action('wp_ajax_xf_test_acf_detection', $plugin_admin, 'ajax_test_acf_detection');
         
         // Hook to create translation queue entries when a post is saved
         // Use multiple hooks for better compatibility
