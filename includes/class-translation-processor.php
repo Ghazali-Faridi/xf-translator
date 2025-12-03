@@ -636,11 +636,19 @@ class Xf_Translator_Processor
             $body['max_tokens'] = $max_tokens;
         }
 
-        // Calculate timeout based on content size
+        // Calculate timeout based on content size and API provider
         // Note: Cloudflare has a 100-second timeout limit, so we cap at 90 seconds to stay under it
         $content_length = strlen($prompt);
-        // Base timeout: 30 seconds, add 5 seconds per 1000 characters
-        $calculated_timeout = 30 + intval($content_length / 1000) * 5;
+        
+        // DeepSeek tends to be slower, so use longer timeouts
+        if ($is_deepseek) {
+            // Base timeout: 50 seconds for DeepSeek, add 10 seconds per 1000 characters
+            $calculated_timeout = 50 + intval($content_length / 1000) * 10;
+        } else {
+            // Base timeout: 40 seconds for OpenAI, add 8 seconds per 1000 characters
+            $calculated_timeout = 40 + intval($content_length / 1000) * 8;
+        }
+        
         // Cap at 90 seconds to stay under Cloudflare's 100-second limit
         $timeout = min($calculated_timeout, 90);
         
@@ -729,8 +737,8 @@ class Xf_Translator_Processor
         }
 
         // Increase PHP execution time limit to allow for API requests
-        // Set to timeout + 30 seconds buffer to ensure the request can complete
-        $php_time_limit = $timeout + 30;
+        // Set to timeout + 50 seconds buffer (increased for DeepSeek which can be slower)
+        $php_time_limit = $timeout + 50;
         if (function_exists('set_time_limit')) {
             @set_time_limit($php_time_limit);
         }
@@ -745,15 +753,77 @@ class Xf_Translator_Processor
             error_log('XF Translator: PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds)');
         }
 
-        // Make API request
-        $response = wp_remote_post($endpoint, array(
-            'headers' => array(
+        // Make API request with retry logic for DeepSeek
+        $max_retries = $is_deepseek ? 2 : 0; // Retry up to 2 times for DeepSeek only
+        $retry_delay = 5; // Initial delay in seconds
+        $response = null;
+        $last_error = null;
+        
+        for ($attempt = 0; $attempt <= $max_retries; $attempt++) {
+            if ($attempt > 0) {
+                // Log retry attempt
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::info("DeepSeek API retry attempt #{$attempt} for post {$post_id}, queue {$queue_id}");
+                } else {
+                    error_log("XF Translator: DeepSeek API retry attempt #{$attempt} for post {$post_id}, queue {$queue_id}");
+                }
+                
+                // Exponential backoff: wait before retrying
+                sleep($retry_delay * $attempt);
+                
+                // Increase timeout slightly on retry
+                $retry_timeout = min($timeout + (10 * $attempt), 90);
+            } else {
+                $retry_timeout = $timeout;
+            }
+            
+            // For DeepSeek, add Connection: keep-alive header to maintain connection
+            $request_headers = array(
                 'Content-Type' => 'application/json',
                 'Authorization' => 'Bearer ' . $api_key
-            ),
-            'body' => json_encode($body),
-            'timeout' => $timeout
-        ));
+            );
+            
+            if ($is_deepseek) {
+                // Add headers to help maintain connection for DeepSeek
+                $request_headers['Connection'] = 'keep-alive';
+                $request_headers['Keep-Alive'] = 'timeout=120, max=1000';
+                // Disable Expect header which can cause issues
+                $request_headers['Expect'] = '';
+            }
+            
+            $response = wp_remote_post($endpoint, array(
+                'headers' => $request_headers,
+                'body' => json_encode($body),
+                'timeout' => $retry_timeout,
+                'httpversion' => '1.1' // Force HTTP/1.1 for DeepSeek
+            ));
+            
+            // If successful, break out of retry loop
+            if (!is_wp_error($response)) {
+                break;
+            }
+            
+            $last_error = $response;
+            $error_message = $response->get_error_message();
+            
+            // Only retry on connection errors (cURL error 18, timeouts, etc.)
+            $should_retry = $is_deepseek && $attempt < $max_retries && (
+                strpos($error_message, 'transfer closed') !== false ||
+                strpos($error_message, 'outstanding read data') !== false ||
+                strpos($error_message, 'cURL error 18') !== false ||
+                strpos($error_message, 'timeout') !== false ||
+                strpos($error_message, 'timed out') !== false
+            );
+            
+            if (!$should_retry) {
+                break; // Don't retry for other errors
+            }
+        }
+        
+        // Use last error if all retries failed
+        if (is_wp_error($response)) {
+            $response = $last_error;
+        }
 
         // Get response details for logging (do this before error checks)
         $response_code = wp_remote_retrieve_response_code($response);
@@ -833,10 +903,13 @@ class Xf_Translator_Processor
             $error_code = $response->get_error_code();
             $current_max_execution_time = ini_get('max_execution_time');
 
-            // Check if it's a timeout error (including Cloudflare 524)
+            // Check if it's a timeout error or connection closed error (including Cloudflare 524)
             $is_timeout = strpos($error_message, 'timeout') !== false || 
                          strpos($error_message, 'timed out') !== false || 
                          strpos($error_message, '524') !== false ||
+                         strpos($error_message, 'transfer closed') !== false ||
+                         strpos($error_message, 'outstanding read data') !== false ||
+                         strpos($error_message, 'cURL error 18') !== false ||
                          $error_code === 'http_request_failed' ||
                          $response_code === 524;
             
@@ -1363,6 +1436,9 @@ class Xf_Translator_Processor
             'menu_order' => $original_post->menu_order,
             'comment_status' => $original_post->comment_status,
             'ping_status' => $original_post->ping_status,
+            // Preserve original post date
+            'post_date' => $original_post->post_date,
+            'post_date_gmt' => $original_post->post_date_gmt,
         );
 
         // Set translated title
@@ -1440,6 +1516,9 @@ class Xf_Translator_Processor
             $post_data['ID'] = $existing_translated_post_id;
             // For updates, keep original status (don't change to draft)
             $post_data['post_status'] = $original_post_status;
+            // Preserve original post date on updates too
+            $post_data['post_date'] = $original_post->post_date;
+            $post_data['post_date_gmt'] = $original_post->post_date_gmt;
             $translated_post_id = wp_update_post($post_data, true);
             
             if (is_wp_error($translated_post_id)) {

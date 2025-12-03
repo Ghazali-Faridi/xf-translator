@@ -16,8 +16,8 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
 ?>
 
 <div class="api-translator-section">
-    <h2><?php _e('ACF Field Translation', 'xf-translator'); ?></h2>
-    <p><?php _e('Configure ACF fields for translation, scan ACF fields, select fields to translate, choose a language, and translate all selected fields for all posts at once. You can then view and edit the translations below.', 'xf-translator'); ?></p>
+    <h2><?php _e('ACF Field Translation Settings', 'xf-translator'); ?></h2>
+    <p><?php _e('Select ACF fields from field groups below. Save your selection, and these fields will be automatically translated when you translate posts or pages.', 'xf-translator'); ?></p>
 
     <?php settings_errors('api_translator_messages'); ?>
 
@@ -50,49 +50,47 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
         </div>
     </div>
 
-        <!-- ACF Settings Section -->
-    <!-- <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
-        <h3><?php _e('Configure Translatable ACF Fields', 'xf-translator'); ?></h3>
-        <p class="description"><?php _e('Select which ACF fields should be included in automatic translation processing.', 'xf-translator'); ?></p>
+    <!-- Step 2: Selected Fields Display -->
+    <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
+        <h3><?php _e('Selected ACF Fields', 'xf-translator'); ?></h3>
+        <p class="description"><?php _e('Fields you have selected from the field groups above. Click "Save Selected Fields" to save them for automatic translation.', 'xf-translator'); ?></p>
+        
+        <div id="selected-acf-fields-display" style="min-height: 50px; border: 1px solid #ddd; padding: 15px; background: #fff; margin: 15px 0;">
+            <p style="color: #666; margin: 0;"><?php _e('No fields selected yet. Select fields from a field group above.', 'xf-translator'); ?></p>
+        </div>
+        
+        <button type="button" id="save-selected-acf-fields-btn" class="button button-primary" style="display: none;">
+            <?php _e('Save Selected Fields', 'xf-translator'); ?>
+        </button>
+        <span id="save-acf-fields-loading" style="display: none; margin-left: 10px;">
+            <span class="spinner is-active" style="float: none; margin: 0;"></span>
+            <?php _e('Saving...', 'xf-translator'); ?>
+        </span>
+    </div>
 
-        <form method="post" action="" class="api-translator-inline-form">
-            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
-            <input type="hidden" name="api_translator_action" value="save_acf_settings">
-
-            <table class="form-table">
-                <tr>
-                    <th scope="row">
-                        <label for="translatable_acf_fields"><?php _e('Translatable ACF Fields', 'xf-translator'); ?></label>
-                    </th>
-                    <td>
-                        <div id="acf-fields-list" style="max-height: 200px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; background: #fff;">
+    <!-- Step 3: Saved Fields Display -->
+    <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
+        <h3><?php _e('Saved ACF Fields', 'xf-translator'); ?></h3>
+        <p class="description"><?php _e('These are the ACF fields that will be automatically translated when you translate posts or pages.', 'xf-translator'); ?></p>
+        
+        <div id="saved-acf-fields-display" style="min-height: 50px; border: 1px solid #ddd; padding: 15px; background: #fff; margin: 15px 0;">
                             <?php
                             $translatable_acf = $settings->get_translatable_acf_fields();
                             if (!empty($translatable_acf)) {
-                                echo '<div style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">';
+                echo '<div style="display: flex; flex-wrap: wrap; gap: 5px;">';
                                 foreach ($translatable_acf as $field) {
-                                    echo '<span style="background: #2271b1; color: #fff; padding: 5px 10px; border-radius: 3px; font-size: 12px;">';
+                    echo '<span style="background: #00a32a; color: #fff; padding: 5px 10px; border-radius: 3px; font-size: 12px;">';
                                     echo esc_html($field);
-                                    echo ' <a href="#" class="remove-acf-field" data-field="' . esc_attr($field) . '" style="color: #ffcccc; text-decoration: none;">×</a>';
+                    echo ' <a href="#" class="remove-saved-acf-field" data-field="' . esc_attr($field) . '" style="color: #ffcccc; text-decoration: none; margin-left: 5px;">×</a>';
                                     echo '</span>';
                                 }
                                 echo '</div>';
+            } else {
+                echo '<p style="color: #666; margin: 0;">' . __('No fields saved yet. Select fields above and click "Save Selected Fields".', 'xf-translator') . '</p>';
                             }
                             ?>
-                            <input type="text" id="new-acf-field" placeholder="<?php esc_attr_e('Enter ACF field name...', 'xf-translator'); ?>" style="width: 200px;">
-                            <button type="button" id="add-acf-field-btn" class="button button-small"><?php _e('Add Field', 'xf-translator'); ?></button>
                         </div>
-                        <input type="hidden" id="translatable_acf_fields_input" name="translatable_acf_fields" value="<?php echo esc_attr(implode(',', $translatable_acf)); ?>">
-                        <p class="description">
-                            <?php _e('Enter ACF field names (without the "acf_" prefix) that contain text content to be translated. Only text and numeric ACF fields will be processed.', 'xf-translator'); ?>
-                        </p>
-                    </td>
-                </tr>
-            </table>
-
-            <?php submit_button(__('Save ACF Settings', 'xf-translator'), 'primary', 'submit', false); ?>
-        </form>
-    </div> -->
+    </div>
 
     <!-- Step 2: Select Fields and Language -->
     <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
@@ -170,8 +168,14 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
 <script>
 jQuery(document).ready(function($) {
     var selectedAcfFields = [];
+    var savedAcfFields = <?php echo json_encode($translatable_acf_fields); ?>;
     var allScannedAcfFields = [];
     var acfTranslationsData = {};
+
+    // Initialize selected fields with saved fields
+    selectedAcfFields = savedAcfFields.slice();
+    updateSelectedAcfFieldsDisplay();
+    updateSavedAcfFieldsDisplay();
 
     // Load ACF field groups on page load
     loadAcfFieldGroups();
@@ -297,6 +301,7 @@ jQuery(document).ready(function($) {
     function displayScannedAcfFields(fields) {
         var html = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px;">';
         fields.forEach(function(field) {
+            // Check if field is in selected list (which includes saved fields on load)
             var checked = selectedAcfFields.indexOf(field.key) !== -1 ? 'checked' : '';
             var label = field.label || field.key;
             var sample = field.sample ? ' <span style="color: #666; font-size: 11px;">(' + escapeHtml(field.sample.substring(0, 50)) + '...)</span>' : '';
@@ -325,16 +330,14 @@ jQuery(document).ready(function($) {
                 }
             }
             updateSelectedAcfFieldsDisplay();
-            updateAcfTranslateButton();
         });
     }
 
     // Update selected ACF fields display
     function updateSelectedAcfFieldsDisplay() {
-        $('#selected-acf-fields').val(selectedAcfFields.join(','));
-
         if (selectedAcfFields.length === 0) {
-            $('#selected-acf-fields-display').html('<p style="color: #666; margin: 0;"><?php _e('No fields selected. Select fields from the scan results above.', 'xf-translator'); ?></p>');
+            $('#selected-acf-fields-display').html('<p style="color: #666; margin: 0;"><?php _e('No fields selected yet. Select fields from a field group above.', 'xf-translator'); ?></p>');
+            $('#save-selected-acf-fields-btn').hide();
             return;
         }
 
@@ -344,14 +347,15 @@ jQuery(document).ready(function($) {
             var label = fieldObj ? (fieldObj.label || field) : field;
             html += '<span style="background: #2271b1; color: #fff; padding: 5px 10px; border-radius: 3px; font-size: 12px;">';
             html += escapeHtml(label);
-            html += ' <span style="cursor: pointer; margin-left: 5px;" class="remove-acf-field" data-field="' + escapeHtml(field) + '">×</span>';
+            html += ' <span style="cursor: pointer; margin-left: 5px; color: #ffcccc;" class="remove-selected-acf-field" data-field="' + escapeHtml(field) + '">×</span>';
             html += '</span>';
         });
         html += '</div>';
         $('#selected-acf-fields-display').html(html);
+        $('#save-selected-acf-fields-btn').show();
 
         // Bind remove buttons
-        $('.remove-acf-field').on('click', function() {
+        $('.remove-selected-acf-field').on('click', function() {
             var field = $(this).data('field');
             var index = selectedAcfFields.indexOf(field);
             if (index !== -1) {
@@ -362,6 +366,85 @@ jQuery(document).ready(function($) {
             }
         });
     }
+
+    // Update saved ACF fields display
+    function updateSavedAcfFieldsDisplay() {
+        if (savedAcfFields.length === 0) {
+            $('#saved-acf-fields-display').html('<p style="color: #666; margin: 0;"><?php _e('No fields saved yet. Select fields above and click "Save Selected Fields".', 'xf-translator'); ?></p>');
+            return;
+        }
+
+        var html = '<div style="display: flex; flex-wrap: wrap; gap: 5px;">';
+        savedAcfFields.forEach(function(field) {
+            html += '<span style="background: #00a32a; color: #fff; padding: 5px 10px; border-radius: 3px; font-size: 12px;">';
+            html += escapeHtml(field);
+            html += ' <a href="#" class="remove-saved-acf-field" data-field="' + escapeHtml(field) + '" style="color: #ffcccc; text-decoration: none; margin-left: 5px;">×</a>';
+            html += '</span>';
+        });
+        html += '</div>';
+        $('#saved-acf-fields-display').html(html);
+
+        // Bind remove buttons
+        $('.remove-saved-acf-field').on('click', function(e) {
+            e.preventDefault();
+            var field = $(this).data('field');
+            var index = savedAcfFields.indexOf(field);
+            if (index !== -1) {
+                savedAcfFields.splice(index, 1);
+                // Also remove from selected if it's there
+                var selectedIndex = selectedAcfFields.indexOf(field);
+                if (selectedIndex !== -1) {
+                    selectedAcfFields.splice(selectedIndex, 1);
+                    $('.acf-field-checkbox[value="' + escapeHtml(field) + '"]').prop('checked', false);
+                    updateSelectedAcfFieldsDisplay();
+                }
+                // Save the updated list
+                saveAcfFieldsToSettings();
+            }
+        });
+    }
+
+    // Save selected ACF fields to settings
+    function saveAcfFieldsToSettings() {
+        $('#save-acf-fields-loading').show();
+        $('#save-selected-acf-fields-btn').prop('disabled', true);
+
+        $.ajax({
+            url: apiTranslator.ajaxUrl,
+            type: 'POST',
+            data: {
+                action: 'xf_save_acf_settings',
+                nonce: apiTranslator.nonce,
+                fields: savedAcfFields
+            },
+            success: function(response) {
+                if (response.success) {
+                    // Update saved fields from response
+                    if (response.data.fields) {
+                        savedAcfFields = response.data.fields;
+                    }
+                    updateSavedAcfFieldsDisplay();
+                    alert('<?php _e('ACF fields saved successfully! These fields will be automatically translated when you translate posts.', 'xf-translator'); ?>');
+                } else {
+                    alert('<?php _e('Error saving fields:', 'xf-translator'); ?> ' + (response.data.message || 'Unknown error'));
+                }
+            },
+            error: function() {
+                alert('<?php _e('AJAX error occurred while saving fields.', 'xf-translator'); ?>');
+            },
+            complete: function() {
+                $('#save-acf-fields-loading').hide();
+                $('#save-selected-acf-fields-btn').prop('disabled', false);
+            }
+        });
+    }
+
+    // Save button click handler
+    $('#save-selected-acf-fields-btn').on('click', function() {
+        // Update saved fields with current selected fields
+        savedAcfFields = selectedAcfFields.slice();
+        saveAcfFieldsToSettings();
+    });
 
     // Update translate button state
     function updateAcfTranslateButton() {
@@ -416,10 +499,10 @@ jQuery(document).ready(function($) {
 
                 if (response.success && response.data.results && response.data.results.length > 0) {
                     // Display results for both options pages and regular posts
-                    acfTranslationsData = response.data;
-                    displayAcfTranslations(response.data.results, response.data.language_prefix);
-                    $('#translate-acf-bulk-loading').hide();
-                    $('#translate-acf-bulk-btn').prop('disabled', false);
+                        acfTranslationsData = response.data;
+                        displayAcfTranslations(response.data.results, response.data.language_prefix);
+                        $('#translate-acf-bulk-loading').hide();
+                        $('#translate-acf-bulk-btn').prop('disabled', false);
                 } else if (response.success && response.data.results && response.data.results.length === 0) {
                     // No posts found with the selected fields
                     var debugInfo = response.data.debug;
@@ -634,8 +717,8 @@ jQuery(document).ready(function($) {
 });
 
 // ACF Settings Management
-$('#add-acf-field-btn').on('click', function() {
-    var fieldName = $('#new-acf-field').val().trim();
+$('#add-acf-settings-field-btn').on('click', function() {
+    var fieldName = $('#new-acf-settings-field').val().trim();
     if (!fieldName) {
         alert('<?php _e('Please enter a field name.', 'xf-translator'); ?>');
         return;
@@ -649,11 +732,11 @@ $('#add-acf-field-btn').on('click', function() {
 
     currentFields.push(fieldName);
     $('#translatable_acf_fields_input').val(currentFields.join(','));
-    updateAcfFieldsDisplay();
-    $('#new-acf-field').val('');
+    updateAcfSettingsFieldsDisplay();
+    $('#new-acf-settings-field').val('');
 });
 
-$(document).on('click', '.remove-acf-field', function(e) {
+$(document).on('click', '.remove-acf-settings-field', function(e) {
     e.preventDefault();
     var fieldName = $(this).data('field');
     var currentFields = $('#translatable_acf_fields_input').val().split(',').filter(function(f) { return f.trim() !== ''; });
@@ -661,11 +744,11 @@ $(document).on('click', '.remove-acf-field', function(e) {
     if (index !== -1) {
         currentFields.splice(index, 1);
         $('#translatable_acf_fields_input').val(currentFields.join(','));
-        updateAcfFieldsDisplay();
+        updateAcfSettingsFieldsDisplay();
     }
 });
 
-function updateAcfFieldsDisplay() {
+function updateAcfSettingsFieldsDisplay() {
     var fields = $('#translatable_acf_fields_input').val().split(',').filter(function(f) { return f.trim() !== ''; });
     var html = '';
 
@@ -674,22 +757,22 @@ function updateAcfFieldsDisplay() {
         fields.forEach(function(field) {
             html += '<span style="background: #2271b1; color: #fff; padding: 5px 10px; border-radius: 3px; font-size: 12px;">';
             html += escapeHtml(field);
-            html += ' <a href="#" class="remove-acf-field" data-field="' + escapeHtml(field) + '" style="color: #ffcccc; text-decoration: none;">×</a>';
+            html += ' <a href="#" class="remove-acf-settings-field" data-field="' + escapeHtml(field) + '" style="color: #ffcccc; text-decoration: none;">×</a>';
             html += '</span>';
         });
         html += '</div>';
     }
 
-    html += '<input type="text" id="new-acf-field" placeholder="<?php esc_attr_e('Enter ACF field name...', 'xf-translator'); ?>" style="width: 200px;">';
-    html += ' <button type="button" id="add-acf-field-btn" class="button button-small"><?php _e('Add Field', 'xf-translator'); ?></button>';
+    html += '<input type="text" id="new-acf-settings-field" placeholder="<?php esc_attr_e('Enter ACF field name...', 'xf-translator'); ?>" style="width: 200px;">';
+    html += ' <button type="button" id="add-acf-settings-field-btn" class="button button-small"><?php _e('Add Field', 'xf-translator'); ?></button>';
 
-    $('#acf-fields-list').html(html);
+    $('#acf-settings-fields-list').html(html);
 }
 
-$('#new-acf-field').on('keypress', function(e) {
+$('#new-acf-settings-field').on('keypress', function(e) {
     if (e.which === 13) {
         e.preventDefault();
-        $('#add-acf-field-btn').click();
+        $('#add-acf-settings-field-btn').click();
     }
 });
 </script>

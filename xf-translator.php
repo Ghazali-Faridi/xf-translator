@@ -109,6 +109,7 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 	if (strpos($url, 'api.openai.com') !== false || strpos($url, 'api.deepseek.com') !== false) {
 		// Get the timeout from request args, or use a default
 		$request_timeout = isset($r['timeout']) ? (int) $r['timeout'] : 600;
+		$is_deepseek = strpos($url, 'api.deepseek.com') !== false;
 		
 		// Set connection timeout to 120 seconds - time to establish connection
 		// This is separate from the overall request timeout
@@ -118,7 +119,48 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 		// WordPress will also set this, but we ensure it's set correctly
 		curl_setopt($handle, CURLOPT_TIMEOUT, $request_timeout);
 		
-		xf_translator_log('cURL options set - CONNECTTIMEOUT: 120, TIMEOUT: ' . $request_timeout, 'debug');
+		// For DeepSeek, add additional options to handle long-running connections
+		if ($is_deepseek) {
+			// Enable TCP keep-alive to prevent connection drops
+			curl_setopt($handle, CURLOPT_TCP_KEEPALIVE, 1);
+			curl_setopt($handle, CURLOPT_TCP_KEEPIDLE, 30);
+			curl_setopt($handle, CURLOPT_TCP_KEEPINTVL, 5);
+			
+			// Use HTTP/1.1 (not HTTP/2) for better compatibility with long connections
+			curl_setopt($handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+			
+			// Disable pipelining which can cause issues with long responses
+			curl_setopt($handle, CURLOPT_PIPEWAIT, 0);
+			
+			// Set buffer size for reading response (larger buffer for long responses)
+			curl_setopt($handle, CURLOPT_BUFFERSIZE, 16384); // 16KB buffer
+			
+			// Don't fail on HTTP errors immediately - let us handle them
+			curl_setopt($handle, CURLOPT_FAILONERROR, false);
+			
+			// Set low speed limit and time to prevent premature connection closure
+			// If transfer speed drops below 100 bytes/sec for 60 seconds, consider it a problem
+			curl_setopt($handle, CURLOPT_LOW_SPEED_LIMIT, 100);
+			curl_setopt($handle, CURLOPT_LOW_SPEED_TIME, 60);
+			
+			// Disable Expect: 100-continue header which can cause issues with some servers
+			// We need to modify existing headers, so get them first
+			$existing_headers = curl_getinfo($handle, CURLINFO_HEADER_OUT);
+			// Note: We can't easily modify headers here, but we can try to prevent the issue
+			// by ensuring proper connection handling
+			
+			// Enable verbose output for debugging (only if WP_DEBUG is on)
+			if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+				$verbose_file = WP_CONTENT_DIR . '/xf-translator-curl-debug.log';
+				$verbose_handle = fopen($verbose_file, 'a');
+				if ($verbose_handle) {
+					curl_setopt($handle, CURLOPT_VERBOSE, true);
+					curl_setopt($handle, CURLOPT_STDERR, $verbose_handle);
+				}
+			}
+		}
+		
+		xf_translator_log('cURL options set - CONNECTTIMEOUT: 120, TIMEOUT: ' . $request_timeout . ($is_deepseek ? ' (DeepSeek: TCP keep-alive enabled)' : ''), 'debug');
 	}
 	return $handle;
 }, 10, 3);

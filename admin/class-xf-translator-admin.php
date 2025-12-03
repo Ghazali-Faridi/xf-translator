@@ -460,6 +460,37 @@ class Xf_Translator_Admin {
     }
 
     /**
+     * AJAX handler to save ACF settings
+     */
+    public function ajax_save_acf_settings() {
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            wp_send_json_error(array('message' => 'Invalid nonce'));
+            return;
+        }
+
+        // Check user permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => 'Insufficient permissions'));
+            return;
+        }
+
+        $fields = isset($_POST['fields']) ? array_map('sanitize_text_field', $_POST['fields']) : array();
+        
+        // Remove empty values
+        $fields = array_filter($fields, function($field) {
+            return !empty(trim($field));
+        });
+
+        $this->settings->update_translatable_acf_fields($fields);
+        
+        wp_send_json_success(array(
+            'message' => __('ACF fields saved successfully. These fields will be automatically translated when you translate posts.', 'xf-translator'),
+            'fields' => $fields
+        ));
+    }
+
+    /**
      * Handle add exclude path
      */
     private function handle_add_exclude_path() {
