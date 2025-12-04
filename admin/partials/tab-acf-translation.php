@@ -93,7 +93,7 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
     </div>
 
     <!-- Step 2: Select Fields and Language -->
-    <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
+    <!-- <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
         <h3><?php _e('Select Fields and Language', 'xf-translator'); ?></h3>
         <p class="description"><?php _e('Select which ACF fields to translate and choose the target language.', 'xf-translator'); ?></p>
 
@@ -135,10 +135,10 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
                 <?php _e('Translating... This may take a while.', 'xf-translator'); ?>
             </span>
         </p>
-    </div>
+    </div> -->
 
     <!-- Step 3: View and Edit Translations -->
-    <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
+    <!-- <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
         <h3><?php _e('View Translations', 'xf-translator'); ?></h3>
         <p class="description"><?php _e('View all ACF field translations and edit them as needed. Use the language filter to view translations for a specific language.', 'xf-translator'); ?></p>
 
@@ -162,7 +162,7 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
         <div id="acf-translations-results-container">
             <p style="color: #666;"><?php _e('Translations will appear here after you translate fields. Use the language filter above to view specific translations.', 'xf-translator'); ?></p>
         </div>
-    </div>
+    </div> -->
 </div>
 
 <script>

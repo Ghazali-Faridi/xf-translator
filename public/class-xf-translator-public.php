@@ -1917,6 +1917,20 @@ class Xf_Translator_Public {
 			return $posts;
 		}
 		
+		// Skip widget queries - widgets have specific query vars or are not main queries
+		// Check if this is a widget query by looking for widget-specific query vars
+		if (!$query->is_main_query()) {
+			// This is likely a widget or secondary query - skip filtering
+			// Only filter the main query or queries that explicitly need filtering
+			return $posts;
+		}
+		
+		// Only filter home/blog archive queries (for "More News" section)
+		// Skip other archive types, category pages, etc.
+		if (!$query->is_home && !$query->is_front_page() && !$query->is_archive) {
+			return $posts;
+		}
+		
 		// Get current language prefix from URL (use the method that detects from URL path)
 		$lang_prefix = $this->get_current_language_prefix();
 		
@@ -2324,23 +2338,17 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
-		// For regular post fields, handle post ID conversion
-		// Get the current post (might be different from $post_id if field is from another post)
-		global $post;
-		$current_post_id = $post ? $post->ID : $post_id;
-		
-		// Check if we're viewing a translated post
-		$is_translated_post = get_post_meta($current_post_id, '_xf_translator_language', true);
-		
-		// Only convert if we're on a translated post/page
-		if ($is_translated_post !== $lang_prefix) {
-			return $value;
-		}
-		
-		// Convert post IDs in the field value
-		$converted_value = $this->convert_post_ids_to_translated($value, $lang_prefix);
-		
-		return $converted_value;
+		// For regular post fields, we currently do NOT modify ACF values.
+		// This avoids breaking theme-specific relationship fields like:
+		// - related_posts / yml__select_posts ("You may like")
+		// - sbposts__content / select_posts (Sidebar posts)
+		//
+		// Those fields should show exactly what the theme/ACF has configured,
+		// even if some of the posts are still in the original (English) language.
+		//
+		// If we need smarter behavior in future, we can re-enable post ID
+		// conversion here in a more targeted way.
+		return $value;
 	}
 	
 	/**
@@ -2350,9 +2358,10 @@ class Xf_Translator_Public {
 	 * @param mixed $value The value that may contain post IDs
 	 * @param string $language_prefix Language prefix (e.g., 'fr-CA')
 	 * @param int $depth Current recursion depth (to prevent infinite loops)
+	 * @param bool $filter_untranslated If true, exclude posts without translations. If false, show original if no translation exists.
 	 * @return mixed Value with post IDs converted to translated versions
 	 */
-	private function convert_post_ids_to_translated($value, $language_prefix, $depth = 0) {
+	private function convert_post_ids_to_translated($value, $language_prefix, $depth = 0, $filter_untranslated = false) {
 		// Prevent infinite recursion (max depth of 10 levels)
 		if ($depth > 10) {
 			return $value;
@@ -2365,31 +2374,77 @@ class Xf_Translator_Public {
 		// Handle arrays (including ACF relationship fields which store arrays of post IDs or post objects)
 		if (is_array($value)) {
 			$converted = array();
+			$original_count = count($value);
 			foreach ($value as $key => $item) {
 				// Recursively process nested arrays (increment depth)
 				if (is_array($item)) {
-					$converted[$key] = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1);
+					$nested_result = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1);
+					// Only add if result is not false/empty
+					if ($nested_result !== false && $nested_result !== null && !empty($nested_result)) {
+						$converted[$key] = $nested_result;
+					}
 				} elseif (is_object($item) && isset($item->ID)) {
-					// ACF post object - convert the ID
-					$translated_id = $this->get_translated_post_id($item->ID, $language_prefix);
-					if ($translated_id) {
-						// Replace with translated post object
-						$translated_post = get_post($translated_id);
-						if ($translated_post) {
-							$converted[$key] = $translated_post;
-						} else {
-							$converted[$key] = $item;
-						}
-					} else {
+					// ACF post object - check if this is already a translated post
+					$item_language = get_post_meta($item->ID, '_xf_translator_language', true);
+					if ($item_language === $language_prefix) {
+						// This is already a translated post for the current language, use it as-is
 						$converted[$key] = $item;
+					} else {
+						// This is an original post, try to find its translation
+						$translated_id = $this->get_translated_post_id($item->ID, $language_prefix);
+						if ($translated_id) {
+							// Replace with translated post object
+							$translated_post = get_post($translated_id);
+							if ($translated_post && $translated_post->post_status === 'publish') {
+								$converted[$key] = $translated_post;
+							}
+							// If translated post doesn't exist or isn't published, handle based on filter_untranslated flag
+							elseif (!$filter_untranslated) {
+								// If we're not filtering untranslated, show original
+								$converted[$key] = $item;
+							}
+						} else {
+							// No translation exists
+							if ($filter_untranslated) {
+								// Skip this post (don't add to $converted array)
+							} else {
+								// Show original post if filtering is not enabled
+								$converted[$key] = $item;
+							}
+						}
 					}
 				} elseif (is_numeric($item) && $item > 0) {
 					// Check if this is a post ID
 					$post = get_post($item);
 					if ($post && $post->post_type !== 'attachment') {
-						// Try to get translated version
-						$translated_id = $this->get_translated_post_id($item, $language_prefix);
-						$converted[$key] = $translated_id ? $translated_id : $item;
+						// Check if this post is already a translated post for the current language
+						$post_language = get_post_meta($item, '_xf_translator_language', true);
+						if ($post_language === $language_prefix) {
+							// This is already a translated post for the current language, use it as-is
+							$converted[$key] = $item;
+						} else {
+							// This is an original post, try to find its translation
+							$translated_id = $this->get_translated_post_id($item, $language_prefix);
+							if ($translated_id) {
+								// Verify the translated post exists and is published
+								$translated_post = get_post($translated_id);
+								if ($translated_post && $translated_post->post_status === 'publish') {
+									// Only include if translation exists and is published
+									$converted[$key] = $translated_id;
+								} elseif (!$filter_untranslated) {
+									// If we're not filtering untranslated, show original
+									$converted[$key] = $item;
+								}
+							} else {
+								// No translation exists
+								if ($filter_untranslated) {
+									// Skip this post (don't add to $converted array)
+								} else {
+									// Show original post if filtering is not enabled
+									$converted[$key] = $item;
+								}
+							}
+						}
 					} else {
 						// Not a post ID or is attachment, keep original
 						$converted[$key] = $item;
@@ -2399,6 +2454,51 @@ class Xf_Translator_Public {
 					$converted[$key] = $item;
 				}
 			}
+			// Filter out any false/null values and reindex if needed
+			$converted = array_filter($converted, function($item) {
+				return $item !== false && $item !== null;
+			});
+			// Reindex array to remove gaps (important for ACF relationship fields)
+			if (!empty($converted) && array_keys($converted) !== range(0, count($converted) - 1)) {
+				$converted = array_values($converted);
+			}
+			
+			// Debug logging for related posts filtering
+			if ($original_count > 0) {
+				$converted_count = count($converted);
+				if ($converted_count === 0) {
+					error_log('XF Translator: Related posts filtered - Original count: ' . $original_count . ', Filtered count: 0, Language: ' . $language_prefix);
+					$original_ids = array_map(function($item) {
+						if (is_object($item) && isset($item->ID)) return $item->ID;
+						if (is_numeric($item)) return $item;
+						return 'unknown';
+					}, $value);
+					error_log('XF Translator: Original post IDs: ' . implode(', ', $original_ids));
+					
+					// Check if any of the original posts have translations
+					$has_any_translations = false;
+					foreach ($original_ids as $orig_id) {
+						if (is_numeric($orig_id)) {
+							$trans_id = $this->get_translated_post_id($orig_id, $language_prefix);
+							if ($trans_id) {
+								$has_any_translations = true;
+								error_log('XF Translator: Post ' . $orig_id . ' HAS translation: ' . $trans_id);
+							} else {
+								error_log('XF Translator: Post ' . $orig_id . ' has NO translation for language: ' . $language_prefix);
+							}
+						}
+					}
+					
+					// If no translations found at all, return empty array (correct behavior)
+					// If translations exist but weren't found, there might be a bug
+					if (!$has_any_translations) {
+						error_log('XF Translator: None of the related posts have translations. Returning empty array.');
+					}
+				} else {
+					error_log('XF Translator: Related posts filtered - Original count: ' . $original_count . ', Filtered count: ' . $converted_count . ', Language: ' . $language_prefix);
+				}
+			}
+			
 			return $converted;
 		}
 
@@ -2409,6 +2509,8 @@ class Xf_Translator_Public {
 				$translated_post = get_post($translated_id);
 				return $translated_post ? $translated_post : $value;
 			}
+			// If no translation exists, return original (backward compatible for single values)
+			// Note: For arrays, untranslated posts are filtered out in the array handling above
 			return $value;
 		}
 
@@ -2426,7 +2528,7 @@ class Xf_Translator_Public {
 		if (is_string($value) && is_serialized($value)) {
 			$unserialized = unserialize($value);
 			if (is_array($unserialized) || is_numeric($unserialized) || (is_object($unserialized) && isset($unserialized->ID))) {
-				$converted = $this->convert_post_ids_to_translated($unserialized, $language_prefix, $depth + 1);
+				$converted = $this->convert_post_ids_to_translated($unserialized, $language_prefix, $depth + 1, $filter_untranslated);
 				return serialize($converted);
 			}
 		}
