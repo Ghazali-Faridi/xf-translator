@@ -251,10 +251,6 @@ class Xf_Translator_Admin {
             case 'save_user_meta_translations':
                 $this->handle_save_user_meta_translations();
                 break;
-                
-            case 'copy_tags_to_translations':
-                $this->handle_copy_tags_to_translations();
-                break;
         }
     }
     
@@ -2034,74 +2030,6 @@ class Xf_Translator_Admin {
         if (!empty($edited_fields)) {
             error_log('XF Translator: Detected custom field changes for post ' . $post_id . ': ' . implode(', ', $edited_fields));
             $this->create_edit_queue_entries($post_id, $edited_fields);
-        }
-    }
-    
-    /**
-     * Copy tags from original posts to all translated versions
-     */
-    private function handle_copy_tags_to_translations() {
-        global $wpdb;
-        
-        // Get all translated posts with their original post IDs
-        $translated_posts = $wpdb->get_results(
-            "SELECT p.ID as translated_id, 
-                    pm1.meta_value as original_id,
-                    pm2.meta_value as language_prefix
-            FROM {$wpdb->posts} p
-            INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-                AND (pm1.meta_key = '_xf_translator_original_post_id' OR pm1.meta_key = '_api_translator_original_post_id')
-            INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-                AND pm2.meta_key = '_xf_translator_language'
-            WHERE p.post_status = 'publish'
-            AND p.post_type IN ('post', 'page')
-            AND p.post_type != 'revision'
-            ORDER BY p.ID ASC"
-        );
-        
-        if (empty($translated_posts)) {
-            $this->add_notice(__('No translated posts found.', 'api-translator'), 'info');
-            return;
-        }
-        
-        $copied_count = 0;
-        $skipped_count = 0;
-        $error_count = 0;
-        
-        foreach ($translated_posts as $translated_post) {
-            $translated_id = intval($translated_post->translated_id);
-            $original_id = intval($translated_post->original_id);
-            
-            // Get tags from original post
-            $tags = wp_get_post_tags($original_id, array('fields' => 'names'));
-            
-            if (!empty($tags)) {
-                // Copy tags to translated post
-                $result = wp_set_post_terms($translated_id, $tags, 'post_tag', false);
-                
-                if (is_wp_error($result)) {
-                    $error_count++;
-                    error_log('XF Translator: Error copying tags for translated post ' . $translated_id . ': ' . $result->get_error_message());
-                } else {
-                    $copied_count++;
-                }
-            } else {
-                $skipped_count++;
-            }
-        }
-        
-        // Show results
-        $message = sprintf(
-            __('Tags copied successfully! %d posts updated, %d skipped (no tags), %d errors.', 'api-translator'),
-            $copied_count,
-            $skipped_count,
-            $error_count
-        );
-        
-        if ($error_count > 0) {
-            $this->add_notice($message, 'warning');
-        } else {
-            $this->add_notice($message, 'success');
         }
     }
     

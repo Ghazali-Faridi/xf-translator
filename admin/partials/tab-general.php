@@ -126,26 +126,6 @@ if (!defined('ABSPATH')) {
                     </fieldset>
                 </td>
             </tr>
-            <!-- <tr>
-                <th scope="row">
-                    <?php _e('Copy Tags to Translations', 'api-translator'); ?>
-                </th>
-                <td>
-                    <div style="padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
-                        <h3 style="margin-top: 0;"><?php _e('Copy Tags from Original Posts', 'api-translator'); ?></h3>
-                        <p style="margin: 10px 0; color: #666;">
-                            <?php _e('This tool will copy tags from all original posts to their translated versions. Use this if you have existing translations that were created before tags were automatically copied.', 'api-translator'); ?>
-                        </p>
-                        <form method="post" action="" style="margin-top: 10px;">
-                            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
-                            <input type="hidden" name="api_translator_action" value="copy_tags_to_translations">
-                            <button type="submit" class="button button-secondary" onclick="return confirm('<?php echo esc_js(__('This will copy tags from all original posts to their translated versions. This may take a few minutes if you have many translations. Continue?', 'xf-translator')); ?>');">
-                                <?php _e('Copy Tags to All Translations', 'api-translator'); ?>
-                            </button>
-                        </form>
-                    </div>
-                </td>
-            </tr> -->
         </table>
         
         <?php submit_button(__('Save API Settings', 'api-translator'), 'primary', 'submit', false); ?>
