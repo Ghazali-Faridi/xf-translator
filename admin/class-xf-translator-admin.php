@@ -240,12 +240,20 @@ class Xf_Translator_Admin {
                 $this->handle_retry_queue_entry();
                 break;
                 
+            case 'reset_stuck_processing':
+                $this->handle_reset_stuck_processing();
+                break;
+                
             case 'save_meta_fields':
                 $this->handle_save_meta_fields();
                 break;
                 
             case 'save_user_meta_translations':
                 $this->handle_save_user_meta_translations();
+                break;
+                
+            case 'copy_tags_to_translations':
+                $this->handle_copy_tags_to_translations();
                 break;
         }
     }
@@ -341,7 +349,45 @@ class Xf_Translator_Admin {
             }
         }
         
+        // Save cron enable/disable settings
+        $enable_new_cron = isset($_POST['enable_new_translations_cron']) ? true : false;
+        $enable_old_cron = isset($_POST['enable_old_translations_cron']) ? true : false;
+        
+        $this->settings->update('enable_new_translations_cron', $enable_new_cron);
+        $this->settings->update('enable_old_translations_cron', $enable_old_cron);
+        
+        // Update cron schedules based on settings
+        $this->update_cron_schedules($enable_new_cron, $enable_old_cron);
+        
         $this->add_notice(__('Settings saved successfully.', 'api-translator'), 'success');
+    }
+    
+    /**
+     * Update cron schedules based on settings
+     *
+     * @param bool $enable_new Enable NEW translations cron
+     * @param bool $enable_old Enable OLD translations cron
+     */
+    private function update_cron_schedules($enable_new, $enable_old) {
+        // Handle NEW translations cron
+        $new_timestamp = wp_next_scheduled('xf_translator_process_new_cron');
+        if ($enable_new && !$new_timestamp) {
+            // Enable: schedule if not already scheduled
+            wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_new_cron');
+        } elseif (!$enable_new && $new_timestamp) {
+            // Disable: unschedule if currently scheduled
+            wp_unschedule_event($new_timestamp, 'xf_translator_process_new_cron');
+        }
+        
+        // Handle OLD translations cron
+        $old_timestamp = wp_next_scheduled('xf_translator_process_old_cron');
+        if ($enable_old && !$old_timestamp) {
+            // Enable: schedule if not already scheduled
+            wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_old_cron');
+        } elseif (!$enable_old && $old_timestamp) {
+            // Disable: unschedule if currently scheduled
+            wp_unschedule_event($old_timestamp, 'xf_translator_process_old_cron');
+        }
     }
     
     /**
@@ -1395,6 +1441,91 @@ class Xf_Translator_Admin {
     }
     
     /**
+     * Handle reset stuck processing queue entries
+     * Resets entries that have been in "processing" status for more than 5 minutes
+     *
+     * @since    1.0.0
+     */
+    private function handle_reset_stuck_processing() {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        // Calculate the cutoff time (5 minutes ago)
+        $cutoff_time = date('Y-m-d H:i:s', strtotime('-5 minutes'));
+        
+        // Find all processing entries older than 5 minutes
+        $stuck_entries = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, parent_post_id, lng, type, created 
+             FROM $table_name 
+             WHERE status = 'processing' 
+             AND created <= %s
+             ORDER BY id ASC",
+            $cutoff_time
+        ), ARRAY_A);
+        
+        if (empty($stuck_entries)) {
+            $this->add_notice(
+                __('No stuck processing jobs found. All processing jobs are less than 5 minutes old.', 'xf-translator'),
+                'info'
+            );
+            return;
+        }
+        
+        $reset_count = 0;
+        $reset_ids = array();
+        
+        foreach ($stuck_entries as $entry) {
+            $result = $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'pending',
+                    'error_message' => null
+                ),
+                array('id' => $entry['id']),
+                array('%s', '%s'),
+                array('%d')
+            );
+            
+            if ($result !== false) {
+                $reset_count++;
+                $reset_ids[] = $entry['id'];
+            }
+        }
+        
+        if ($reset_count > 0) {
+            // Log the reset action
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::info(
+                    sprintf(
+                        'Reset %d stuck processing queue entries (IDs: %s)',
+                        $reset_count,
+                        implode(', ', $reset_ids)
+                    )
+                );
+            } else {
+                error_log(sprintf(
+                    'XF Translator: Reset %d stuck processing queue entries (IDs: %s)',
+                    $reset_count,
+                    implode(', ', $reset_ids)
+                ));
+            }
+            
+            $this->add_notice(
+                sprintf(
+                    __('Successfully reset %d stuck processing job(s) back to pending status. They will be processed by the background queue processor.', 'xf-translator'),
+                    $reset_count
+                ),
+                'success'
+            );
+        } else {
+            $this->add_notice(
+                __('Failed to reset stuck processing jobs. Please try again.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+    
+    /**
      * Handle post edit - detect changes and create EDIT queue entries
      *
      * @param int $post_id Post ID
@@ -1903,6 +2034,74 @@ class Xf_Translator_Admin {
         if (!empty($edited_fields)) {
             error_log('XF Translator: Detected custom field changes for post ' . $post_id . ': ' . implode(', ', $edited_fields));
             $this->create_edit_queue_entries($post_id, $edited_fields);
+        }
+    }
+    
+    /**
+     * Copy tags from original posts to all translated versions
+     */
+    private function handle_copy_tags_to_translations() {
+        global $wpdb;
+        
+        // Get all translated posts with their original post IDs
+        $translated_posts = $wpdb->get_results(
+            "SELECT p.ID as translated_id, 
+                    pm1.meta_value as original_id,
+                    pm2.meta_value as language_prefix
+            FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+                AND (pm1.meta_key = '_xf_translator_original_post_id' OR pm1.meta_key = '_api_translator_original_post_id')
+            INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+                AND pm2.meta_key = '_xf_translator_language'
+            WHERE p.post_status = 'publish'
+            AND p.post_type IN ('post', 'page')
+            AND p.post_type != 'revision'
+            ORDER BY p.ID ASC"
+        );
+        
+        if (empty($translated_posts)) {
+            $this->add_notice(__('No translated posts found.', 'api-translator'), 'info');
+            return;
+        }
+        
+        $copied_count = 0;
+        $skipped_count = 0;
+        $error_count = 0;
+        
+        foreach ($translated_posts as $translated_post) {
+            $translated_id = intval($translated_post->translated_id);
+            $original_id = intval($translated_post->original_id);
+            
+            // Get tags from original post
+            $tags = wp_get_post_tags($original_id, array('fields' => 'names'));
+            
+            if (!empty($tags)) {
+                // Copy tags to translated post
+                $result = wp_set_post_terms($translated_id, $tags, 'post_tag', false);
+                
+                if (is_wp_error($result)) {
+                    $error_count++;
+                    error_log('XF Translator: Error copying tags for translated post ' . $translated_id . ': ' . $result->get_error_message());
+                } else {
+                    $copied_count++;
+                }
+            } else {
+                $skipped_count++;
+            }
+        }
+        
+        // Show results
+        $message = sprintf(
+            __('Tags copied successfully! %d posts updated, %d skipped (no tags), %d errors.', 'api-translator'),
+            $copied_count,
+            $skipped_count,
+            $error_count
+        );
+        
+        if ($error_count > 0) {
+            $this->add_notice($message, 'warning');
+        } else {
+            $this->add_notice($message, 'success');
         }
     }
     

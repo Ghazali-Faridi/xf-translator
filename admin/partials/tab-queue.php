@@ -61,6 +61,22 @@ $recent_jobs = $wpdb->get_results(
         </div>
     </div>
     
+    <?php if ($processing_count > 0) : ?>
+        <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
+            <h3 style="margin-top: 0;"><?php _e('Reset Stuck Processing Jobs', 'xf-translator'); ?></h3>
+            <p style="margin: 10px 0; color: #666;">
+                <?php _e('If any jobs are stuck in "processing" status for more than 5 minutes, you can reset them back to "pending" so they can be retried.', 'xf-translator'); ?>
+            </p>
+            <form method="post" action="" style="margin-top: 10px;">
+                <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+                <input type="hidden" name="api_translator_action" value="reset_stuck_processing">
+                <button type="submit" class="button button-secondary" onclick="return confirm('<?php echo esc_js(__('Are you sure you want to reset all processing jobs that have been stuck for more than 5 minutes?', 'xf-translator')); ?>');">
+                    <?php _e('Reset Stuck Processing Jobs', 'xf-translator'); ?>
+                </button>
+            </form>
+        </div>
+    <?php endif; ?>
+    
     <?php if ($pending_count > 0) : ?>
         <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
             <h3 style="margin-top: 0;"><?php _e('Process Pending Jobs', 'xf-translator'); ?></h3>
@@ -183,9 +199,9 @@ $recent_jobs = $wpdb->get_results(
                             <span style="padding: 3px 8px; background: <?php echo $color; ?>; color: #fff; border-radius: 3px; font-size: 11px; margin-right: 5px;">
                                 <?php echo esc_html(ucfirst($job['status'])); ?>
                             </span>
-                            <?php if($job['status']=="failed" || $job['status']=="processing") : ?>
+                            <?php if($job['status']=="failed") : ?>
                                 <div style="margin-top: 5px;">
-                                    <?php if($job['status']=="failed" && !empty($error_message)) : ?>
+                                    <?php if(!empty($error_message)) : ?>
                                         <button type="button" 
                                                 class="button button-small view-error-detail" 
                                                 data-error-message="<?php echo esc_attr($error_message); ?>"

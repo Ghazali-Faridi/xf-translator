@@ -32,7 +32,9 @@ class Settings {
         'processing_delay_minutes' => 0,
         'translatable_post_meta_fields' => array(),
         'translatable_user_meta_fields' => array('description', 'user_description'),
-        'translatable_acf_fields' => array()
+        'translatable_acf_fields' => array(),
+        'enable_new_translations_cron' => true,
+        'enable_old_translations_cron' => true
     );
     
     /**

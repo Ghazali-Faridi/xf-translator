@@ -111,19 +111,20 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 		$request_timeout = isset($r['timeout']) ? (int) $r['timeout'] : 600;
 		$is_deepseek = strpos($url, 'api.deepseek.com') !== false;
 		
-		// Set connection timeout to 120 seconds - time to establish connection
-		// This is separate from the overall request timeout
-		curl_setopt($handle, CURLOPT_CONNECTTIMEOUT, 120);
+		// Set connection timeout - time to establish connection
+		// Use a longer connection timeout to allow time for initial connection
+		curl_setopt($handle, CURLOPT_CONNECTTIMEOUT, max($request_timeout, 120));
 		
 		// Keep the overall timeout as specified in the request
 		// WordPress will also set this, but we ensure it's set correctly
-		curl_setopt($handle, CURLOPT_TIMEOUT, $request_timeout);
+		// Add a small buffer (10 seconds) to the timeout to account for network delays
+		curl_setopt($handle, CURLOPT_TIMEOUT, $request_timeout + 10);
 		
 		// For DeepSeek, add additional options to handle long-running connections
 		if ($is_deepseek) {
 			// Enable TCP keep-alive to prevent connection drops
 			curl_setopt($handle, CURLOPT_TCP_KEEPALIVE, 1);
-			curl_setopt($handle, CURLOPT_TCP_KEEPIDLE, 30);
+			curl_setopt($handle, CURLOPT_TCP_KEEPIDLE, 100);
 			curl_setopt($handle, CURLOPT_TCP_KEEPINTVL, 5);
 			
 			// Use HTTP/1.1 (not HTTP/2) for better compatibility with long connections
@@ -139,9 +140,10 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 			curl_setopt($handle, CURLOPT_FAILONERROR, false);
 			
 			// Set low speed limit and time to prevent premature connection closure
-			// If transfer speed drops below 100 bytes/sec for 60 seconds, consider it a problem
-			curl_setopt($handle, CURLOPT_LOW_SPEED_LIMIT, 100);
-			curl_setopt($handle, CURLOPT_LOW_SPEED_TIME, 60);
+			// For DeepSeek, use a very low threshold (10 bytes/sec) since it can stream slowly
+			// but still be working correctly. Only abort if truly stalled (no data for 120 seconds)
+			curl_setopt($handle, CURLOPT_LOW_SPEED_LIMIT, value: 0);
+			curl_setopt($handle, CURLOPT_LOW_SPEED_TIME, 180);
 			
 			// Disable Expect: 100-continue header which can cause issues with some servers
 			// We need to modify existing headers, so get them first
@@ -160,10 +162,93 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 			}
 		}
 		
-		xf_translator_log('cURL options set - CONNECTTIMEOUT: 120, TIMEOUT: ' . $request_timeout . ($is_deepseek ? ' (DeepSeek: TCP keep-alive enabled)' : ''), 'debug');
+		// xf_translator_log('cURL options set - CONNECTTIMEOUT: 120, TIMEOUT: ' . $request_timeout . ($is_deepseek ? ' (DeepSeek: TCP keep-alive enabled)' : ''), 'debug');
 	}
 	return $handle;
 }, 10, 3);
+
+/**
+ * Add custom cron schedule for every 1 minute
+ *
+ * @since    1.0.0
+ */
+add_filter('cron_schedules', function($schedules) {
+	$schedules['every_1_minute'] = array(
+		'interval' => 60, // 60 seconds = 1 minute
+		'display' => __('Every 1 Minute', 'xf-translator')
+	);
+	return $schedules;
+});
+
+/**
+ * Process NEW translations via cron
+ *
+ * @since    1.0.0
+ */
+function xf_translator_process_new_translations_cron() {
+	// Check if cron is enabled
+	require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	$settings = new Settings();
+	
+	if (!$settings->get('enable_new_translations_cron', true)) {
+		return; // Cron disabled, exit early
+	}
+	
+	// Load required files
+	require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
+	
+	// Initialize processor
+	$processor = new Xf_Translator_Processor();
+	
+	// Process next NEW translation (type='NEW', status='pending')
+	$result = $processor->process_next_translation('NEW');
+	
+	if ($result) {
+		xf_translator_log('Cron: NEW translation processed successfully', 'info');
+	} else {
+		$error = $processor->get_last_error();
+		if (empty($error)) {
+			$error = 'No pending NEW translations found in queue';
+		}
+		//xf_translator_log('Cron: ' . $error, 'debug');
+	}
+}
+add_action('xf_translator_process_new_cron', 'xf_translator_process_new_translations_cron');
+
+/**
+ * Process OLD translations via cron
+ *
+ * @since    1.0.0
+ */
+function xf_translator_process_old_translations_cron() {
+	// Check if cron is enabled
+	require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	$settings = new Settings();
+	
+	if (!$settings->get('enable_old_translations_cron', true)) {
+		return; // Cron disabled, exit early
+	}
+	
+	// Load required files
+	require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
+	
+	// Initialize processor
+	$processor = new Xf_Translator_Processor();
+	
+	// Process next OLD translation (type='OLD', status='pending')
+	$result = $processor->process_next_translation('OLD');
+	
+	if ($result) {
+		xf_translator_log('Cron: OLD translation processed successfully', 'info');
+	} else {
+		$error = $processor->get_last_error();
+		if (empty($error)) {
+			$error = 'No pending OLD translations found in queue';
+		}
+		xf_translator_log('Cron: ' . $error, 'debug');
+	}
+}
+add_action('xf_translator_process_old_cron', 'xf_translator_process_old_translations_cron');
 
 /**
  * Begins execution of the plugin.

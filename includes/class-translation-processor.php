@@ -650,7 +650,7 @@ class Xf_Translator_Processor
         }
         
         // Cap at 90 seconds to stay under Cloudflare's 100-second limit
-        $timeout = min($calculated_timeout, 90);
+        $timeout = 200;
         
         // Warn if content is very large (might need chunking)
         if ($content_length > 50000) {
@@ -708,12 +708,6 @@ class Xf_Translator_Processor
                     error_log('XF Translator: API log saved successfully. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
                 }
             }
-        } else {
-            if (class_exists('Xf_Translator_Logger')) {
-                Xf_Translator_Logger::warning('Cannot save API log - missing post_id or queue_id. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
-            } else {
-                error_log('XF Translator: Cannot save API log - missing post_id or queue_id. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
-            }
         }
 
         if (empty($api_key)) {
@@ -738,7 +732,7 @@ class Xf_Translator_Processor
 
         // Increase PHP execution time limit to allow for API requests
         // Set to timeout + 50 seconds buffer (increased for DeepSeek which can be slower)
-        $php_time_limit = $timeout + 50;
+        $php_time_limit = $timeout + 200;
         if (function_exists('set_time_limit')) {
             @set_time_limit($php_time_limit);
         }
@@ -748,7 +742,7 @@ class Xf_Translator_Processor
 
         // Log PHP execution time settings
         if (class_exists('Xf_Translator_Logger')) {
-            Xf_Translator_Logger::debug('PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds, content length: ' . number_format($content_length) . ' chars)');
+            // Xf_Translator_Logger::debug('PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds, content length: ' . number_format($content_length) . ' chars)');
         } else {
             error_log('XF Translator: PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds)');
         }
@@ -914,9 +908,9 @@ class Xf_Translator_Processor
                          $response_code === 524;
             
             if ($is_timeout) {
-                $this->last_error = "Translation request timed out (Cloudflare/Server timeout). The content may be too large (" . number_format($content_length) . " characters). ";
-                $this->last_error .= "Try breaking the content into smaller chunks or the API may be experiencing high load. ";
-                $this->last_error .= "Request timeout was set to {$timeout} seconds.";
+                // $this->last_error = "Translation request timed out (Cloudflare/Server timeout). The content may be too large (" . number_format($content_length) . " characters). ";
+                // $this->last_error .= "Try breaking the content into smaller chunks or the API may be experiencing high load. ";
+                // $this->last_error .= "Request timeout was set to {$timeout} seconds.";
             } else {
                 $this->last_error = "API request error: {$error_message} (Error code: {$error_code})";
             }
@@ -1072,7 +1066,8 @@ class Xf_Translator_Processor
         // Pattern: any text followed by colon and optional space
         // Use a more specific pattern that matches field labels at the start of lines
         // This ensures we don't split on colons inside HTML attributes
-        $sections = preg_split('/(?=^[A-Za-z][A-Za-z0-9_\s]*:\s)/m', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
+        // Allow labels starting with letter or underscore (for fields like _yoast_wpseo_title)
+        $sections = preg_split('/(?=^[A-Za-z_][A-Za-z0-9_\s]*:\s)/m', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
 
         // If splitting didn't work well, try by double newlines
         if (count($sections) === 1) {
@@ -1495,14 +1490,17 @@ class Xf_Translator_Processor
         // Store just the original slug (prefix will be added via permalink filter)
         $post_data['post_name'] = $original_slug;
 
-        // Copy categories (tags will be handled automatically during taxonomy processing)
+        // Copy categories
         $categories = wp_get_post_categories($original_post_id, array('fields' => 'ids'));
         if (!empty($categories)) {
             $post_data['post_category'] = $categories;
         }
 
-        // Note: Tags are NOT copied here - they will be automatically translated and assigned
-        // during the taxonomy processing step below
+        // Copy tags from original post
+        $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));
+        if (!empty($tags)) {
+            $post_data['tags_input'] = $tags;
+        }
 
         // Set flag to prevent post listener from processing this new translated post
         self::$creating_translated_post = true;
@@ -1544,6 +1542,12 @@ class Xf_Translator_Processor
         if (is_wp_error($translated_post_id)) {
             error_log('XF Translator: Post creation/update failed. Returning false.');
             return false;
+        }
+        
+        // Ensure tags are copied (wp_update_post may not always handle tags_input correctly)
+        $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));
+        if (!empty($tags)) {
+            wp_set_post_terms($translated_post_id, $tags, 'post_tag', false);
         }
         
         error_log('XF Translator: Post created/updated successfully. ID: ' . $translated_post_id . '. Starting meta/field processing...');

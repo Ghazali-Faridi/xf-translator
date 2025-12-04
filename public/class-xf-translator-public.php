@@ -108,6 +108,9 @@ class Xf_Translator_Public {
 		if (function_exists('get_field')) {
 			add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
 		}
+		
+		// Filter query_posts() results (query_posts bypasses pre_get_posts)
+		add_filter('the_posts', array($this, 'filter_query_posts_results'), 10, 2);
 
 	}
 
@@ -1883,6 +1886,130 @@ class Xf_Translator_Public {
 				$query->set('post__in', array(0));
 			}
 		}
+	}
+
+	/**
+	 * Filter query_posts() results to show only posts in the current language
+	 * This handles cases where themes use query_posts() which bypasses pre_get_posts
+	 *
+	 * @param array $posts Array of post objects
+	 * @param WP_Query $query Query object
+	 * @return array Filtered array of post objects
+	 */
+	public function filter_query_posts_results($posts, $query) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return $posts;
+		}
+		
+		// Skip if no posts
+		if (empty($posts)) {
+			return $posts;
+		}
+		
+		// Skip if this is a singular query
+		if ($query->is_singular) {
+			return $posts;
+		}
+		
+		// Skip if this query already has post__in set (already filtered)
+		if ($query->get('post__in')) {
+			return $posts;
+		}
+		
+		// Get current language prefix from URL (use the method that detects from URL path)
+		$lang_prefix = $this->get_current_language_prefix();
+		
+		// Debug: Log if we're filtering (only on home page to avoid spam)
+		if ($query->is_home || $query->is_front_page()) {
+			error_log('XF Translator: Filtering query_posts results. Lang prefix: ' . ($lang_prefix ?: 'empty') . ', Posts count: ' . count($posts) . ', Post IDs: ' . implode(', ', array_map(function($p) { return $p->ID; }, $posts)));
+		}
+		
+		global $wpdb;
+		
+		if (empty($lang_prefix)) {
+			// On English/default: Exclude all translated posts
+			// Get all translated post IDs to exclude
+			$translated_post_ids = $wpdb->get_col(
+				"SELECT DISTINCT p.ID 
+				FROM {$wpdb->posts} p
+				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
+					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
+				WHERE p.post_status = 'publish'
+				AND p.post_type IN ('post', 'page')
+				AND p.post_type != 'revision'"
+			);
+			
+			if (!empty($translated_post_ids)) {
+				$filtered_posts = array();
+				foreach ($posts as $post) {
+					if (!in_array($post->ID, $translated_post_ids)) {
+						$filtered_posts[] = $post;
+					}
+				}
+				return $filtered_posts;
+			}
+		} else {
+			// On language-prefixed URL: Show only translated posts for this language
+			// First, get a mapping of original post IDs to translated post IDs
+			$original_to_translated = $wpdb->get_results($wpdb->prepare(
+				"SELECT pm2.meta_value as original_id, p.ID as translated_id
+				FROM {$wpdb->posts} p
+				INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+					AND pm1.meta_key = '_xf_translator_language' 
+					AND pm1.meta_value = %s
+				INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+					AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+				WHERE p.post_status = 'publish'
+				AND p.post_type IN ('post', 'page')
+				AND p.post_type != 'revision'",
+				$lang_prefix
+			), OBJECT_K);
+			
+			// Build mapping array: original_id => translated_id
+			$translation_map = array();
+			foreach ($original_to_translated as $row) {
+				$translation_map[intval($row->original_id)] = intval($row->translated_id);
+			}
+			
+			// Debug: Log translation map
+			if ($query->is_home || $query->is_front_page()) {
+				error_log('XF Translator: Found ' . count($translation_map) . ' translated posts for language: ' . $lang_prefix);
+			}
+			
+			if (!empty($translation_map)) {
+				$filtered_posts = array();
+				foreach ($posts as $post) {
+					// Check if this post is already a translated post
+					if (in_array($post->ID, $translation_map)) {
+						// This is already a translated post, keep it
+						$filtered_posts[] = $post;
+					} elseif (isset($translation_map[$post->ID])) {
+						// This is an original post, get its translated version
+						$translated_id = $translation_map[$post->ID];
+						$translated_post = get_post($translated_id);
+						if ($translated_post && $translated_post->post_status === 'publish') {
+							$filtered_posts[] = $translated_post;
+						}
+					}
+					// If post is neither translated nor has a translation, skip it
+				}
+				// Debug: Log how many posts matched
+				if ($query->is_home || $query->is_front_page()) {
+					error_log('XF Translator: Filtered to ' . count($filtered_posts) . ' posts out of ' . count($posts) . ' original posts');
+				}
+				return $filtered_posts;
+			} else {
+				// No translated posts found in database for this language
+				// Return empty to avoid showing English posts on French page
+				if ($query->is_home || $query->is_front_page()) {
+					error_log('XF Translator: No translated posts found for language: ' . $lang_prefix . '. Returning empty array.');
+				}
+				return array();
+			}
+		}
+		
+		return $posts;
 	}
 
 	/**
