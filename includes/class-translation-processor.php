@@ -1489,6 +1489,11 @@ class Xf_Translator_Processor
 
         // Store just the original slug (prefix will be added via permalink filter)
         $post_data['post_name'] = $original_slug;
+        
+        // IMPORTANT: Set flag EARLY before wp_insert_post to ensure filters work
+        // This must be set before WordPress processes the post data
+        self::$creating_translated_post = true;
+        error_log('XF Translator: Flag set to true. Original slug: ' . $original_slug);
 
         // Copy categories
         $categories = wp_get_post_categories($original_post_id, array('fields' => 'ids'));
@@ -1501,9 +1506,6 @@ class Xf_Translator_Processor
         if (!empty($tags)) {
             $post_data['tags_input'] = $tags;
         }
-
-        // Set flag to prevent post listener from processing this new translated post
-        self::$creating_translated_post = true;
 
         error_log('XF Translator: Creating/updating translated post. Existing ID: ' . ($existing_translated_post_id ?: 'none'));
         
@@ -1536,13 +1538,68 @@ class Xf_Translator_Processor
             }
         }
 
-        // Clear flag
-        self::$creating_translated_post = false;
-
         if (is_wp_error($translated_post_id)) {
             error_log('XF Translator: Post creation/update failed. Returning false.');
+            self::$creating_translated_post = false; // Clear flag on error
             return false;
         }
+        
+        // Store meta immediately so filter can check it even if flag is cleared
+        update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
+        update_post_meta($translated_post_id, '_xf_translator_desired_slug', $original_slug);
+        
+        // CRITICAL: ALWAYS ensure the slug is correct (WordPress might have changed it despite our filter)
+        // We need to do this immediately after post creation
+        $saved_post = get_post($translated_post_id);
+        if ($saved_post) {
+            // Get the original slug we wanted
+            $desired_slug = $original_slug;
+            
+            // Check if slug was modified by WordPress
+            if ($saved_post->post_name !== $desired_slug) {
+                // WordPress changed the slug, fix it directly in database IMMEDIATELY
+                error_log('XF Translator: CRITICAL - Slug mismatch detected! Desired: ' . $desired_slug . ', Actual: ' . $saved_post->post_name . '. Fixing directly in database...');
+                
+                global $wpdb;
+                // Use direct database update to bypass WordPress slug checks
+                $result = $wpdb->update(
+                    $wpdb->posts,
+                    array('post_name' => $desired_slug),
+                    array('ID' => $translated_post_id),
+                    array('%s'),
+                    array('%d')
+                );
+                
+                if ($result !== false) {
+                    error_log('XF Translator: Successfully fixed slug in database to: ' . $desired_slug);
+                    // Clear all caches
+                    clean_post_cache($translated_post_id);
+                    wp_cache_delete($translated_post_id, 'posts');
+                    // Also clear rewrite rules cache
+                    delete_option('rewrite_rules');
+                    
+                    // Verify the fix worked
+                    $verify_post = get_post($translated_post_id);
+                    if ($verify_post && $verify_post->post_name === $desired_slug) {
+                        error_log('XF Translator: Verified - Slug is now correct: ' . $verify_post->post_name);
+                    } else {
+                        error_log('XF Translator: WARNING - Slug fix verification failed. Current slug: ' . ($verify_post ? $verify_post->post_name : 'post not found'));
+                        // Try one more time with wp_update_post
+                        wp_update_post(array('ID' => $translated_post_id, 'post_name' => $desired_slug));
+                        error_log('XF Translator: Attempted wp_update_post fix');
+                    }
+                } else {
+                    error_log('XF Translator: ERROR - Failed to update slug in database. WP_Error: ' . $wpdb->last_error);
+                }
+            } else {
+                error_log('XF Translator: Slug is correct: ' . $saved_post->post_name);
+            }
+        } else {
+            error_log('XF Translator: ERROR - Could not retrieve saved post to verify slug');
+        }
+        
+        // Clear flag AFTER we've fixed the slug
+        self::$creating_translated_post = false;
         
         // Ensure tags are copied (wp_update_post may not always handle tags_input correctly)
         $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));

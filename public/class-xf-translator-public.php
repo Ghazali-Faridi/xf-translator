@@ -521,6 +521,23 @@ class Xf_Translator_Public {
 	}
 
 	/**
+	 * Normalize a language prefix for comparisons (lowercase, alphanumeric only)
+	 *
+	 * @param string $prefix
+	 * @return string
+	 */
+	private function normalize_lang_prefix( $prefix ) {
+		if ( empty( $prefix ) ) {
+			return '';
+		}
+
+		$prefix = strtolower( $prefix );
+		$prefix = preg_replace( '/[^a-z0-9]/i', '', $prefix );
+
+		return $prefix ?: '';
+	}
+
+	/**
 	 * Get original post ID for a translated post
 	 *
 	 * @param int $post_id
@@ -547,44 +564,69 @@ class Xf_Translator_Public {
 	 * @return int|false
 	 */
 	private function get_translated_post_id( $original_post_id, $language_prefix ) {
-		$meta_key = '_xf_translator_translated_post_' . $language_prefix;
-		$post_id  = get_post_meta( $original_post_id, $meta_key, true );
+		// Try multiple prefix variations to handle cases like "fr-CA" vs "fr"
+		$prefixes_to_try = array();
+		$prefixes_to_try[] = $language_prefix;
 
-		if ( $post_id ) {
-			$post = get_post( $post_id );
-			if ( $post && $post->post_status === 'publish' ) {
-				return (int) $post_id;
+		// Add normalized (alphanumeric) version e.g., "fr-CA" -> "frca"
+		$normalized = $this->normalize_lang_prefix( $language_prefix );
+		if ( $normalized && $normalized !== $language_prefix ) {
+			$prefixes_to_try[] = $normalized;
+		}
+
+		// Add base prefix before dash (e.g., "fr-CA" -> "fr")
+		if ( strpos( $language_prefix, '-' ) !== false ) {
+			$base = strtolower( substr( $language_prefix, 0, strpos( $language_prefix, '-' ) ) );
+			if ( $base && ! in_array( $base, $prefixes_to_try, true ) ) {
+				$prefixes_to_try[] = $base;
 			}
 		}
 
-		$args = array(
-			'post_type'      => get_post_type( $original_post_id ),
-			'post_status'    => 'publish',
-			'posts_per_page' => 1,
-			'fields'         => 'ids',
-			'meta_query'     => array(
-				'relation' => 'AND',
-				array(
-					'key'   => '_xf_translator_language',
-					'value' => $language_prefix,
-				),
-				array(
-					'key'   => '_xf_translator_original_post_id',
-					'value' => $original_post_id,
-				),
-			),
-		);
+		// Deduplicate non-empty prefixes
+		$prefixes_to_try = array_values( array_filter( array_unique( $prefixes_to_try ) ) );
 
-		$posts = get_posts( $args );
-		if ( ! empty( $posts ) ) {
-			return (int) $posts[0];
-		}
+		foreach ( $prefixes_to_try as $prefix ) {
+			// Meta mapping cache first
+			$meta_key = '_xf_translator_translated_post_' . $prefix;
+			$post_id  = get_post_meta( $original_post_id, $meta_key, true );
 
-		// Fallback for legacy meta key.
-		$args['meta_query'][1]['key'] = '_api_translator_original_post_id';
-		$posts                        = get_posts( $args );
-		if ( ! empty( $posts ) ) {
-			return (int) $posts[0];
+			if ( $post_id ) {
+				$post = get_post( $post_id );
+				if ( $post && $post->post_status === 'publish' ) {
+					return (int) $post_id;
+				}
+			}
+
+			// Query for translated post
+			$args = array(
+				'post_type'      => get_post_type( $original_post_id ),
+				'post_status'    => 'publish',
+				'posts_per_page' => 1,
+				'fields'         => 'ids',
+				'meta_query'     => array(
+					'relation' => 'AND',
+					array(
+						'key'   => '_xf_translator_language',
+						'value' => $prefix,
+					),
+					array(
+						'key'   => '_xf_translator_original_post_id',
+						'value' => $original_post_id,
+					),
+				),
+			);
+
+			$posts = get_posts( $args );
+			if ( ! empty( $posts ) ) {
+				return (int) $posts[0];
+			}
+
+			// Fallback for legacy meta key.
+			$args['meta_query'][1]['key'] = '_api_translator_original_post_id';
+			$posts                        = get_posts( $args );
+			if ( ! empty( $posts ) ) {
+				return (int) $posts[0];
+			}
 		}
 
 		return false;
@@ -1917,17 +1959,19 @@ class Xf_Translator_Public {
 			return $posts;
 		}
 		
-		// Skip widget queries - widgets have specific query vars or are not main queries
-		// Check if this is a widget query by looking for widget-specific query vars
-		if (!$query->is_main_query()) {
-			// This is likely a widget or secondary query - skip filtering
-			// Only filter the main query or queries that explicitly need filtering
+		// Only filter home/blog archive queries (for "More News" section)
+		// query_posts() modifies the global query, so we need to filter it even if not is_main_query()
+		// But skip widget queries and other secondary queries that aren't home/blog
+		$is_home_or_archive = $query->is_home || $query->is_front_page() || $query->is_archive;
+		
+		// If it's not a main query AND not a home/archive query, skip it (likely a widget)
+		if (!$query->is_main_query() && !$is_home_or_archive) {
 			return $posts;
 		}
 		
 		// Only filter home/blog archive queries (for "More News" section)
-		// Skip other archive types, category pages, etc.
-		if (!$query->is_home && !$query->is_front_page() && !$query->is_archive) {
+		// Skip other query types
+		if (!$is_home_or_archive) {
 			return $posts;
 		}
 		
@@ -1992,11 +2036,15 @@ class Xf_Translator_Public {
 			}
 			
 			if (!empty($translation_map)) {
+				// Create reverse map: translated_id => original_id for quick lookup
+				$translated_ids = array_values($translation_map);
+				
 				$filtered_posts = array();
 				foreach ($posts as $post) {
-					// Check if this post is already a translated post
-					if (in_array($post->ID, $translation_map)) {
-						// This is already a translated post, keep it
+					// Check if this post is already a translated post (check post meta directly)
+					$post_lang = get_post_meta($post->ID, '_xf_translator_language', true);
+					if ($post_lang === $lang_prefix) {
+						// This is already a translated post for this language, keep it
 						$filtered_posts[] = $post;
 					} elseif (isset($translation_map[$post->ID])) {
 						// This is an original post, get its translated version
@@ -2244,16 +2292,51 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
-		// Skip if value is empty
-		if (empty($value)) {
+		// Get field name early for debug logging
+		$field_name = isset($field['name']) ? $field['name'] : '';
+		
+		// Also try to get field name from field key if name is not available
+		if (empty($field_name) && isset($field['key']) && function_exists('acf_get_field')) {
+			$field_obj = acf_get_field($field['key']);
+			if ($field_obj && isset($field_obj['name'])) {
+				$field_name = $field_obj['name'];
+			}
+		}
+		
+		// Get current language prefix early to determine if we need to process
+		$lang_prefix = $this->get_current_language_prefix();
+		
+		// Debug logging for sbposts__content to see if filter is called
+		if ($field_name === 'sbposts__content') {
+			error_log('XF Translator ACF: filter_acf_load_value called for sbposts__content - post_id: ' . $post_id . ', value empty: ' . (empty($value) ? 'YES' : 'NO') . ', value type: ' . gettype($value) . ', lang_prefix: ' . ($lang_prefix ?: 'empty'));
+		}
+		
+		// If no language prefix, we're on English/default - no conversion needed
+		// But still return early if value is empty to avoid unnecessary processing
+		if (empty($lang_prefix)) {
+			if ($field_name === 'sbposts__content') {
+				error_log('XF Translator ACF: sbposts__content - no language prefix, returning original value');
+			}
 			return $value;
 		}
 		
-		// Get current language prefix
-		$lang_prefix = $this->get_current_language_prefix();
+		// On translated pages, don't return early if value is empty
+		// We need to check if we should load from original post first
+		// Only skip if value is empty AND it's not a field we care about
+		$strict_filter_fields = array(
+			'related_posts',
+			'yml__select_posts',
+			'you_may_like',
+			'recommended_posts',
+			'sbposts__content',
+			'select_posts',
+		);
 		
-		// If no language prefix, we're on English/default - no conversion needed
-		if (empty($lang_prefix)) {
+		// If value is empty and it's not a field we need to process, return early
+		if (empty($value) && !in_array($field_name, $strict_filter_fields, true)) {
+			if ($field_name === 'sbposts__content') {
+				error_log('XF Translator ACF: sbposts__content value is empty and not in strict filter fields, returning early');
+			}
 			return $value;
 		}
 		
@@ -2338,17 +2421,477 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
-		// For regular post fields, we currently do NOT modify ACF values.
-		// This avoids breaking theme-specific relationship fields like:
-		// - related_posts / yml__select_posts ("You may like")
-		// - sbposts__content / select_posts (Sidebar posts)
-		//
-		// Those fields should show exactly what the theme/ACF has configured,
-		// even if some of the posts are still in the original (English) language.
-		//
-		// If we need smarter behavior in future, we can re-enable post ID
-		// conversion here in a more targeted way.
-		return $value;
+		// For regular post fields, handle ACF relationship fields
+		// Only filter if we're on a translated page (check URL language prefix)
+		// This ensures sidebar posts and other ACF fields are filtered on translated pages
+		// even if the global $post context is not set correctly
+		if (empty($lang_prefix)) {
+			// On English/default page, don't filter ACF fields
+			return $value;
+		}
+
+		// Fields that should be strictly filtered (only show translated posts, no English fallback)
+		// (Already defined above, but keeping for clarity)
+
+		// Special handling for repeater fields - ACF stores them differently
+		// For sbposts__content, we need to load the full repeater structure from post meta
+		if ($field_name === 'sbposts__content') {
+			// Get the current post ID - could be from get_queried_object_id() in shortcode
+			$current_post_id = is_numeric($post_id) ? (int) $post_id : get_queried_object_id();
+			if (!$current_post_id && isset($GLOBALS['post']) && $GLOBALS['post']) {
+				$current_post_id = $GLOBALS['post']->ID;
+			}
+			
+			error_log('XF Translator ACF: sbposts__content special handling - post_id: ' . $current_post_id . ', value type: ' . gettype($value) . ', is_array: ' . (is_array($value) ? 'YES' : 'NO'));
+			
+			// Check if value is just a count (ACF repeater format issue)
+			// Value can come as string, number, or array with count
+			$is_count_only = false;
+			$needs_reload = false;
+			
+			if (is_array($value)) {
+				$is_count_only = (count($value) === 1 && isset($value[0]) && is_numeric($value[0]) && !is_array($value[0]));
+			} elseif (is_numeric($value) || (is_string($value) && is_numeric($value))) {
+				// Value is just a number (count)
+				$is_count_only = true;
+				$needs_reload = true;
+			} elseif (empty($value)) {
+				$needs_reload = true;
+			}
+			
+			error_log('XF Translator ACF: sbposts__content - is_count_only: ' . ($is_count_only ? 'YES' : 'NO') . ', needs_reload: ' . ($needs_reload ? 'YES' : 'NO') . ', empty(value): ' . (empty($value) ? 'YES' : 'NO'));
+			
+			if ($needs_reload || $is_count_only) {
+				error_log('XF Translator ACF: sbposts__content - Need to load from post meta or original post');
+				// Try to load from original post if this is a translated post
+				$original_post_id = $this->get_original_post_id($current_post_id);
+				
+				if ($original_post_id && $original_post_id !== $current_post_id) {
+					// Load repeater field properly using ACF's get_field with format_value
+					if (function_exists('get_field')) {
+						remove_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10);
+						$original_value = get_field($field_name, $original_post_id, true); // true = format value
+						add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
+						
+						if (!empty($original_value) && is_array($original_value)) {
+							// Check if it's a proper repeater structure
+							$has_proper_structure = false;
+							foreach ($original_value as $row) {
+								if (is_array($row) && isset($row['select_posts'])) {
+									$has_proper_structure = true;
+									break;
+								}
+							}
+							
+							if ($has_proper_structure) {
+								$value = $original_value;
+								error_log('XF Translator ACF: Loaded original sbposts__content from post ' . $original_post_id . ' (current: ' . $current_post_id . ') - rows: ' . count($value));
+							} else {
+								error_log('XF Translator ACF: Original value loaded but doesn\'t have proper repeater structure');
+							}
+						}
+					}
+				}
+			}
+			
+			// If still empty or just a count, try loading directly from post meta
+			$is_count_only = (is_array($value) && count($value) === 1 && isset($value[0]) && is_numeric($value[0]) && !is_array($value[0]));
+			if (empty($value) || $is_count_only) {
+				error_log('XF Translator ACF: sbposts__content - Attempting to load from post meta directly');
+				
+				// Get the field key - ACF stores repeater sub-fields using field KEY, not name
+				$field_key = isset($field['key']) ? $field['key'] : '';
+				if (empty($field_key) && function_exists('acf_get_field')) {
+					$field_obj = acf_get_field($field_name);
+					if ($field_obj && isset($field_obj['key'])) {
+						$field_key = $field_obj['key'];
+					}
+				}
+				
+				error_log('XF Translator ACF: sbposts__content - field_key: ' . ($field_key ?: 'NOT FOUND'));
+				
+				// Try both field name and field key for the repeater count
+				$repeater_count = get_post_meta($current_post_id, $field_name, true);
+				if (empty($repeater_count) || !is_numeric($repeater_count)) {
+					$repeater_count = get_post_meta($current_post_id, $field_key, true);
+				}
+				
+				// If still empty, try original post
+				if (empty($repeater_count) || !is_numeric($repeater_count)) {
+					$original_post_id = $this->get_original_post_id($current_post_id);
+					if ($original_post_id && $original_post_id !== $current_post_id) {
+						$repeater_count = get_post_meta($original_post_id, $field_name, true);
+						if (empty($repeater_count) || !is_numeric($repeater_count)) {
+							$repeater_count = get_post_meta($original_post_id, $field_key, true);
+						}
+					}
+				}
+				
+				error_log('XF Translator ACF: sbposts__content - repeater_count: ' . ($repeater_count ?: 'NOT FOUND'));
+				
+				if ($repeater_count && is_numeric($repeater_count) && $repeater_count > 0) {
+					$repeater_rows = array();
+					$source_post_id = $current_post_id;
+					
+					// Check if we need to load from original - try both field name and key patterns
+					$test_meta_name = $field_name . '_0_select_posts';
+					$test_meta_key = $field_key . '_0_select_posts';
+					$has_data = !empty(get_post_meta($current_post_id, $test_meta_name, true)) || 
+								!empty(get_post_meta($current_post_id, $test_meta_key, true));
+					
+					if (!$has_data) {
+						$original_post_id = $this->get_original_post_id($current_post_id);
+						if ($original_post_id && $original_post_id !== $current_post_id) {
+							$source_post_id = $original_post_id;
+							error_log('XF Translator ACF: sbposts__content - Using original post ' . $original_post_id . ' as source');
+						}
+					}
+					
+					// Get the select_posts sub-field key
+					$select_posts_field_key = '';
+					if ($field_key && function_exists('acf_get_field')) {
+						$repeater_field = acf_get_field($field_key);
+						if ($repeater_field && isset($repeater_field['sub_fields'])) {
+							foreach ($repeater_field['sub_fields'] as $sub_field) {
+								if (isset($sub_field['name']) && $sub_field['name'] === 'select_posts') {
+									$select_posts_field_key = $sub_field['key'];
+									break;
+								}
+							}
+						}
+					}
+					
+					error_log('XF Translator ACF: sbposts__content - select_posts_field_key: ' . ($select_posts_field_key ?: 'NOT FOUND'));
+					
+					for ($i = 0; $i < $repeater_count; $i++) {
+						// Try multiple meta key patterns
+						$select_posts = null;
+						
+						// Pattern 1: field_name_row_index_select_posts
+						$meta_key1 = $field_name . '_' . $i . '_select_posts';
+						$select_posts = get_post_meta($source_post_id, $meta_key1, true);
+						
+						// Pattern 2: field_key_row_index_select_posts_field_key
+						if (empty($select_posts) && $field_key && $select_posts_field_key) {
+							$meta_key2 = $field_key . '_' . $i . '_' . $select_posts_field_key;
+							$select_posts = get_post_meta($source_post_id, $meta_key2, true);
+						}
+						
+						// Pattern 3: field_key_row_index_select_posts (field name)
+						if (empty($select_posts) && $field_key) {
+							$meta_key3 = $field_key . '_' . $i . '_select_posts';
+							$select_posts = get_post_meta($source_post_id, $meta_key3, true);
+						}
+						
+						if (!empty($select_posts)) {
+							// Ensure it's an array
+							if (!is_array($select_posts)) {
+								$select_posts = array($select_posts);
+							}
+							$repeater_rows[] = array('select_posts' => $select_posts);
+							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . count($select_posts) . ' posts: ' . implode(', ', $select_posts));
+						} else {
+							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' - No select_posts found (tried: ' . $meta_key1 . ($field_key ? ', ' . $meta_key3 : '') . ')');
+						}
+					}
+					
+					if (!empty($repeater_rows)) {
+						$value = $repeater_rows;
+						error_log('XF Translator ACF: Loaded sbposts__content from post meta - source_post_id: ' . $source_post_id . ', rows: ' . count($repeater_rows));
+					} else {
+						error_log('XF Translator ACF: sbposts__content - No repeater rows loaded from post meta');
+					}
+				} else {
+					error_log('XF Translator ACF: sbposts__content - Invalid repeater_count: ' . ($repeater_count ?: 'empty'));
+				}
+			}
+		} elseif (in_array($field_name, $strict_filter_fields, true) && empty($value)) {
+			// For other strict filter fields, try loading from original post
+			$current_post_id = is_numeric($post_id) ? (int) $post_id : get_queried_object_id();
+			if (!$current_post_id && isset($GLOBALS['post']) && $GLOBALS['post']) {
+				$current_post_id = $GLOBALS['post']->ID;
+			}
+			
+			$original_post_id = $this->get_original_post_id($current_post_id);
+			
+			if ($original_post_id && $original_post_id !== $current_post_id) {
+				if (function_exists('get_field')) {
+					remove_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10);
+					$original_value = get_field($field_name, $original_post_id);
+					add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
+					if (!empty($original_value)) {
+						$value = $original_value;
+						error_log('XF Translator ACF: Loaded original value for field "' . $field_name . '" from post ' . $original_post_id);
+					}
+				}
+			}
+		}
+
+		// For these fields, strictly filter - only show translated posts
+		// Note: sbposts__content is a repeater field containing select_posts arrays
+		// The convert_post_ids_to_translated function handles nested arrays recursively
+		if (in_array($field_name, $strict_filter_fields, true)) {
+			// For sbposts__content, check if value is just a count AFTER ACF processing
+			if ($field_name === 'sbposts__content') {
+				// Ensure value is an array first to check properly
+				$temp_value = is_array($value) ? $value : (empty($value) ? array() : (array) $value);
+				
+				// Check if it's just a count (array with single numeric value)
+				$is_count_format = (is_array($temp_value) && count($temp_value) === 1 && isset($temp_value[0]) && is_numeric($temp_value[0]) && !is_array($temp_value[0]));
+				
+				if ($is_count_format) {
+					error_log('XF Translator ACF: sbposts__content detected as count format AFTER ACF processing - loading from post meta');
+					
+					// Get the current post ID
+					$current_post_id = is_numeric($post_id) ? (int) $post_id : get_queried_object_id();
+					if (!$current_post_id && isset($GLOBALS['post']) && $GLOBALS['post']) {
+						$current_post_id = $GLOBALS['post']->ID;
+					}
+					
+					// Get the field key
+					$field_key = isset($field['key']) ? $field['key'] : '';
+					if (empty($field_key) && function_exists('acf_get_field')) {
+						$field_obj = acf_get_field($field_name);
+						if ($field_obj && isset($field_obj['key'])) {
+							$field_key = $field_obj['key'];
+						}
+					}
+					
+					// Get repeater count (use the numeric value from array)
+					$repeater_count = (int) $temp_value[0];
+					
+					// Try to load from current post first, then original
+					$source_post_id = $current_post_id;
+					$original_post_id = $this->get_original_post_id($current_post_id);
+					
+					// Check if current post has the data
+					$test_meta = get_post_meta($current_post_id, $field_name . '_0_select_posts', true);
+					if (empty($test_meta) && $field_key) {
+						$test_meta = get_post_meta($current_post_id, $field_key . '_0_select_posts', true);
+					}
+					
+					if (empty($test_meta) && $original_post_id && $original_post_id !== $current_post_id) {
+						$source_post_id = $original_post_id;
+						error_log('XF Translator ACF: sbposts__content - Using original post ' . $original_post_id . ' as source');
+					}
+					
+					// Load repeater rows
+					$repeater_rows = array();
+					for ($i = 0; $i < $repeater_count; $i++) {
+						$select_posts = null;
+						
+						// Try field name pattern
+						$meta_key1 = $field_name . '_' . $i . '_select_posts';
+						$select_posts = get_post_meta($source_post_id, $meta_key1, true);
+						
+						// Try field key pattern
+						if (empty($select_posts) && $field_key) {
+							$meta_key2 = $field_key . '_' . $i . '_select_posts';
+							$select_posts = get_post_meta($source_post_id, $meta_key2, true);
+						}
+						
+						if (!empty($select_posts)) {
+							if (!is_array($select_posts)) {
+								$select_posts = array($select_posts);
+							}
+							$repeater_rows[] = array('select_posts' => $select_posts);
+							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . count($select_posts) . ' posts: ' . implode(', ', $select_posts));
+						}
+					}
+					
+					if (!empty($repeater_rows)) {
+						$value = $repeater_rows;
+						error_log('XF Translator ACF: sbposts__content - Successfully loaded ' . count($repeater_rows) . ' rows from post meta');
+					} else {
+						error_log('XF Translator ACF: sbposts__content - Failed to load rows from post meta (count: ' . $repeater_count . ', source_post_id: ' . $source_post_id . ')');
+					}
+				}
+			}
+			
+			// Ensure value is an array to avoid foreach warnings in theme
+			if (!is_array($value)) {
+				$value = empty($value) ? array() : (array) $value;
+			}
+
+			// Enhanced debug logging for sidebar posts
+			if ($field_name === 'sbposts__content') {
+				error_log('XF Translator ACF: Filtering sbposts__content - post_id: ' . $post_id . ', lang: ' . $lang_prefix);
+				error_log('XF Translator ACF: sbposts__content original structure - count: ' . count($value) . ', type: ' . gettype($value));
+				if (is_array($value) && !empty($value)) {
+					error_log('XF Translator ACF: sbposts__content - Full value structure: ' . print_r($value, true));
+					foreach ($value as $idx => $row) {
+						error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - row type: ' . gettype($row) . ', is_array: ' . (is_array($row) ? 'YES' : 'NO'));
+						if (is_array($row)) {
+							error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - keys: ' . implode(', ', array_keys($row)));
+							if (isset($row['select_posts'])) {
+								$select_posts = $row['select_posts'];
+								// Extract IDs for logging
+								$ids_for_log = array();
+								if (is_array($select_posts)) {
+									foreach ($select_posts as $sp_item) {
+										if (is_object($sp_item) && isset($sp_item->ID)) {
+											$ids_for_log[] = $sp_item->ID;
+										} elseif (is_numeric($sp_item)) {
+											$ids_for_log[] = $sp_item;
+										}
+									}
+								}
+								error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - select_posts: ' . (is_array($select_posts) ? 'array(' . count($select_posts) . ')' : gettype($select_posts)) . ' - IDs: ' . (is_array($select_posts) ? implode(', ', $ids_for_log) : 'N/A'));
+							} else {
+								error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - NO select_posts key, full row: ' . print_r($row, true));
+							}
+						} else {
+							error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - NOT an array, value: ' . print_r($row, true));
+						}
+					}
+				}
+			}
+
+			// Use strict filtering - exclude untranslated posts
+			// But first, log what we're about to convert
+			if ($field_name === 'sbposts__content') {
+				$value_before_conversion = $value;
+				error_log('XF Translator ACF: About to convert sbposts__content - value type: ' . gettype($value) . ', is_array: ' . (is_array($value) ? 'YES (count: ' . count($value) . ')' : 'NO'));
+			}
+			
+			$converted_value = $this->convert_post_ids_to_translated($value, $lang_prefix, 0, true);
+			
+			// If conversion resulted in empty array but we had data, log a warning
+			if ($field_name === 'sbposts__content' && empty($converted_value) && !empty($value)) {
+				error_log('XF Translator ACF: WARNING - sbposts__content conversion resulted in empty array! Original had ' . count($value) . ' rows.');
+				// Try to see if any of the original posts have translations
+				if (is_array($value)) {
+					foreach ($value as $row_idx => $row) {
+						if (is_array($row) && isset($row['select_posts'])) {
+							$select_posts = is_array($row['select_posts']) ? $row['select_posts'] : array($row['select_posts']);
+							error_log('XF Translator ACF: Checking translations for row ' . $row_idx . ' with ' . count($select_posts) . ' posts');
+							foreach ($select_posts as $post_id_or_obj) {
+								$check_id = is_object($post_id_or_obj) && isset($post_id_or_obj->ID) ? $post_id_or_obj->ID : (is_numeric($post_id_or_obj) ? $post_id_or_obj : 0);
+								if ($check_id) {
+									$trans_id = $this->get_translated_post_id($check_id, $lang_prefix);
+									$post_status = get_post_status($check_id);
+									$trans_status = $trans_id ? get_post_status($trans_id) : 'N/A';
+									error_log('XF Translator ACF: Row ' . $row_idx . ' - Post ' . $check_id . ' (status: ' . $post_status . ') translation: ' . ($trans_id ? $trans_id . ' (status: ' . $trans_status . ')' : 'NONE'));
+								}
+							}
+						} else {
+							error_log('XF Translator ACF: Row ' . $row_idx . ' - NOT an array or missing select_posts key. Row type: ' . gettype($row));
+						}
+					}
+				}
+			}
+			
+			// Also check if converted_value has rows but they're empty
+			if ($field_name === 'sbposts__content' && !empty($converted_value) && is_array($converted_value)) {
+				$empty_rows = 0;
+				foreach ($converted_value as $row_idx => $row) {
+					if (is_array($row) && isset($row['select_posts'])) {
+						if (empty($row['select_posts']) || (is_array($row['select_posts']) && count($row['select_posts']) === 0)) {
+							$empty_rows++;
+						}
+					}
+				}
+				if ($empty_rows > 0) {
+					error_log('XF Translator ACF: WARNING - sbposts__content has ' . count($converted_value) . ' rows but ' . $empty_rows . ' rows have empty select_posts arrays!');
+				}
+			}
+			
+			// For sbposts__content (repeater field), ensure select_posts arrays contain IDs, not objects
+			// This is important because the shortcode expects IDs and casts them to int
+			if ($field_name === 'sbposts__content' && is_array($converted_value)) {
+				error_log('XF Translator ACF: Normalizing sbposts__content - converted_value count: ' . count($converted_value));
+				foreach ($converted_value as $idx => $row) {
+					error_log('XF Translator ACF: Processing row ' . $idx . ' - is_array: ' . (is_array($row) ? 'YES' : 'NO') . ', has select_posts: ' . (is_array($row) && isset($row['select_posts']) ? 'YES' : 'NO'));
+					
+					if (is_array($row) && isset($row['select_posts'])) {
+						$select_posts = $row['select_posts'];
+						error_log('XF Translator ACF: Row ' . $idx . ' select_posts before normalization - type: ' . gettype($select_posts) . ', is_array: ' . (is_array($select_posts) ? 'YES (count: ' . count($select_posts) . ')' : 'NO'));
+						
+						if (is_array($select_posts)) {
+							// Convert post objects to IDs if needed
+							$normalized_select_posts = array();
+							foreach ($select_posts as $sp_item) {
+								if (is_object($sp_item) && isset($sp_item->ID)) {
+									// It's a post object, extract the ID
+									$normalized_select_posts[] = (int) $sp_item->ID;
+								} elseif (is_numeric($sp_item)) {
+									// It's already an ID
+									$normalized_select_posts[] = (int) $sp_item;
+								}
+							}
+							$converted_value[$idx]['select_posts'] = $normalized_select_posts;
+							
+							error_log('XF Translator ACF: Row ' . $idx . ' select_posts after normalization - count: ' . count($normalized_select_posts) . ', IDs: ' . implode(', ', $normalized_select_posts));
+							
+							// Debug: Log if select_posts became empty after normalization
+							if (empty($normalized_select_posts) && !empty($select_posts)) {
+								error_log('XF Translator ACF: WARNING - select_posts became empty after normalization in row ' . $idx . '. Original had ' . count($select_posts) . ' items.');
+							}
+						} elseif (!is_array($select_posts) && !empty($select_posts)) {
+							// Handle case where select_posts is not an array (single value)
+							if (is_object($select_posts) && isset($select_posts->ID)) {
+								$converted_value[$idx]['select_posts'] = array((int) $select_posts->ID);
+							} elseif (is_numeric($select_posts)) {
+								$converted_value[$idx]['select_posts'] = array((int) $select_posts);
+							}
+						} elseif (empty($select_posts)) {
+							// Ensure select_posts exists as empty array even if it was removed
+							$converted_value[$idx]['select_posts'] = array();
+							error_log('XF Translator ACF: Row ' . $idx . ' - select_posts was empty, set to empty array');
+						}
+					} elseif (is_array($row) && !isset($row['select_posts'])) {
+						// Row exists but select_posts key is missing - this shouldn't happen but handle it
+						error_log('XF Translator ACF: WARNING - Row ' . $idx . ' exists but select_posts key is missing! Row keys: ' . implode(', ', array_keys($row)));
+						$converted_value[$idx]['select_posts'] = array();
+					}
+				}
+				
+				// Final check: Log the final structure
+				if ($field_name === 'sbposts__content') {
+					$total_rows = count($converted_value);
+					$rows_with_posts = 0;
+					$all_post_ids = array();
+					foreach ($converted_value as $idx => $row) {
+						if (is_array($row) && isset($row['select_posts']) && !empty($row['select_posts']) && is_array($row['select_posts'])) {
+							$rows_with_posts++;
+							$all_post_ids = array_merge($all_post_ids, $row['select_posts']);
+						}
+					}
+					error_log('XF Translator ACF: sbposts__content FINAL - Total rows: ' . $total_rows . ', Rows with posts: ' . $rows_with_posts . ', All post IDs: ' . implode(', ', $all_post_ids));
+				}
+			}
+			
+			// Debug logging for sidebar posts
+			if ($field_name === 'sbposts__content' || $field_name === 'select_posts') {
+				error_log('XF Translator ACF: Filtering field "' . $field_name . '" - Original count: ' . (is_array($value) ? count($value) : 'not array') . ', Converted count: ' . (is_array($converted_value) ? count($converted_value) : 'not array'));
+				
+				if ($field_name === 'sbposts__content' && is_array($converted_value) && !empty($converted_value)) {
+					foreach ($converted_value as $idx => $row) {
+						if (is_array($row) && isset($row['select_posts'])) {
+							$select_posts = $row['select_posts'];
+							// Extract IDs for logging
+							$ids_for_log = array();
+							if (is_array($select_posts)) {
+								foreach ($select_posts as $sp_item) {
+									if (is_object($sp_item) && isset($sp_item->ID)) {
+										$ids_for_log[] = $sp_item->ID;
+									} elseif (is_numeric($sp_item)) {
+										$ids_for_log[] = $sp_item;
+									}
+								}
+							}
+							error_log('XF Translator ACF: sbposts__content CONVERTED row ' . $idx . ' - select_posts: ' . (is_array($select_posts) ? 'array(' . count($select_posts) . ')' : gettype($select_posts)) . ' - IDs: ' . (is_array($select_posts) ? implode(', ', $ids_for_log) : 'N/A'));
+						}
+					}
+				}
+			}
+			
+			return $converted_value;
+		}
+
+		// For other ACF fields, convert post IDs but allow original posts as fallback
+		$converted_value = $this->convert_post_ids_to_translated($value, $lang_prefix, 0, false);
+		return $converted_value;
 	}
 	
 	/**
@@ -2377,31 +2920,139 @@ class Xf_Translator_Public {
 			$original_count = count($value);
 			foreach ($value as $key => $item) {
 				// Recursively process nested arrays (increment depth)
+				// IMPORTANT: Pass $filter_untranslated flag to nested calls so repeater fields work correctly
 				if (is_array($item)) {
-					$nested_result = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1);
-					// Only add if result is not false/empty
-					if ($nested_result !== false && $nested_result !== null && !empty($nested_result)) {
+					// Debug logging for nested arrays (repeater rows with select_posts)
+					if ($depth === 0 && isset($item['select_posts'])) {
+						$select_posts_before = $item['select_posts'];
+						// Extract IDs from post objects if needed
+						$ids_before = array();
+						if (is_array($select_posts_before)) {
+							foreach ($select_posts_before as $sp_item) {
+								if (is_object($sp_item) && isset($sp_item->ID)) {
+									$ids_before[] = $sp_item->ID;
+								} elseif (is_numeric($sp_item)) {
+									$ids_before[] = $sp_item;
+								}
+							}
+						}
+						error_log('XF Translator: Processing nested array (repeater row) at depth ' . $depth . ', key: ' . $key . ', select_posts before: ' . (is_array($select_posts_before) ? 'array(' . count($select_posts_before) . ') - IDs: ' . implode(', ', $ids_before) : gettype($select_posts_before)));
+					}
+					
+					$nested_result = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1, $filter_untranslated);
+					
+					// CRITICAL FIX: If select_posts was in the original item, ensure it stays as an array in the result
+					if (isset($item['select_posts']) && is_array($item['select_posts'])) {
+						// If select_posts was converted to something other than an array, fix it
+						if (!isset($nested_result['select_posts']) || !is_array($nested_result['select_posts'])) {
+							// select_posts was lost or converted incorrectly - reconvert it properly
+							$original_select_posts = $item['select_posts'];
+							$converted_select_posts = $this->convert_post_ids_to_translated($original_select_posts, $language_prefix, $depth + 2, $filter_untranslated);
+							
+							// Ensure result is an array
+							if (!is_array($converted_select_posts)) {
+								if (is_numeric($converted_select_posts)) {
+									$converted_select_posts = array((int) $converted_select_posts);
+								} else {
+									$converted_select_posts = array();
+								}
+							}
+							
+							if (!is_array($nested_result)) {
+								$nested_result = array();
+							}
+							$nested_result['select_posts'] = $converted_select_posts;
+							error_log('XF Translator: Fixed select_posts conversion - was ' . gettype($nested_result['select_posts'] ?? 'missing') . ', now array with ' . count($converted_select_posts) . ' items');
+						}
+					}
+					
+					// Debug logging for nested arrays after conversion
+					if ($depth === 0 && isset($item['select_posts'])) {
+						$select_posts_after = isset($nested_result['select_posts']) ? $nested_result['select_posts'] : 'not found';
+						// Extract IDs from post objects if needed
+						$ids_after = array();
+						if (is_array($select_posts_after)) {
+							foreach ($select_posts_after as $sp_item) {
+								if (is_object($sp_item) && isset($sp_item->ID)) {
+									$ids_after[] = $sp_item->ID;
+								} elseif (is_numeric($sp_item)) {
+									$ids_after[] = $sp_item;
+								}
+							}
+						}
+						error_log('XF Translator: Processing nested array (repeater row) at depth ' . $depth . ', key: ' . $key . ', select_posts after: ' . (is_array($select_posts_after) ? 'array(' . count($select_posts_after) . ') - IDs: ' . implode(', ', $ids_after) : gettype($select_posts_after)));
+					}
+					
+					// For nested arrays (like repeater rows), always preserve the structure
+					// even if some fields become empty (e.g., select_posts might be empty after filtering)
+					// This ensures repeater rows are not completely removed
+					// IMPORTANT: Always preserve the array structure, even if it's empty
+					// This is crucial for repeater fields where empty sub-arrays should still exist
+					if (is_array($nested_result)) {
+						// CRITICAL FIX: If select_posts was converted to a non-array (string/number), convert it back to array
+						if (isset($item['select_posts']) && is_array($item['select_posts'])) {
+							if (!isset($nested_result['select_posts'])) {
+								// select_posts was removed during conversion, restore it as empty array
+								$nested_result['select_posts'] = array();
+								error_log('XF Translator: Restored empty select_posts key in repeater row at depth ' . $depth . ', key: ' . $key);
+							} elseif (!is_array($nested_result['select_posts'])) {
+								// select_posts was converted to a string/number instead of array - fix it
+								$converted_id = $nested_result['select_posts'];
+								$nested_result['select_posts'] = is_numeric($converted_id) ? array((int) $converted_id) : array();
+								error_log('XF Translator: Fixed select_posts - was ' . gettype($converted_id) . ' (' . $converted_id . '), converted to array with ' . count($nested_result['select_posts']) . ' items');
+							}
+						}
 						$converted[$key] = $nested_result;
+					} elseif ($nested_result !== false && $nested_result !== null) {
+						$converted[$key] = $nested_result;
+					} else {
+						// Even if result is null/false, preserve the original structure for repeater rows
+						// This prevents repeater rows from disappearing entirely
+						// But ensure select_posts exists as empty array if it was in original
+						if (is_array($item) && isset($item['select_posts'])) {
+							$item['select_posts'] = array(); // Set to empty array instead of removing
+						}
+						$converted[$key] = $item;
 					}
 				} elseif (is_object($item) && isset($item->ID)) {
 					// ACF post object - check if this is already a translated post
 					$item_language = get_post_meta($item->ID, '_xf_translator_language', true);
-					if ($item_language === $language_prefix) {
-						// This is already a translated post for the current language, use it as-is
-						$converted[$key] = $item;
+				$normalized_item_lang = $this->normalize_lang_prefix($item_language);
+				$normalized_target_lang = $this->normalize_lang_prefix($language_prefix);
+
+				if ($item_language === $language_prefix || ($normalized_item_lang && $normalized_item_lang === $normalized_target_lang)) {
+						// This is already a translated post for the current language
+						// For nested arrays (like select_posts in repeater), return ID instead of object
+						// This ensures compatibility with shortcodes that expect IDs
+						if ($depth > 0) {
+							$converted[$key] = (int) $item->ID;
+						} else {
+							$converted[$key] = $item;
+						}
 					} else {
 						// This is an original post, try to find its translation
 						$translated_id = $this->get_translated_post_id($item->ID, $language_prefix);
 						if ($translated_id) {
-							// Replace with translated post object
+							// Verify the translated post exists and is published
 							$translated_post = get_post($translated_id);
 							if ($translated_post && $translated_post->post_status === 'publish') {
-								$converted[$key] = $translated_post;
+								// For nested arrays (like select_posts in repeater), return ID instead of object
+								// This ensures compatibility with shortcodes that expect IDs
+								if ($depth > 0) {
+									$converted[$key] = (int) $translated_id;
+								} else {
+									$converted[$key] = $translated_post;
+								}
 							}
 							// If translated post doesn't exist or isn't published, handle based on filter_untranslated flag
 							elseif (!$filter_untranslated) {
 								// If we're not filtering untranslated, show original
-								$converted[$key] = $item;
+								// For nested arrays, return ID instead of object
+								if ($depth > 0) {
+									$converted[$key] = (int) $item->ID;
+								} else {
+									$converted[$key] = $item;
+								}
 							}
 						} else {
 							// No translation exists
@@ -2409,7 +3060,12 @@ class Xf_Translator_Public {
 								// Skip this post (don't add to $converted array)
 							} else {
 								// Show original post if filtering is not enabled
-								$converted[$key] = $item;
+								// For nested arrays, return ID instead of object
+								if ($depth > 0) {
+									$converted[$key] = (int) $item->ID;
+								} else {
+									$converted[$key] = $item;
+								}
 							}
 						}
 					}
@@ -2418,8 +3074,12 @@ class Xf_Translator_Public {
 					$post = get_post($item);
 					if ($post && $post->post_type !== 'attachment') {
 						// Check if this post is already a translated post for the current language
-						$post_language = get_post_meta($item, '_xf_translator_language', true);
-						if ($post_language === $language_prefix) {
+				$post_language = get_post_meta($item, '_xf_translator_language', true);
+				// Normalize both prefixes to handle variations (e.g., fr vs fr-CA)
+				$normalized_post_lang = $this->normalize_lang_prefix($post_language);
+				$normalized_target_lang = $this->normalize_lang_prefix($language_prefix);
+
+				if ($post_language === $language_prefix || ($normalized_post_lang && $normalized_post_lang === $normalized_target_lang)) {
 							// This is already a translated post for the current language, use it as-is
 							$converted[$key] = $item;
 						} else {

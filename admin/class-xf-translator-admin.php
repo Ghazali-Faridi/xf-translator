@@ -251,6 +251,10 @@ class Xf_Translator_Admin {
             case 'save_user_meta_translations':
                 $this->handle_save_user_meta_translations();
                 break;
+                
+            case 'fix_old_slugs':
+                $this->handle_fix_old_translated_post_slugs();
+                break;
         }
     }
     
@@ -4216,6 +4220,594 @@ class Xf_Translator_Admin {
             'available' => !$exists,
             'path' => $path
         ));
+    }
+
+    /**
+     * AJAX handler to fetch paginated translation jobs (NEW/EDIT types)
+     */
+    public function ajax_get_translation_jobs() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
+            return;
+        }
+        
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        // Get parameters
+        $page = isset($_POST['page']) ? intval($_POST['page']) : 1;
+        $per_page = isset($_POST['per_page']) ? intval($_POST['per_page']) : 50;
+        $status = isset($_POST['status']) ? sanitize_text_field($_POST['status']) : '';
+        $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
+        
+        // Build WHERE clause
+        $where = array("type IN ('NEW', 'EDIT')");
+        $where_values = array();
+        
+        if (!empty($status)) {
+            // Validate status to prevent SQL injection
+            $valid_statuses = array('pending', 'processing', 'completed', 'failed');
+            if (in_array($status, $valid_statuses)) {
+                $where[] = "status = %s";
+                $where_values[] = $status;
+            }
+        }
+        
+        // Handle search separately with proper escaping
+        $post_ids = null;
+        if (!empty($search)) {
+            $search_like = '%' . $wpdb->esc_like($search) . '%';
+            // Get post IDs that match the search
+            $post_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT ID FROM {$wpdb->posts} WHERE post_title LIKE %s",
+                $search_like
+            ));
+            
+            if (empty($post_ids)) {
+                // No posts match, return empty result
+                wp_send_json_success(array(
+                    'jobs' => array(),
+                    'pagination' => array(
+                        'current_page' => $page,
+                        'total_pages' => 0,
+                        'total_items' => 0,
+                        'per_page' => $per_page
+                    )
+                ));
+                return;
+            }
+        }
+        
+        // Build final WHERE clause with post IDs if search is used
+        if ($post_ids !== null) {
+            $post_ids_int = array_map('intval', $post_ids);
+            $post_ids_placeholders = implode(',', $post_ids_int);
+            $where[] = "parent_post_id IN ($post_ids_placeholders)";
+        }
+        $where_clause = implode(' AND ', $where);
+        
+        // Get total count
+        if (!empty($where_values)) {
+            $count_query = $wpdb->prepare(
+                "SELECT COUNT(*) FROM $table_name WHERE $where_clause",
+                $where_values
+            );
+        } else {
+            $count_query = "SELECT COUNT(*) FROM $table_name WHERE $where_clause";
+        }
+        $total = $wpdb->get_var($count_query);
+        
+        // Calculate pagination
+        $offset = ($page - 1) * $per_page;
+        $total_pages = ceil($total / $per_page);
+        
+        // Get jobs
+        $order_by = "ORDER BY id DESC";
+        $limit = "LIMIT %d OFFSET %d";
+        
+        if (!empty($where_values)) {
+            $query = $wpdb->prepare(
+                "SELECT * FROM $table_name WHERE $where_clause $order_by $limit",
+                array_merge($where_values, array($per_page, $offset))
+            );
+        } else {
+            $query = $wpdb->prepare(
+                "SELECT * FROM $table_name WHERE $where_clause $order_by $limit",
+                $per_page,
+                $offset
+            );
+        }
+        
+        $jobs = $wpdb->get_results($query, ARRAY_A);
+        
+        // Format jobs with post information
+        $formatted_jobs = array();
+        foreach ($jobs as $job) {
+            $post = get_post($job['parent_post_id']);
+            $post_title = $post ? $post->post_title : __('Post not found', 'xf-translator');
+            $post_edit_link = $post ? get_edit_post_link($job['parent_post_id']) : '#';
+            
+            $translated_post = null;
+            $translated_post_title = '';
+            $translated_post_link = '#';
+            
+            if ($job['status'] === 'completed' && !empty($job['translated_post_id'])) {
+                $translated_post = get_post($job['translated_post_id']);
+                if ($translated_post) {
+                    $translated_post_title = $translated_post->post_title;
+                    $translated_post_link = get_edit_post_link($job['translated_post_id']);
+                }
+            }
+            
+            // Determine status color
+            $status_color = '#f0ad4e'; // pending
+            if ($job['status'] === 'completed') {
+                $status_color = '#46b450'; // green
+            } elseif ($job['status'] === 'failed') {
+                $status_color = '#dc3232'; // red
+            } elseif ($job['status'] === 'processing') {
+                $status_color = '#0073aa'; // blue
+            }
+            
+            $formatted_jobs[] = array(
+                'id' => $job['id'],
+                'parent_post_id' => $job['parent_post_id'],
+                'post_title' => $post_title,
+                'post_edit_link' => $post_edit_link,
+                'translated_post_id' => $job['translated_post_id'],
+                'translated_post_title' => $translated_post_title,
+                'translated_post_link' => $translated_post_link,
+                'lng' => $job['lng'],
+                'type' => $job['type'] ?: 'NEW',
+                'status' => $job['status'],
+                'status_color' => $status_color,
+                'error_message' => isset($job['error_message']) ? $job['error_message'] : '',
+                'created' => $job['created']
+            );
+        }
+        
+        wp_send_json_success(array(
+            'jobs' => $formatted_jobs,
+            'pagination' => array(
+                'current_page' => $page,
+                'total_pages' => $total_pages,
+                'total_items' => $total,
+                'per_page' => $per_page
+            )
+        ));
+    }
+
+    /**
+     * AJAX handler to fetch paginated existing post jobs (OLD type)
+     */
+    public function ajax_get_existing_jobs() {
+        check_ajax_referer('xf_translator_ajax', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
+            return;
+        }
+        
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        // Get parameters
+        $page = isset($_POST['page']) ? intval($_POST['page']) : 1;
+        $per_page = isset($_POST['per_page']) ? intval($_POST['per_page']) : 50;
+        $status = isset($_POST['status']) ? sanitize_text_field($_POST['status']) : '';
+        $search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
+        
+        // Build WHERE clause
+        $where = array("type = 'OLD'");
+        $where_values = array();
+        
+        if (!empty($status)) {
+            // Validate status to prevent SQL injection
+            $valid_statuses = array('pending', 'processing', 'completed', 'failed');
+            if (in_array($status, $valid_statuses)) {
+                $where[] = "status = %s";
+                $where_values[] = $status;
+            }
+        }
+        
+        // Handle search separately with proper escaping
+        $post_ids = null;
+        if (!empty($search)) {
+            $search_like = '%' . $wpdb->esc_like($search) . '%';
+            // Get post IDs that match the search
+            $post_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT ID FROM {$wpdb->posts} WHERE post_title LIKE %s",
+                $search_like
+            ));
+            
+            if (empty($post_ids)) {
+                // No posts match, return empty result
+                wp_send_json_success(array(
+                    'jobs' => array(),
+                    'pagination' => array(
+                        'current_page' => $page,
+                        'total_pages' => 0,
+                        'total_items' => 0,
+                        'per_page' => $per_page
+                    )
+                ));
+                return;
+            }
+        }
+        
+        // Build final WHERE clause with post IDs if search is used
+        if ($post_ids !== null) {
+            $post_ids_int = array_map('intval', $post_ids);
+            $post_ids_placeholders = implode(',', $post_ids_int);
+            $where[] = "parent_post_id IN ($post_ids_placeholders)";
+        }
+        $where_clause = implode(' AND ', $where);
+        
+        // Get total count
+        if (!empty($where_values)) {
+            $count_query = $wpdb->prepare(
+                "SELECT COUNT(*) FROM $table_name WHERE $where_clause",
+                $where_values
+            );
+        } else {
+            $count_query = "SELECT COUNT(*) FROM $table_name WHERE $where_clause";
+        }
+        $total = $wpdb->get_var($count_query);
+        
+        // Calculate pagination
+        $offset = ($page - 1) * $per_page;
+        $total_pages = ceil($total / $per_page);
+        
+        // Get jobs
+        $order_by = "ORDER BY id DESC";
+        $limit = "LIMIT %d OFFSET %d";
+        
+        if (!empty($where_values)) {
+            $query = $wpdb->prepare(
+                "SELECT * FROM $table_name WHERE $where_clause $order_by $limit",
+                array_merge($where_values, array($per_page, $offset))
+            );
+        } else {
+            $query = $wpdb->prepare(
+                "SELECT * FROM $table_name WHERE $where_clause $order_by $limit",
+                $per_page,
+                $offset
+            );
+        }
+        
+        $jobs = $wpdb->get_results($query, ARRAY_A);
+        
+        // Format jobs with post information
+        $formatted_jobs = array();
+        foreach ($jobs as $job) {
+            $post = get_post($job['parent_post_id']);
+            $post_title = $post ? $post->post_title : __('Post not found', 'xf-translator');
+            $post_edit_link = $post ? get_edit_post_link($job['parent_post_id']) : '#';
+            
+            // Determine status color
+            $status_color = '#f0ad4e'; // pending
+            if ($job['status'] === 'completed') {
+                $status_color = '#46b450'; // green
+            } elseif ($job['status'] === 'failed') {
+                $status_color = '#dc3232'; // red
+            } elseif ($job['status'] === 'processing') {
+                $status_color = '#0073aa'; // blue
+            }
+            
+            $formatted_jobs[] = array(
+                'id' => $job['id'],
+                'parent_post_id' => $job['parent_post_id'],
+                'post_title' => $post_title,
+                'post_edit_link' => $post_edit_link,
+                'translated_post_id' => $job['translated_post_id'],
+                'lng' => $job['lng'],
+                'type' => $job['type'] ?: 'OLD',
+                'status' => $job['status'],
+                'status_color' => $status_color,
+                'error_message' => isset($job['error_message']) ? $job['error_message'] : '',
+                'created' => $job['created']
+            );
+        }
+        
+        wp_send_json_success(array(
+            'jobs' => $formatted_jobs,
+            'pagination' => array(
+                'current_page' => $page,
+                'total_pages' => $total_pages,
+                'total_items' => $total,
+                'per_page' => $per_page
+            )
+        ));
+    }
+
+    /**
+     * Allow duplicate slugs for translated posts
+     * 
+     * This filter prevents WordPress from appending "-2", "-3", etc. to slugs
+     * when creating translated posts, allowing them to use the same slug as the original.
+     *
+     * @param string $slug The proposed slug
+     * @param int $post_ID The post ID (0 for new posts)
+     * @param string $post_status The post status
+     * @param string $post_type The post type
+     * @param int $post_parent The post parent ID
+     * @return string|null The slug to use, or null to let WordPress make it unique
+     */
+    public function allow_duplicate_slug_for_translated_posts($slug, $post_ID, $post_status, $post_type, $post_parent)
+    {
+        // Check if we're currently creating a translated post
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        
+        $is_creating = Xf_Translator_Processor::is_creating_translated_post();
+        
+        // Add debug logging
+        error_log('XF Translator: pre_wp_unique_post_slug filter called. Slug: ' . $slug . ', Post ID: ' . $post_ID . ', Status: ' . $post_status . ', Type: ' . $post_type . ', Is creating: ' . ($is_creating ? 'yes' : 'no'));
+        
+        if ($is_creating) {
+            // Allow the duplicate slug by returning it
+            // This prevents WordPress from appending "-2", "-3", etc.
+            error_log('XF Translator: Allowing duplicate slug for translated post (flag set): ' . $slug);
+            return $slug;
+        }
+        
+        // For existing posts that are translated posts, also allow duplicate slugs
+        // Check both by post ID and by checking if it's a translated post
+        if ($post_ID > 0 && is_numeric($post_ID)) {
+            $original_post_id = get_post_meta($post_ID, '_xf_translator_original_post_id', true);
+            if (empty($original_post_id)) {
+                $original_post_id = get_post_meta($post_ID, '_api_translator_original_post_id', true);
+            }
+            
+            if ($original_post_id) {
+                // This is a translated post, get the desired slug from meta
+                $desired_slug = get_post_meta($post_ID, '_xf_translator_desired_slug', true);
+                if (empty($desired_slug)) {
+                    // Fallback: get slug from original post
+                    $original_post = get_post($original_post_id);
+                    if ($original_post) {
+                        $desired_slug = $original_post->post_name;
+                    }
+                }
+                
+                // If we have a desired slug and it matches what we're trying to set, allow it
+                if (!empty($desired_slug) && $slug === $desired_slug) {
+                    error_log('XF Translator: Allowing duplicate slug for existing translated post (meta check): ' . $slug);
+                    return $slug;
+                }
+            }
+        }
+        
+        // For all other cases, return null to let WordPress handle slug uniqueness normally
+        return null;
+    }
+
+    /**
+     * Preserve slug for translated posts during wp_insert_post_data filter.
+     * This runs before the post is saved and ensures the slug isn't changed.
+     * 
+     * @param array $data Post data array
+     * @param array $postarr Original post data array
+     * @return array Modified post data
+     */
+    public function preserve_slug_for_translated_posts($data, $postarr)
+    {
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        
+        // Only process if we're creating a translated post
+        if (!Xf_Translator_Processor::is_creating_translated_post()) {
+            return $data;
+        }
+        
+        // If post_name is set in $postarr, preserve it exactly as provided
+        if (isset($postarr['post_name']) && !empty($postarr['post_name'])) {
+            $data['post_name'] = $postarr['post_name'];
+            error_log('XF Translator: Preserving slug in wp_insert_post_data: ' . $postarr['post_name']);
+        }
+        
+        return $data;
+    }
+
+    /**
+     * Fix translated post slug after insertion
+     * This is a backup method in case WordPress still changes the slug
+     * 
+     * @param int $post_id The post ID
+     * @param WP_Post $post The post object
+     * @param bool $update Whether this is an update
+     */
+    public function fix_translated_post_slug_after_insert($post_id, $post, $update)
+    {
+        // Check if this is a translated post (either by flag or by meta)
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        
+        $is_creating = Xf_Translator_Processor::is_creating_translated_post();
+        
+        // Check if this is a translated post
+        $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+        if (empty($original_post_id)) {
+            $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+        }
+        
+        // Only process if it's a translated post
+        if (!$original_post_id && !$is_creating) {
+            return;
+        }
+        
+        // Get desired slug from meta first, then fallback to original post
+        $desired_slug = get_post_meta($post_id, '_xf_translator_desired_slug', true);
+        
+        if (empty($desired_slug) && $original_post_id) {
+            $original_post = get_post($original_post_id);
+            if ($original_post) {
+                $desired_slug = $original_post->post_name;
+                if (empty($desired_slug)) {
+                    $desired_slug = sanitize_title($original_post->post_title);
+                }
+            }
+        }
+        
+        if (!empty($desired_slug) && $post->post_name !== $desired_slug) {
+            error_log('XF Translator: wp_insert_post hook - Fixing slug from ' . $post->post_name . ' to ' . $desired_slug);
+            
+            global $wpdb;
+            $result = $wpdb->update(
+                $wpdb->posts,
+                array('post_name' => $desired_slug),
+                array('ID' => $post_id),
+                array('%s'),
+                array('%d')
+            );
+            
+            if ($result !== false) {
+                clean_post_cache($post_id);
+                wp_cache_delete($post_id, 'posts');
+                delete_option('rewrite_rules');
+                error_log('XF Translator: wp_insert_post hook - Successfully fixed slug to: ' . $desired_slug);
+            } else {
+                error_log('XF Translator: wp_insert_post hook - Failed to fix slug. Error: ' . $wpdb->last_error);
+            }
+        }
+    }
+
+    /**
+     * Handle fixing old translated post slugs
+     * This cleans up existing translated posts that have "-2", "-3", etc. in their slugs
+     */
+    private function handle_fix_old_translated_post_slugs()
+    {
+        $result = $this->fix_existing_translated_post_slugs();
+        
+        if ($result['success']) {
+            add_settings_error(
+                'xf_translator_messages',
+                'xf_translator_slug_fix_success',
+                sprintf(
+                    __('Successfully fixed %d translated post slug(s). %d post(s) were already correct.', 'xf-translator'),
+                    $result['fixed'],
+                    $result['already_correct']
+                ),
+                'success'
+            );
+        } else {
+            add_settings_error(
+                'xf_translator_messages',
+                'xf_translator_slug_fix_error',
+                __('An error occurred while fixing slugs. Please check the debug log for details.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+
+    /**
+     * Fix slugs for existing translated posts that have "-2", "-3" suffixes
+     * 
+     * @return array Result array with 'success', 'fixed', 'already_correct', 'errors' keys
+     */
+    public function fix_existing_translated_post_slugs()
+    {
+        global $wpdb;
+        
+        $result = array(
+            'success' => true,
+            'fixed' => 0,
+            'already_correct' => 0,
+            'errors' => array()
+        );
+        
+        // Get all posts that are translations and have slugs with numeric suffixes
+        $translated_posts = $wpdb->get_results(
+            "SELECT p.ID, p.post_name, p.post_type, p.post_status,
+                    pm.meta_value as original_post_id
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+             WHERE pm.meta_key IN ('_xf_translator_original_post_id', '_api_translator_original_post_id')
+             AND pm.meta_value > 0
+             AND p.post_status != 'trash'
+             AND (p.post_name REGEXP '-[0-9]+$' OR p.post_name LIKE '%-2' OR p.post_name LIKE '%-3' OR p.post_name LIKE '%-4' OR p.post_name LIKE '%-5')
+             ORDER BY p.ID ASC"
+        );
+        
+        if (empty($translated_posts)) {
+            error_log('XF Translator: No translated posts with numeric suffixes found.');
+            return $result;
+        }
+        
+        error_log('XF Translator: Found ' . count($translated_posts) . ' translated posts with numeric suffixes. Starting cleanup...');
+        
+        foreach ($translated_posts as $translated_post) {
+            $original_post = get_post($translated_post->original_post_id);
+            
+            if (!$original_post) {
+                $result['errors'][] = sprintf(
+                    'Post ID %d: Original post (ID: %s) not found.',
+                    $translated_post->ID,
+                    $translated_post->original_post_id
+                );
+                error_log('XF Translator: Original post not found for translated post ID: ' . $translated_post->ID . ', Original ID: ' . $translated_post->original_post_id);
+                continue;
+            }
+            
+            // Get the original slug
+            $original_slug = $original_post->post_name;
+            if (empty($original_slug)) {
+                $original_slug = sanitize_title($original_post->post_title);
+            }
+            
+            // Check if the slug needs fixing
+            if ($translated_post->post_name === $original_slug) {
+                $result['already_correct']++;
+                continue;
+            }
+            
+            // Fix the slug
+            $update_result = $wpdb->update(
+                $wpdb->posts,
+                array('post_name' => $original_slug),
+                array('ID' => $translated_post->ID),
+                array('%s'),
+                array('%d')
+            );
+            
+            if ($update_result !== false) {
+                // Update the desired slug meta for future reference
+                update_post_meta($translated_post->ID, '_xf_translator_desired_slug', $original_slug);
+                
+                // Clear caches
+                clean_post_cache($translated_post->ID);
+                wp_cache_delete($translated_post->ID, 'posts');
+                
+                $result['fixed']++;
+                error_log(sprintf(
+                    'XF Translator: Fixed slug for post ID %d from "%s" to "%s"',
+                    $translated_post->ID,
+                    $translated_post->post_name,
+                    $original_slug
+                ));
+            } else {
+                $error_msg = sprintf(
+                    'Post ID %d: Failed to update slug. Database error: %s',
+                    $translated_post->ID,
+                    $wpdb->last_error
+                );
+                $result['errors'][] = $error_msg;
+                error_log('XF Translator: ' . $error_msg);
+                $result['success'] = false;
+            }
+        }
+        
+        // Clear rewrite rules cache
+        delete_option('rewrite_rules');
+        
+        error_log(sprintf(
+            'XF Translator: Slug cleanup completed. Fixed: %d, Already correct: %d, Errors: %d',
+            $result['fixed'],
+            $result['already_correct'],
+            count($result['errors'])
+        ));
+        
+        return $result;
     }
 
 }

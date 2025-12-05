@@ -19,24 +19,7 @@ $processing_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
 $completed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'completed' AND type IN ('NEW', 'EDIT')");
 $failed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'failed' AND type IN ('NEW', 'EDIT')");
 
-// Get pending jobs (only NEW and EDIT types)
-$pending_jobs = $wpdb->get_results(
-    "SELECT * FROM $table_name 
-     WHERE  type IN ('NEW', 'EDIT')
-     ORDER BY id ASC 
-     LIMIT 50",
-    ARRAY_A
-);
-
-// Get recent completed/failed jobs (only NEW and EDIT types)
-$recent_jobs = $wpdb->get_results(
-    "SELECT * FROM $table_name 
-     WHERE status IN ('completed', 'failed', 'processing')
-     AND type IN ('NEW', 'EDIT')
-     ORDER BY id DESC 
-     LIMIT 50",
-    ARRAY_A
-);
+// Jobs are now loaded via AJAX for better performance and pagination
 ?>
 
 <div class="api-translator-section">
@@ -97,12 +80,46 @@ $recent_jobs = $wpdb->get_results(
 </div>
 
 <div class="api-translator-section">
-    <h2><?php _e('Pending Translation Jobs', 'xf-translator'); ?></h2>
+    <h2><?php _e('Translation Jobs', 'xf-translator'); ?></h2>
     
-    <?php if (empty($pending_jobs)) : ?>
-        <p><?php _e('No pending jobs in the queue.', 'xf-translator'); ?></p>
-    <?php else : ?>
-        <table class="wp-list-table widefat fixed striped">
+    <!-- Filters and Search -->
+    <div style="margin: 20px 0; padding: 15px; background: #fff; border: 1px solid #ddd; border-radius: 4px;">
+        <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+            <div>
+                <label for="job-status-filter" style="display: block; margin-bottom: 5px; font-weight: bold;">
+                    <?php _e('Filter by Status:', 'xf-translator'); ?>
+                </label>
+                <select id="job-status-filter" style="min-width: 150px;">
+                    <option value=""><?php _e('All Statuses', 'xf-translator'); ?></option>
+                    <option value="pending"><?php _e('Pending', 'xf-translator'); ?></option>
+                    <option value="processing"><?php _e('Processing', 'xf-translator'); ?></option>
+                    <option value="completed"><?php _e('Completed', 'xf-translator'); ?></option>
+                    <option value="failed"><?php _e('Failed', 'xf-translator'); ?></option>
+                </select>
+            </div>
+            <div style="flex: 1; min-width: 200px;">
+                <label for="job-search" style="display: block; margin-bottom: 5px; font-weight: bold;">
+                    <?php _e('Search by Post Name:', 'xf-translator'); ?>
+                </label>
+                <input type="text" id="job-search" placeholder="<?php esc_attr_e('Enter post name...', 'xf-translator'); ?>" style="width: 100%; max-width: 300px;">
+            </div>
+            <div style="align-self: flex-end;">
+                <button type="button" id="clear-filters" class="button" style="margin-top: 20px;">
+                    <?php _e('Clear Filters', 'xf-translator'); ?>
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Loading indicator -->
+    <div id="jobs-loading" style="text-align: center; padding: 20px; display: none;">
+        <span class="spinner is-active" style="float: none; margin: 0;"></span>
+        <p><?php _e('Loading jobs...', 'xf-translator'); ?></p>
+    </div>
+    
+    <!-- Jobs Table Container -->
+    <div id="jobs-table-container">
+        <table class="wp-list-table widefat fixed striped" id="translation-jobs-table">
             <thead>
                 <tr>
                     <th scope="col"><?php _e('ID', 'xf-translator'); ?></th>
@@ -113,122 +130,33 @@ $recent_jobs = $wpdb->get_results(
                     <th scope="col"><?php _e('Created', 'xf-translator'); ?></th>
                 </tr>
             </thead>
-            <tbody>
-                <?php foreach ($pending_jobs as $job) : ?>
-                    <?php
-                    $post = get_post($job['parent_post_id']);
-                    $post_title = $post ? $post->post_title : __('Post not found', 'xf-translator');
-                    $post_edit_link = $post ? get_edit_post_link($job['parent_post_id']) : '#';
-                    
-                    // Check if translation is completed and get translated post
-                    $translated_post = null;
-                    $translated_post_title = '';
-                    $translated_post_link = '#';
-                    
-                    if ($job['status'] === 'completed' && !empty($job['translated_post_id'])) {
-                        $translated_post = get_post($job['translated_post_id']);
-                        if ($translated_post) {
-                            $translated_post_title = $translated_post->post_title;
-                            $translated_post_link = get_edit_post_link($job['translated_post_id']);
-                        }
-                    }
-                    ?>
-                    <tr>
-                        <td>
-                            <strong>#<?php echo esc_html($job['id']); ?></strong>
-                        </td>
-                        <td>
-                            <?php if ($translated_post && $job['status'] === 'completed') : ?>
-                                <!-- Show translated post if completed -->
-                                <a href="<?php echo esc_url($translated_post_link); ?>" target="_blank" style="font-weight: bold;">
-                                    <?php echo esc_html($translated_post_title); ?>
-                                </a>
-                                <br>
-                                <small style="color: #666;">
-                                    <?php _e('Translated Post ID:', 'xf-translator'); ?> <?php echo esc_html($job['translated_post_id']); ?>
-                                    <?php if ($post) : ?>
-                                        | <?php _e('Original:', 'xf-translator'); ?> 
-                                        <a href="<?php echo esc_url($post_edit_link); ?>" target="_blank" style="color: #666;">
-                                            <?php echo esc_html($post_title); ?>
-                                        </a>
-                                    <?php endif; ?>
-                                </small>
-                            <?php elseif ($post) : ?>
-                                <!-- Show original post if not completed -->
-                                <a href="<?php echo esc_url($post_edit_link); ?>" target="_blank">
-                                    <?php echo esc_html($post_title); ?>
-                                </a>
-                                <br>
-                                <small style="color: #666;"><?php _e('Post ID:', 'xf-translator'); ?> <?php echo esc_html($job['parent_post_id']); ?></small>
-                            <?php else : ?>
-                                <?php echo esc_html($post_title); ?>
-                                <br>
-                                <small style="color: #666;"><?php _e('Post ID:', 'xf-translator'); ?> <?php echo esc_html($job['parent_post_id']); ?></small>
-                            <?php endif; ?>
-                        </td>
-                        <td>
-                            <?php echo esc_html($job['lng']); ?>
-                        </td>
-                        <td>
-                            <span style="padding: 3px 8px; background: #f0f0f0; border-radius: 3px; font-size: 11px;">
-                                <?php echo esc_html($job['type'] ?: 'NEW'); ?>
-                            </span>
-                        </td>
-                        <td>
-                           <?php 
-                            $color="#f0ad4e";
-                            if($job['status']=="pending"){
-                                $color="#f0ad4e";
-                            }
-
-                             if($job['status']=="completed"){
-                                $color="green";
-                            }
-
-                             if($job['status']=="failed"){
-                                $color="red";
-                            }
-
-                            $error_message = isset($job['error_message']) ? $job['error_message'] : '';
-                            
-                            // Set color for processing status
-                            if($job['status']=="processing"){
-                                $color="#0073aa";
-                            }
-                            ?>
-                            <span style="padding: 3px 8px; background: <?php echo $color; ?>; color: #fff; border-radius: 3px; font-size: 11px; margin-right: 5px;">
-                                <?php echo esc_html(ucfirst($job['status'])); ?>
-                            </span>
-                            <?php if($job['status']=="failed") : ?>
-                                <div style="margin-top: 5px;">
-                                    <?php if(!empty($error_message)) : ?>
-                                        <button type="button" 
-                                                class="button button-small view-error-detail" 
-                                                data-error-message="<?php echo esc_attr($error_message); ?>"
-                                                data-queue-id="<?php echo esc_attr($job['id']); ?>"
-                                                style="margin-right: 5px; font-size: 11px;">
-                                            <?php _e('View Detail', 'xf-translator'); ?>
-                                        </button>
-                                    <?php endif; ?>
-                                    <form method="post" action="" style="display: inline-block; margin: 0;">
-                                        <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
-                                        <input type="hidden" name="api_translator_action" value="retry_queue_entry">
-                                        <input type="hidden" name="queue_entry_id" value="<?php echo esc_attr($job['id']); ?>">
-                                        <button type="submit" class="button button-small" style="background: #46b450; color: #fff; border-color: #46b450; font-size: 11px;">
-                                            <?php _e('Retry', 'xf-translator'); ?>
-                                        </button>
-                                    </form>
-                                </div>
-                            <?php endif; ?>
-                        </td>
-                        <td>
-                            <?php echo esc_html($job['created']); ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
+            <tbody id="jobs-table-body">
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 20px;">
+                        <?php _e('Loading jobs...', 'xf-translator'); ?>
+                    </td>
+                </tr>
             </tbody>
         </table>
-    <?php endif; ?>
+    </div>
+    
+    <!-- Pagination -->
+    <div id="jobs-pagination" style="margin-top: 20px; padding: 15px; background: #fff; border: 1px solid #ddd; border-radius: 4px; display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <span id="jobs-pagination-info"></span>
+            </div>
+            <div style="display: flex; gap: 5px;">
+                <button type="button" id="jobs-prev-page" class="button" disabled>
+                    <?php _e('Previous', 'xf-translator'); ?>
+                </button>
+                <span id="jobs-page-numbers" style="display: flex; align-items: center; gap: 5px;"></span>
+                <button type="button" id="jobs-next-page" class="button" disabled>
+                    <?php _e('Next', 'xf-translator'); ?>
+                </button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- <div class="api-translator-section">

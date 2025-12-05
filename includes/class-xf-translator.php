@@ -169,6 +169,8 @@ class Xf_Translator {
         $this->loader->add_action('wp_ajax_xf_save_default_model', $plugin_admin, 'ajax_save_default_model');
         $this->loader->add_action('wp_ajax_xf_check_prefix_availability', $plugin_admin, 'ajax_check_prefix_availability');
         $this->loader->add_action('wp_ajax_xf_check_path_availability', $plugin_admin, 'ajax_check_path_availability');
+        $this->loader->add_action('wp_ajax_xf_get_translation_jobs', $plugin_admin, 'ajax_get_translation_jobs');
+        $this->loader->add_action('wp_ajax_xf_get_existing_jobs', $plugin_admin, 'ajax_get_existing_jobs');
         $this->loader->add_action('wp_ajax_xf_scan_post_meta_fields', $plugin_admin, 'ajax_scan_post_meta_fields');
         $this->loader->add_action('wp_ajax_xf_scan_user_meta_fields', $plugin_admin, 'ajax_scan_user_meta_fields');
         $this->loader->add_action('wp_ajax_xf_translate_user_meta_bulk', $plugin_admin, 'ajax_translate_user_meta_bulk');
@@ -214,6 +216,15 @@ class Xf_Translator {
         
         // Hook to check custom fields after post update (delayed check)
         add_action('xf_translator_check_custom_fields', array($plugin_admin, 'check_custom_fields_after_update'), 10, 1);
+        
+        // Allow duplicate slugs for translated posts - use high priority to run early
+        $this->loader->add_filter('pre_wp_unique_post_slug', $plugin_admin, 'allow_duplicate_slug_for_translated_posts', 5, 5);
+        
+        // Also hook into wp_insert_post_data to preserve slug before WordPress processes it
+        $this->loader->add_filter('wp_insert_post_data', $plugin_admin, 'preserve_slug_for_translated_posts', 5, 2);
+        
+        // Hook after post is inserted to fix slug if WordPress changed it
+        $this->loader->add_action('wp_insert_post', $plugin_admin, 'fix_translated_post_slug_after_insert', 10, 3);
 
 	}
 
