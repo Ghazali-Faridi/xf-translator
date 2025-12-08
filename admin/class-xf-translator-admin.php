@@ -86,7 +86,16 @@ class Xf_Translator_Admin {
 	 *
 	 * @since    1.0.0
 	 */
-	public function enqueue_scripts() {
+	public function enqueue_scripts( $hook ) {
+		// Only load scripts on our plugin pages
+		// Hook name format: toplevel_page_xf-translator
+		// Also check GET parameter as fallback
+		$is_plugin_page = ( strpos( $hook, 'xf-translator' ) !== false ) || 
+		                  ( isset( $_GET['page'] ) && strpos( $_GET['page'], 'xf-translator' ) !== false );
+		
+		if ( ! $is_plugin_page ) {
+			return;
+		}
 
 		/**
 		 * This function is provided for demonstration purposes only.
@@ -100,13 +109,21 @@ class Xf_Translator_Admin {
 		 * class.
 		 */
 
-		wp_enqueue_script( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'js/xf-translator-admin.js', array( 'jquery' ), $this->version, false );
+		wp_enqueue_script( $this->plugin_name, plugin_dir_url( __FILE__ ) . 'js/xf-translator-admin.js', array( 'jquery' ), $this->version, true );
 		
-		// Localize script for AJAX
+		// Localize script for AJAX - ensure this happens after script is enqueued
+		$nonce = wp_create_nonce( 'xf_translator_ajax' );
 		wp_localize_script( $this->plugin_name, 'apiTranslator', array(
 			'ajaxUrl' => admin_url( 'admin-ajax.php' ),
-			'nonce' => wp_create_nonce( 'xf_translator_ajax' )
+			'nonce' => $nonce
 		) );
+		
+		// Debug: Log if WP_DEBUG is enabled
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			error_log( 'XF Translator: Scripts enqueued on hook: ' . $hook );
+			error_log( 'XF Translator: AJAX URL: ' . admin_url( 'admin-ajax.php' ) );
+			error_log( 'XF Translator: Nonce created: ' . ( ! empty( $nonce ) ? 'Yes' : 'No' ) );
+		}
 
 	}
 
@@ -160,6 +177,16 @@ class Xf_Translator_Admin {
      * Handle form submissions
      */
     public function handle_form_submissions() {
+        // Handle continue link (GET request) for ACF bulk translation
+        if (isset($_GET['continue_acf_bulk']) && $_GET['continue_acf_bulk'] == '1' && isset($_GET['offset']) && isset($_GET['batch_size'])) {
+            // Create a fake POST request to process the batch
+            $_POST['api_translator_action'] = 'bulk_translate_acf_fields';
+            $_POST['batch_size'] = (int) $_GET['batch_size'];
+            $_POST['offset'] = (int) $_GET['offset'];
+            // Create nonce for the request
+            $_REQUEST['_wpnonce'] = wp_create_nonce('api_translator_settings');
+        }
+        
         if (!isset($_POST['api_translator_action']) || !check_admin_referer('api_translator_settings', 'api_translator_nonce')) {
             return;
         }
@@ -254,6 +281,14 @@ class Xf_Translator_Admin {
                 
             case 'fix_old_slugs':
                 $this->handle_fix_old_translated_post_slugs();
+                break;
+                
+            case 'bulk_translate_acf_fields':
+                $this->handle_bulk_translate_acf_fields();
+                break;
+                
+            case 'translate_acf_options_fields':
+                $this->handle_translate_acf_options_fields();
                 break;
         }
     }
@@ -4226,9 +4261,19 @@ class Xf_Translator_Admin {
      * AJAX handler to fetch paginated translation jobs (NEW/EDIT types)
      */
     public function ajax_get_translation_jobs() {
-        check_ajax_referer('xf_translator_ajax', 'nonce');
+        // Check nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator AJAX: Invalid nonce for get_translation_jobs');
+            }
+            wp_send_json_error(array('message' => __('Security check failed. Please refresh the page.', 'xf-translator')));
+            return;
+        }
         
         if (!current_user_can('manage_options')) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator AJAX: Unauthorized access attempt for get_translation_jobs');
+            }
             wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
             return;
         }
@@ -4383,9 +4428,19 @@ class Xf_Translator_Admin {
      * AJAX handler to fetch paginated existing post jobs (OLD type)
      */
     public function ajax_get_existing_jobs() {
-        check_ajax_referer('xf_translator_ajax', 'nonce');
+        // Check nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'xf_translator_ajax')) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator AJAX: Invalid nonce for get_existing_jobs');
+            }
+            wp_send_json_error(array('message' => __('Security check failed. Please refresh the page.', 'xf-translator')));
+            return;
+        }
         
         if (!current_user_can('manage_options')) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator AJAX: Unauthorized access attempt for get_existing_jobs');
+            }
             wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
             return;
         }
@@ -4535,29 +4590,75 @@ class Xf_Translator_Admin {
      * @param int $post_parent The post parent ID
      * @return string|null The slug to use, or null to let WordPress make it unique
      */
-    public function allow_duplicate_slug_for_translated_posts($slug, $post_ID, $post_status, $post_type, $post_parent)
+    public function allow_duplicate_slug_for_translated_posts($override_slug, $slug, $post_id, $post_status, $post_type, $post_parent)
     {
+        // WordPress passes: null, $slug, $post_id, $post_status, $post_type, $post_parent
+        // If override_slug is already set by another filter, return it
+        if ($override_slug !== null) {
+            return $override_slug;
+        }
+        
         // Check if we're currently creating a translated post
         require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
         
         $is_creating = Xf_Translator_Processor::is_creating_translated_post();
         
         // Add debug logging
-        error_log('XF Translator: pre_wp_unique_post_slug filter called. Slug: ' . $slug . ', Post ID: ' . $post_ID . ', Status: ' . $post_status . ', Type: ' . $post_type . ', Is creating: ' . ($is_creating ? 'yes' : 'no'));
+        error_log('XF Translator: pre_wp_unique_post_slug filter called. Slug: ' . $slug . ', Post ID: ' . $post_id . ', Status: ' . $post_status . ', Type: ' . $post_type . ', Is creating: ' . ($is_creating ? 'yes' : 'no'));
         
-        if ($is_creating) {
-            // Allow the duplicate slug by returning it
-            // This prevents WordPress from appending "-2", "-3", etc.
-            error_log('XF Translator: Allowing duplicate slug for translated post (flag set): ' . $slug);
-            return $slug;
+        // If slug is empty, try to get it from the post being updated
+        if (empty($slug) && $post_id > 0) {
+            $post = get_post($post_id);
+            if ($post) {
+                $slug = $post->post_name;
+                error_log('XF Translator: Slug was empty, retrieved from post: ' . $slug);
+            }
         }
         
-        // For existing posts that are translated posts, also allow duplicate slugs
-        // Check both by post ID and by checking if it's a translated post
-        if ($post_ID > 0 && is_numeric($post_ID)) {
-            $original_post_id = get_post_meta($post_ID, '_xf_translator_original_post_id', true);
+        // If still empty, try to get from post title
+        if (empty($slug) && $post_id > 0) {
+            $post = get_post($post_id);
+            if ($post && !empty($post->post_title)) {
+                $slug = sanitize_title($post->post_title);
+                error_log('XF Translator: Slug still empty, generated from title: ' . $slug);
+            }
+        }
+        
+        // ONLY allow duplicate slugs if we're CERTAIN this is a translated post being created
+        // We must be very strict here to avoid interfering with original English posts
+        if ($is_creating) {
+            // Double-check: verify this is actually a translated post by checking if we have the flag set
+            // AND if this is a new post (ID = 0) or an existing translated post
+            if ($post_id == 0) {
+                // New post being created - flag is set, so this is a translated post
+                error_log('XF Translator: Allowing duplicate slug for new translated post (flag set, new post): ' . $slug);
+                return $slug;
+            } else {
+                // Existing post - verify it's actually a translated post
+                $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+                if (empty($original_post_id)) {
+                    $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+                }
+                
+                if ($original_post_id) {
+                    // Confirmed: this is an existing translated post being updated
+                    error_log('XF Translator: Allowing duplicate slug for existing translated post (flag + meta check): ' . $slug);
+                    return $slug;
+                } else {
+                    // Flag is set but this is NOT a translated post - this shouldn't happen
+                    // But to be safe, don't interfere - let WordPress handle it
+                    error_log('XF Translator: WARNING - Flag set but post ID ' . $post_id . ' is not a translated post. Allowing WordPress to handle slug.');
+                    return null;
+                }
+            }
+        }
+        
+        // For existing posts that are translated posts (but flag not set - e.g., during updates)
+        // Only allow if we're CERTAIN it's a translated post
+        if ($post_id > 0 && is_numeric($post_id)) {
+            $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
             if (empty($original_post_id)) {
-                $original_post_id = get_post_meta($post_ID, '_api_translator_original_post_id', true);
+                $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
             }
             
             if ($original_post_id) {
@@ -4572,9 +4673,94 @@ class Xf_Translator_Admin {
                 }
                 
                 // If we have a desired slug and it matches what we're trying to set, allow it
+                // BUT only if this is actually a translated post (we already checked above)
                 if (!empty($desired_slug) && $slug === $desired_slug) {
-                    error_log('XF Translator: Allowing duplicate slug for existing translated post (meta check): ' . $slug);
+                    error_log('XF Translator: Allowing duplicate slug for existing translated post (meta check only): ' . $slug);
                     return $slug;
+                }
+            } else {
+                // This is an ORIGINAL English post (not a translated post)
+                // Check if any posts with this slug are translated posts
+                // If all conflicts are with translated posts, allow the original to keep its slug
+                global $wpdb;
+                
+                // Find all posts with this slug (excluding the current post)
+                $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                    "SELECT p.ID 
+                     FROM {$wpdb->posts} p
+                     WHERE p.post_name = %s 
+                     AND p.post_type = %s
+                     AND p.ID != %d
+                     AND p.post_status != 'trash'",
+                    $slug,
+                    $post_type,
+                    $post_id
+                ));
+                
+                if (!empty($conflicting_posts)) {
+                    // Check if all conflicting posts are translated posts
+                    $all_translated = true;
+                    foreach ($conflicting_posts as $conflict_id) {
+                        $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                        get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                        if (!$is_translated) {
+                            // Found a conflict with another original post - let WordPress handle it
+                            $all_translated = false;
+                            break;
+                        }
+                    }
+                    
+                    if ($all_translated) {
+                        // All conflicts are with translated posts - allow original post to keep its slug
+                        error_log('XF Translator: Original post ID ' . $post_id . ' has slug conflicts only with translated posts. Allowing original to keep slug: ' . $slug);
+                        return $slug;
+                    } else {
+                        // Conflict with another original post - let WordPress handle it
+                        error_log('XF Translator: Original post ID ' . $post_id . ' has slug conflict with another original post. Allowing WordPress to handle slug uniqueness.');
+                    }
+                } else {
+                    // No conflicts found - this shouldn't happen if WordPress is checking, but allow it
+                    error_log('XF Translator: Original post ID ' . $post_id . ' - no slug conflicts found. Allowing slug: ' . $slug);
+                    return $slug;
+                }
+            }
+        }
+        
+        // For new original posts (post_id = 0 and flag not set), check if conflicts are only with translated posts
+        if ($post_id == 0 && !$is_creating) {
+            global $wpdb;
+            
+            // Find all posts with this slug
+            $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                "SELECT p.ID 
+                 FROM {$wpdb->posts} p
+                 WHERE p.post_name = %s 
+                 AND p.post_type = %s
+                 AND p.post_status != 'trash'",
+                $slug,
+                $post_type
+            ));
+            
+            if (!empty($conflicting_posts)) {
+                // Check if all conflicting posts are translated posts
+                $all_translated = true;
+                foreach ($conflicting_posts as $conflict_id) {
+                    $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                    get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                    if (!$is_translated) {
+                        // Found a conflict with another original post - let WordPress handle it
+                        $all_translated = false;
+                        break;
+                    }
+                }
+                
+                if ($all_translated) {
+                    // All conflicts are with translated posts - allow new original post to keep its slug
+                    error_log('XF Translator: New original post has slug conflicts only with translated posts. Allowing slug: ' . $slug);
+                    return $slug;
+                } else {
+                    // Conflict with another original post - let WordPress handle it
+                    error_log('XF Translator: New original post has slug conflict with another original post. Allowing WordPress to handle slug uniqueness.');
                 }
             }
         }
@@ -4586,6 +4772,7 @@ class Xf_Translator_Admin {
     /**
      * Preserve slug for translated posts during wp_insert_post_data filter.
      * This runs before the post is saved and ensures the slug isn't changed.
+     * Also handles original posts to prevent -2 suffix when conflicts are only with translated posts.
      * 
      * @param array $data Post data array
      * @param array $postarr Original post data array
@@ -4595,15 +4782,72 @@ class Xf_Translator_Admin {
     {
         require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
         
-        // Only process if we're creating a translated post
-        if (!Xf_Translator_Processor::is_creating_translated_post()) {
+        $is_creating_translated = Xf_Translator_Processor::is_creating_translated_post();
+        
+        // Handle translated posts
+        if ($is_creating_translated) {
+            // If post_name is set in $postarr, preserve it exactly as provided
+            if (isset($postarr['post_name']) && !empty($postarr['post_name'])) {
+                $data['post_name'] = $postarr['post_name'];
+                error_log('XF Translator: Preserving slug in wp_insert_post_data for translated post: ' . $postarr['post_name']);
+            }
             return $data;
         }
         
-        // If post_name is set in $postarr, preserve it exactly as provided
-        if (isset($postarr['post_name']) && !empty($postarr['post_name'])) {
-            $data['post_name'] = $postarr['post_name'];
-            error_log('XF Translator: Preserving slug in wp_insert_post_data: ' . $postarr['post_name']);
+        // Handle original posts: if slug is being set and it might conflict with translated posts,
+        // we need to ensure WordPress doesn't add -2
+        if (isset($data['post_name']) && !empty($data['post_name'])) {
+            $post_id = isset($postarr['ID']) ? intval($postarr['ID']) : 0;
+            $post_type = isset($data['post_type']) ? $data['post_type'] : 'post';
+            
+            // Check if this is an original post (not a translated post)
+            if ($post_id > 0) {
+                $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+                if (empty($original_post_id)) {
+                    $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+                }
+                
+                if ($original_post_id) {
+                    // This is a translated post, already handled above
+                    return $data;
+                }
+            }
+            
+            // This is an original post - check if slug conflicts are only with translated posts
+            $slug = $data['post_name'];
+            global $wpdb;
+            
+            $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                "SELECT p.ID 
+                 FROM {$wpdb->posts} p
+                 WHERE p.post_name = %s 
+                 AND p.post_type = %s
+                 AND p.ID != %d
+                 AND p.post_status != 'trash'",
+                $slug,
+                $post_type,
+                $post_id
+            ));
+            
+            if (!empty($conflicting_posts)) {
+                // Check if all conflicts are with translated posts
+                $all_translated = true;
+                foreach ($conflicting_posts as $conflict_id) {
+                    $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                    get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                    if (!$is_translated) {
+                        $all_translated = false;
+                        break;
+                    }
+                }
+                
+                if ($all_translated) {
+                    // All conflicts are with translated posts - preserve the slug as-is
+                    // WordPress will still call wp_unique_post_slug, but our pre_wp_unique_post_slug filter should handle it
+                    error_log('XF Translator: Original post - preserving slug "' . $slug . '" despite conflicts with translated posts');
+                    // The slug is already set correctly in $data, so we just return it
+                }
+            }
         }
         
         return $data;
@@ -4808,6 +5052,968 @@ class Xf_Translator_Admin {
         ));
         
         return $result;
+    }
+
+    /**
+     * Handle bulk translation of ACF fields for existing translated posts
+     */
+    private function handle_bulk_translate_acf_fields()
+    {
+        // Get batch parameters
+        $batch_size = isset($_POST['batch_size']) ? (int) $_POST['batch_size'] : 300;
+        $offset = isset($_POST['offset']) ? (int) $_POST['offset'] : 0;
+        
+        $result = $this->bulk_translate_acf_fields_for_translated_posts($batch_size, $offset);
+        
+        if ($result['success']) {
+            $message = sprintf(
+                __('Batch completed: Processed %d translated post(s). Translated ACF fields for %d post(s). %d post(s) had no translatable ACF fields. %d error(s) occurred.', 'xf-translator'),
+                $result['processed'],
+                $result['translated'],
+                $result['skipped'],
+                count($result['errors'])
+            );
+            
+            // If there are more posts to process, add a continue message
+            if ($result['has_more']) {
+                $remaining = $result['total'] - ($offset + $result['processed']);
+                $message .= ' ' . sprintf(__('Remaining: %d post(s).', 'xf-translator'), $remaining);
+                $message .= ' <a href="?page=xf-translator&tab=acf-translation&continue_acf_bulk=1&offset=' . ($offset + $result['processed']) . '&batch_size=' . $batch_size . '" class="button button-primary" style="margin-left: 10px;">' . __('Continue Next Batch', 'xf-translator') . '</a>';
+            } else {
+                $message .= ' ' . __('All posts have been processed!', 'xf-translator');
+            }
+            
+            add_settings_error(
+                'xf_translator_messages',
+                'xf_translator_acf_bulk_success',
+                $message,
+                'success'
+            );
+        } else {
+            add_settings_error(
+                'xf_translator_messages',
+                'xf_translator_acf_bulk_error',
+                __('An error occurred during bulk ACF field translation. Please check the debug log for details.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+
+    /**
+     * Bulk translate ACF fields for all existing translated posts
+     * 
+     * @param int $batch_size Number of posts to process in this batch (default: 300)
+     * @param int $offset Number of posts to skip (for pagination)
+     * @return array Result array with 'success', 'processed', 'translated', 'skipped', 'errors', 'has_more', 'total' keys
+     */
+    public function bulk_translate_acf_fields_for_translated_posts($batch_size = 300, $offset = 0)
+    {
+        global $wpdb;
+        
+        $result = array(
+            'success' => true,
+            'processed' => 0,
+            'translated' => 0,
+            'skipped' => 0,
+            'errors' => array(),
+            'has_more' => false,
+            'total' => 0
+        );
+        
+        // Get total count first
+        $total_count = $wpdb->get_var(
+            "SELECT COUNT(DISTINCT p.ID)
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+             WHERE pm.meta_key IN ('_xf_translator_original_post_id', '_api_translator_original_post_id')
+             AND pm.meta_value > 0
+             AND p.post_status != 'trash'"
+        );
+        
+        $result['total'] = (int) $total_count;
+        
+        // Get translated posts with limit and offset
+        $translated_posts = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT DISTINCT p.ID, p.post_type, p.post_status,
+                        pm.meta_value as original_post_id
+                 FROM {$wpdb->posts} p
+                 INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+                 WHERE pm.meta_key IN ('_xf_translator_original_post_id', '_api_translator_original_post_id')
+                 AND pm.meta_value > 0
+                 AND p.post_status != 'trash'
+                 ORDER BY p.ID ASC
+                 LIMIT %d OFFSET %d",
+                $batch_size,
+                $offset
+            )
+        );
+        
+        // Check if there are more posts to process
+        $result['has_more'] = ($offset + count($translated_posts)) < $total_count;
+        
+        if (empty($translated_posts)) {
+            error_log('XF Translator: No translated posts found for ACF field translation (offset: ' . $offset . ').');
+            return $result;
+        }
+        
+        error_log('XF Translator: Processing batch - Offset: ' . $offset . ', Batch size: ' . $batch_size . ', Total posts: ' . $total_count . ', Posts in this batch: ' . count($translated_posts));
+        
+        // Get translatable ACF fields from settings
+        $translatable_acf_fields = $this->settings->get_translatable_acf_fields();
+        
+        if (empty($translatable_acf_fields)) {
+            $result['errors'][] = 'No translatable ACF fields configured. Please configure ACF fields in ACF Translation settings first.';
+            error_log('XF Translator: No translatable ACF fields configured.');
+            $result['success'] = false;
+            return $result;
+        }
+        
+        // Get language settings
+        $languages = $this->settings->get('languages', array());
+        
+        // Load translation processor
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        $processor = new Xf_Translator_Processor();
+        
+        foreach ($translated_posts as $translated_post) {
+            $original_post_id = (int) $translated_post->original_post_id;
+            $translated_post_id = (int) $translated_post->ID;
+            
+            // Get language prefix for this translated post
+            $language_prefix = get_post_meta($translated_post_id, '_xf_translator_language', true);
+            if (empty($language_prefix)) {
+                $language_prefix = get_post_meta($translated_post_id, '_api_translator_language', true);
+            }
+            
+            // If still empty, try to determine from meta keys
+            if (empty($language_prefix)) {
+                foreach ($languages as $lang) {
+                    $meta_key = '_xf_translator_translated_post_' . $lang['prefix'];
+                    $check_id = get_post_meta($original_post_id, $meta_key, true);
+                    if ($check_id == $translated_post_id) {
+                        $language_prefix = $lang['prefix'];
+                        break;
+                    }
+                }
+            }
+            
+            if (empty($language_prefix)) {
+                $result['errors'][] = sprintf('Post ID %d: Could not determine language prefix.', $translated_post_id);
+                error_log('XF Translator: Could not determine language prefix for translated post ID: ' . $translated_post_id);
+                $result['processed']++;
+                continue;
+            }
+            
+            // Get language name from prefix
+            $target_language = '';
+            foreach ($languages as $lang) {
+                if ($lang['prefix'] === $language_prefix) {
+                    $target_language = $lang['name'];
+                    break;
+                }
+            }
+            
+            if (empty($target_language)) {
+                $result['errors'][] = sprintf('Post ID %d: Language name not found for prefix: %s', $translated_post_id, $language_prefix);
+                error_log('XF Translator: Language name not found for prefix: ' . $language_prefix);
+                $result['processed']++;
+                continue;
+            }
+            
+            // Get original post
+            $original_post = get_post($original_post_id);
+            if (!$original_post) {
+                $result['errors'][] = sprintf('Post ID %d: Original post (ID: %d) not found.', $translated_post_id, $original_post_id);
+                error_log('XF Translator: Original post not found for translated post ID: ' . $translated_post_id);
+                $result['processed']++;
+                continue;
+            }
+            
+            // Get ACF fields from original post that need translation
+            if (!function_exists('get_fields')) {
+                $result['errors'][] = 'ACF plugin is not active.';
+                $result['success'] = false;
+                break;
+            }
+            
+            $acf_fields_to_translate = array();
+            $original_acf_data = array();
+            
+            foreach ($translatable_acf_fields as $field_key) {
+                $field_value = get_field($field_key, $original_post_id);
+                
+                // Only translate text/numeric fields (skip complex fields)
+                if ($field_value !== null && $field_value !== false && 
+                    !empty($field_value) && (is_string($field_value) || is_numeric($field_value))) {
+                    $original_acf_data['acf_' . $field_key] = $field_value;
+                    $acf_fields_to_translate[] = $field_key;
+                }
+            }
+            
+            if (empty($acf_fields_to_translate)) {
+                error_log('XF Translator: Post ID ' . $translated_post_id . ' - No translatable ACF fields found.');
+                $result['skipped']++;
+                $result['processed']++;
+                continue;
+            }
+            
+            error_log('XF Translator: Post ID ' . $translated_post_id . ' - Translating ' . count($acf_fields_to_translate) . ' ACF field(s): ' . implode(', ', $acf_fields_to_translate));
+            
+            // Translate ACF fields using the processor's translation logic
+            // We'll use reflection to access protected methods, or create queue entries
+            // Actually, simpler: create a temporary translation queue entry and process it
+            // But even simpler: directly use the processor's internal methods via a wrapper
+            
+            // Build translation prompt using processor's method via reflection
+            $reflection = new ReflectionClass($processor);
+            $build_prompt_method = $reflection->getMethod('build_translation_prompt');
+            $build_prompt_method->setAccessible(true);
+            $prompt_data = $build_prompt_method->invoke($processor, $original_acf_data, $target_language);
+            $prompt = $prompt_data['prompt'];
+            $placeholders_map = $prompt_data['placeholders_map'];
+            
+            // Call translation API
+            $call_api_method = $reflection->getMethod('call_translation_api');
+            $call_api_method->setAccessible(true);
+            $translation_response = $call_api_method->invoke($processor, $prompt, $language_prefix, 0, $original_post_id);
+            
+            if (!$translation_response) {
+                $result['errors'][] = sprintf('Post ID %d: Translation API call failed.', $translated_post_id);
+                error_log('XF Translator: Translation API call failed for post ID: ' . $translated_post_id);
+                $result['processed']++;
+                continue;
+            }
+            
+            // Parse translation response
+            $parse_method = $reflection->getMethod('parse_translation_response');
+            $parse_method->setAccessible(true);
+            $translation_result = $parse_method->invoke($processor, $translation_response, $original_acf_data);
+            
+            if (!$translation_result || !is_array($translation_result)) {
+                $result['errors'][] = sprintf('Post ID %d: Failed to parse translation response.', $translated_post_id);
+                error_log('XF Translator: Failed to parse translation for post ID: ' . $translated_post_id);
+                $result['processed']++;
+                continue;
+            }
+            
+            // Update translated post with translated ACF fields
+            $fields_updated = 0;
+            $convert_method = $reflection->getMethod('convert_post_ids_to_translated');
+            $convert_method->setAccessible(true);
+            $restore_method = $reflection->getMethod('restore_html_and_urls');
+            $restore_method->setAccessible(true);
+            
+            foreach ($translation_result as $field_key => $translated_value) {
+                if (strpos($field_key, 'acf_') === 0) {
+                    $acf_field_name = str_replace('acf_', '', $field_key);
+                    
+                    // Restore placeholders (URLs) if they exist
+                    if (isset($placeholders_map[$field_key]) && !empty($placeholders_map[$field_key])) {
+                        $translated_value = $restore_method->invoke($processor, $translated_value, $placeholders_map[$field_key]);
+                    }
+                    
+                    if (function_exists('update_field')) {
+                        // Convert post IDs to translated versions if needed
+                        $converted_value = $convert_method->invoke($processor, $translated_value, $language_prefix);
+                        update_field($acf_field_name, $converted_value, $translated_post_id);
+                        $fields_updated++;
+                        error_log('XF Translator: Updated ACF field "' . $acf_field_name . '" for post ID: ' . $translated_post_id);
+                    }
+                }
+            }
+            
+            if ($fields_updated > 0) {
+                $result['translated']++;
+                error_log('XF Translator: Successfully translated ' . $fields_updated . ' ACF field(s) for post ID: ' . $translated_post_id);
+            } else {
+                $result['errors'][] = sprintf('Post ID %d: No ACF fields were updated.', $translated_post_id);
+            }
+            
+            $result['processed']++;
+            
+            // Add a small delay to avoid overwhelming the API
+            usleep(100000); // 0.1 second delay
+        }
+        
+        error_log(sprintf(
+            'XF Translator: Bulk ACF field translation batch completed. Offset: %d, Batch size: %d, Processed: %d, Translated: %d, Skipped: %d, Errors: %d, Total posts: %d, Has more: %s',
+            $offset,
+            $batch_size,
+            $result['processed'],
+            $result['translated'],
+            $result['skipped'],
+            count($result['errors']),
+            $result['total'],
+            $result['has_more'] ? 'Yes' : 'No'
+        ));
+        
+        return $result;
+    }
+
+    /**
+     * Handle translation of ACF options fields only
+     */
+    private function handle_translate_acf_options_fields()
+    {
+        $result = $this->translate_acf_options_fields();
+        
+        if ($result['success']) {
+            add_settings_error(
+                'xf_translator_messages',
+                'xf_translator_acf_options_success',
+                sprintf(
+                    __('Successfully translated %d ACF options field(s) for %d language(s). %d field(s) were not found in options pages.', 'xf-translator'),
+                    $result['translated'],
+                    $result['languages_processed'],
+                    $result['not_found']
+                ),
+                'success'
+            );
+        } else {
+            add_settings_error(
+                'xf_translator_messages',
+                'xf_translator_acf_options_error',
+                __('An error occurred during ACF options field translation. Please check the debug log for details.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+
+    /**
+     * Translate ACF options fields for all configured languages
+     * 
+     * @return array Result array with 'success', 'translated', 'languages_processed', 'not_found', 'errors' keys
+     */
+    public function translate_acf_options_fields()
+    {
+        $result = array(
+            'success' => true,
+            'translated' => 0,
+            'languages_processed' => 0,
+            'not_found' => 0,
+            'errors' => array()
+        );
+        
+        // Get translatable ACF fields from settings
+        $translatable_acf_fields = $this->settings->get_translatable_acf_fields();
+        
+        if (empty($translatable_acf_fields)) {
+            $result['errors'][] = 'No translatable ACF fields configured. Please configure ACF fields in ACF Translation settings first.';
+            error_log('XF Translator: No translatable ACF fields configured for options translation.');
+            $result['success'] = false;
+            return $result;
+        }
+        
+        // Get all configured languages
+        $languages = $this->settings->get('languages', array());
+        
+        if (empty($languages)) {
+            $result['errors'][] = 'No languages configured.';
+            error_log('XF Translator: No languages configured for options translation.');
+            $result['success'] = false;
+            return $result;
+        }
+        
+        // Get all ACF options pages dynamically
+        $options_pages = $this->get_all_acf_options_pages();
+        error_log('XF Translator: Found ' . count($options_pages) . ' ACF options pages: ' . implode(', ', $options_pages));
+        
+        // Load translation processor
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        $processor = new Xf_Translator_Processor();
+        $reflection = new ReflectionClass($processor);
+        
+        // Process each language
+        foreach ($languages as $lang) {
+            $language_prefix = $lang['prefix'];
+            $target_language = $lang['name'];
+            
+            error_log('XF Translator: Processing ACF options fields for language: ' . $target_language . ' (' . $language_prefix . ')');
+            
+            // Find options fields for each translatable field
+            foreach ($translatable_acf_fields as $field_key) {
+                $found_in_options = false;
+                
+                // Check all options pages
+                foreach ($options_pages as $options_page) {
+                    try {
+                        $option_name = $options_page ? $options_page : 'option';
+                        $field_value = get_field($field_key, $option_name);
+                        
+                        if ($field_value !== null && $field_value !== false && 
+                            !empty($field_value) && (is_string($field_value) || is_numeric($field_value))) {
+                            
+                            $found_in_options = true;
+                            error_log('XF Translator: Found field "' . $field_key . '" in options page "' . $option_name . '"');
+                            
+                            // Translate the field
+                            $acf_data = array('acf_' . $field_key => $field_value);
+                            
+                            // Build translation prompt
+                            $build_prompt_method = $reflection->getMethod('build_translation_prompt');
+                            $build_prompt_method->setAccessible(true);
+                            $prompt_data = $build_prompt_method->invoke($processor, $acf_data, $target_language);
+                            $prompt = $prompt_data['prompt'];
+                            $placeholders_map = $prompt_data['placeholders_map'];
+                            
+                            // Call translation API
+                            $call_api_method = $reflection->getMethod('call_translation_api');
+                            $call_api_method->setAccessible(true);
+                            $translation_result = $call_api_method->invoke($processor, $prompt, $language_prefix, 0, 0);
+                            
+                            if ($translation_result !== false) {
+                                // Parse the translation response
+                                $parse_method = $reflection->getMethod('parse_translation_response');
+                                $parse_method->setAccessible(true);
+                                $parsed_translation = $parse_method->invoke($processor, $translation_result, $acf_data);
+                                
+                                // Restore HTML tags and URLs from placeholders
+                                if (!empty($parsed_translation) && !empty($placeholders_map)) {
+                                    $field_key_with_prefix = 'acf_' . $field_key;
+                                    if (isset($parsed_translation[$field_key_with_prefix]) && isset($placeholders_map[$field_key_with_prefix])) {
+                                        $restore_method = $reflection->getMethod('restore_html_and_urls');
+                                        $restore_method->setAccessible(true);
+                                        $parsed_translation[$field_key_with_prefix] = $restore_method->invoke(
+                                            $processor,
+                                            $parsed_translation[$field_key_with_prefix],
+                                            $placeholders_map[$field_key_with_prefix]
+                                        );
+                                    }
+                                }
+                                
+                                if (isset($parsed_translation['acf_' . $field_key])) {
+                                    $translated_value = $parsed_translation['acf_' . $field_key];
+                                    
+                                    // Normalize option name
+                                    $acf_option_key = ($option_name === 'option' || $option_name === '') ? 'options' : $option_name;
+                                    
+                                    // Save to ACF options with language prefix
+                                    update_field($field_key, $translated_value, $acf_option_key . '_' . $language_prefix);
+                                    
+                                    // Also save to options table with consistent key format
+                                    $xf_option_key = '_xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $language_prefix;
+                                    update_option($xf_option_key, $translated_value);
+                                    update_option($xf_option_key . '_option_name', $option_name);
+                                    
+                                    $result['translated']++;
+                                    error_log('XF Translator: Successfully translated options field "' . $field_key . '" for language ' . $language_prefix);
+                                    
+                                    // Small delay to avoid overwhelming API
+                                    usleep(100000); // 0.1 second
+                                } else {
+                                    $result['errors'][] = sprintf('Field "%s" in options page "%s" for language "%s": Translation parsing failed.', $field_key, $option_name, $target_language);
+                                    error_log('XF Translator: Translation parsing failed for field "' . $field_key . '" in options page "' . $option_name . '"');
+                                }
+                            } else {
+                                $result['errors'][] = sprintf('Field "%s" in options page "%s" for language "%s": Translation API call failed.', $field_key, $option_name, $target_language);
+                                error_log('XF Translator: Translation API call failed for field "' . $field_key . '" in options page "' . $option_name . '"');
+                            }
+                            
+                            break; // Found it, no need to check other option pages
+                        }
+                    } catch (Exception $e) {
+                        error_log('XF Translator: Error checking field "' . $field_key . '" in options page "' . $option_name . '": ' . $e->getMessage());
+                    }
+                }
+                
+                if (!$found_in_options) {
+                    $result['not_found']++;
+                    error_log('XF Translator: Field "' . $field_key . '" not found in any ACF options pages');
+                }
+            }
+            
+            $result['languages_processed']++;
+        }
+        
+        error_log(sprintf(
+            'XF Translator: ACF options field translation completed. Translated: %d, Languages: %d, Not found: %d, Errors: %d',
+            $result['translated'],
+            $result['languages_processed'],
+            $result['not_found'],
+            count($result['errors'])
+        ));
+        
+        return $result;
+    }
+
+    /**
+     * Get all ACF options pages dynamically
+     * 
+     * @return array Array of options page slugs
+     */
+    private function get_all_acf_options_pages()
+    {
+        $options_pages = array('', 'options', 'option'); // Default/common ones
+        
+        // Try to get ACF options pages if function exists
+        if (function_exists('acf_get_options_pages')) {
+            $acf_pages = acf_get_options_pages();
+            if ($acf_pages && is_array($acf_pages)) {
+                foreach ($acf_pages as $slug => $page) {
+                    if (!empty($slug) && !in_array($slug, $options_pages)) {
+                        $options_pages[] = $slug;
+                    }
+                }
+            }
+        }
+        
+        // Also check common option page names
+        $common_pages = array('acf-options', 'footer-options', 'header-options', 'theme-options', 'site-options', 'global-options');
+        foreach ($common_pages as $page) {
+            if (!in_array($page, $options_pages)) {
+                $options_pages[] = $page;
+            }
+        }
+        
+        // Try to detect options pages by checking for fields
+        // This is a fallback if ACF function doesn't work
+        global $wpdb;
+        $option_keys = $wpdb->get_col(
+            "SELECT DISTINCT option_name FROM {$wpdb->options} 
+             WHERE option_name LIKE 'options_%' 
+             OR option_name LIKE 'acf-options_%'
+             OR option_name LIKE 'footer-options_%'
+             OR option_name LIKE 'header-options_%'
+             OR option_name LIKE 'theme-options_%'
+             LIMIT 100"
+        );
+        
+        foreach ($option_keys as $key) {
+            // Extract the options page name (before first underscore)
+            $parts = explode('_', $key, 2);
+            if (!empty($parts[0]) && !in_array($parts[0], $options_pages)) {
+                $options_pages[] = $parts[0];
+            }
+        }
+        
+        return array_unique($options_pages);
+    }
+
+    /**
+     * Fix original post slug after update if WordPress added -2 due to translated post conflicts
+     * 
+     * @param int $post_id Post ID
+     * @param WP_Post $post_after Post object after update
+     * @param WP_Post $post_before Post object before update
+     */
+    public function fix_original_post_slug_after_update($post_id, $post_after, $post_before)
+    {
+        // Skip if this is a translated post
+        $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+        if (empty($original_post_id)) {
+            $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+        }
+        
+        if ($original_post_id) {
+            // This is a translated post, skip
+            return;
+        }
+        
+        // Skip if we're creating a translated post
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        if (Xf_Translator_Processor::is_creating_translated_post()) {
+            return;
+        }
+        
+        // Check if slug was changed and now has -2 suffix
+        $current_slug = $post_after->post_name;
+        $previous_slug = $post_before->post_name;
+        
+        // If slug ends with -2, -3, etc., check if it's because of translated post conflicts
+        if (preg_match('/^(.+)-(\d+)$/', $current_slug, $matches)) {
+            $base_slug = $matches[1];
+            $suffix = $matches[2];
+            
+            // Check if the base slug matches the previous slug or title
+            $expected_slug = sanitize_title($post_after->post_title);
+            if ($base_slug === $previous_slug || $base_slug === $expected_slug) {
+                // WordPress added a suffix - check if conflicts are only with translated posts
+                global $wpdb;
+                
+                $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                    "SELECT p.ID 
+                     FROM {$wpdb->posts} p
+                     WHERE p.post_name = %s 
+                     AND p.post_type = %s
+                     AND p.ID != %d
+                     AND p.post_status != 'trash'",
+                    $base_slug,
+                    $post_after->post_type,
+                    $post_id
+                ));
+                
+                if (!empty($conflicting_posts)) {
+                    // Check if all conflicts are with translated posts
+                    $all_translated = true;
+                    foreach ($conflicting_posts as $conflict_id) {
+                        $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                        get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                        if (!$is_translated) {
+                            $all_translated = false;
+                            break;
+                        }
+                    }
+                    
+                    if ($all_translated) {
+                        // All conflicts are with translated posts - fix the slug
+                        error_log('XF Translator: Original post ID ' . $post_id . ' got slug "' . $current_slug . '" but conflicts are only with translated posts. Fixing to: ' . $base_slug);
+                        
+                        global $wpdb;
+                        $result = $wpdb->update(
+                            $wpdb->posts,
+                            array('post_name' => $base_slug),
+                            array('ID' => $post_id),
+                            array('%s'),
+                            array('%d')
+                        );
+                        
+                        if ($result !== false) {
+                            clean_post_cache($post_id);
+                            wp_cache_delete($post_id, 'posts');
+                            delete_option('rewrite_rules');
+                            error_log('XF Translator: Successfully fixed original post slug from ' . $current_slug . ' to ' . $base_slug);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fix original post slug after save (runs on save_post hook)
+     * 
+     * @param int $post_id Post ID
+     * @param WP_Post $post Post object
+     */
+    public function fix_original_post_slug_after_save($post_id, $post)
+    {
+        // Skip autosaves and revisions
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+            return;
+        }
+        
+        if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) {
+            return;
+        }
+        
+        // Skip if this is a translated post
+        $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+        if (empty($original_post_id)) {
+            $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+        }
+        
+        if ($original_post_id) {
+            // This is a translated post, skip
+            return;
+        }
+        
+        // Skip if we're creating a translated post
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        if (Xf_Translator_Processor::is_creating_translated_post()) {
+            return;
+        }
+        
+        // Get current post (fresh from database to avoid cache issues)
+        global $wpdb;
+        $current_post = $wpdb->get_row($wpdb->prepare(
+            "SELECT ID, post_name, post_title, post_type FROM {$wpdb->posts} WHERE ID = %d",
+            $post_id
+        ));
+        
+        if (!$current_post) {
+            return;
+        }
+        
+        $current_slug = $current_post->post_name;
+        
+        // If slug ends with -2, -3, etc., check if it's because of translated post conflicts
+        if (preg_match('/^(.+)-(\d+)$/', $current_slug, $matches)) {
+            $base_slug = $matches[1];
+            $suffix = $matches[2];
+            
+            error_log('XF Translator: Checking original post ID ' . $post_id . ' with slug "' . $current_slug . '" (base: ' . $base_slug . ', suffix: ' . $suffix . ')');
+            
+            // Check if conflicts are only with translated posts
+            $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                "SELECT p.ID 
+                 FROM {$wpdb->posts} p
+                 WHERE p.post_name = %s 
+                 AND p.post_type = %s
+                 AND p.ID != %d
+                 AND p.post_status != 'trash'",
+                $base_slug,
+                $current_post->post_type,
+                $post_id
+            ));
+            
+            if (!empty($conflicting_posts)) {
+                error_log('XF Translator: Found ' . count($conflicting_posts) . ' conflicting posts with slug: ' . $base_slug);
+                
+                // Check if all conflicts are with translated posts
+                $all_translated = true;
+                $conflict_details = array();
+                foreach ($conflicting_posts as $conflict_id) {
+                    $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                    get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                    $conflict_details[] = 'ID ' . $conflict_id . ' (translated: ' . ($is_translated ? 'yes' : 'no') . ')';
+                    if (!$is_translated) {
+                        $all_translated = false;
+                        error_log('XF Translator: Conflict with original post ID: ' . $conflict_id);
+                        break;
+                    }
+                }
+                
+                error_log('XF Translator: Conflict details: ' . implode(', ', $conflict_details));
+                
+                if ($all_translated) {
+                    // All conflicts are with translated posts - fix the slug
+                    error_log('XF Translator: All conflicts are with translated posts. Fixing original post ID ' . $post_id . ' slug from "' . $current_slug . '" to "' . $base_slug . '"');
+                    
+                    $result = $wpdb->update(
+                        $wpdb->posts,
+                        array('post_name' => $base_slug),
+                        array('ID' => $post_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                    
+                    if ($result !== false) {
+                        // Clear all caches aggressively
+                        clean_post_cache($post_id);
+                        wp_cache_delete($post_id, 'posts');
+                        wp_cache_delete('post_' . $post_id, 'posts');
+                        delete_option('rewrite_rules');
+                        
+                        // Verify the fix
+                        $verify_post = $wpdb->get_var($wpdb->prepare(
+                            "SELECT post_name FROM {$wpdb->posts} WHERE ID = %d",
+                            $post_id
+                        ));
+                        
+                        if ($verify_post === $base_slug) {
+                            error_log('XF Translator: SUCCESS - Fixed original post slug from "' . $current_slug . '" to "' . $base_slug . '" (verified)');
+                        } else {
+                            error_log('XF Translator: WARNING - Fix attempted but verification failed. Current slug: ' . $verify_post);
+                        }
+                    } else {
+                        error_log('XF Translator: ERROR - Failed to update slug. Database error: ' . $wpdb->last_error);
+                    }
+                } else {
+                    error_log('XF Translator: Not fixing - conflict with another original post');
+                }
+            } else {
+                error_log('XF Translator: No conflicts found for base slug: ' . $base_slug);
+            }
+        } else {
+            // Slug doesn't have -2 suffix, but check if it should have been prevented
+            error_log('XF Translator: Original post ID ' . $post_id . ' has slug "' . $current_slug . '" (no suffix)');
+        }
+    }
+
+    /**
+     * Fix original post slug after insert (runs on wp_after_insert_post hook)
+     * This is a newer hook that runs after the post is fully inserted
+     * 
+     * @param int $post_id Post ID
+     * @param WP_Post $post Post object
+     * @param bool $update Whether this is an update
+     * @param WP_Post|null $post_before Post object before update (null for new posts)
+     */
+    public function fix_original_post_slug_after_insert($post_id, $post, $update, $post_before)
+    {
+        // Skip if this is a translated post
+        $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+        if (empty($original_post_id)) {
+            $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+        }
+        
+        if ($original_post_id) {
+            return;
+        }
+        
+        // Skip if we're creating a translated post
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        if (Xf_Translator_Processor::is_creating_translated_post()) {
+            return;
+        }
+        
+        // Use the same logic as fix_original_post_slug_after_save
+        $this->fix_original_post_slug_after_save($post_id, $post);
+    }
+
+    /**
+     * Fix permalink display in admin to show correct slug even if database has -2
+     * 
+     * @param string $html The permalink HTML
+     * @param int $post_id Post ID
+     * @param string $new_title New title
+     * @param string $new_slug New slug
+     * @param WP_Post $post Post object
+     * @return string Modified HTML
+     */
+    public function fix_permalink_display_in_admin($html, $post_id, $new_title, $new_slug, $post)
+    {
+        // Skip if this is a translated post
+        $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+        if (empty($original_post_id)) {
+            $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+        }
+        
+        if ($original_post_id) {
+            return $html;
+        }
+        
+        // Skip if we're creating a translated post
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        if (Xf_Translator_Processor::is_creating_translated_post()) {
+            return $html;
+        }
+        
+        // Get current slug from database
+        global $wpdb;
+        $current_slug = $wpdb->get_var($wpdb->prepare(
+            "SELECT post_name FROM {$wpdb->posts} WHERE ID = %d",
+            $post_id
+        ));
+        
+        if (!$current_slug) {
+            return $html;
+        }
+        
+        // If slug ends with -2, -3, etc., check if it's because of translated post conflicts
+        if (preg_match('/^(.+)-(\d+)$/', $current_slug, $matches)) {
+            $base_slug = $matches[1];
+            
+            // Check if conflicts are only with translated posts
+            $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                "SELECT p.ID 
+                 FROM {$wpdb->posts} p
+                 WHERE p.post_name = %s 
+                 AND p.post_type = %s
+                 AND p.ID != %d
+                 AND p.post_status != 'trash'",
+                $base_slug,
+                $post->post_type,
+                $post_id
+            ));
+            
+            if (!empty($conflicting_posts)) {
+                // Check if all conflicts are with translated posts
+                $all_translated = true;
+                foreach ($conflicting_posts as $conflict_id) {
+                    $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                    get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                    if (!$is_translated) {
+                        $all_translated = false;
+                        break;
+                    }
+                }
+                
+                if ($all_translated) {
+                    // Replace the slug in the HTML with the base slug (without -2)
+                    $html = str_replace('/' . $current_slug . '/', '/' . $base_slug . '/', $html);
+                    $html = str_replace('>' . $current_slug . '<', '>' . $base_slug . '<', $html);
+                    error_log('XF Translator: Fixed permalink display in admin for post ID ' . $post_id . ' from "' . $current_slug . '" to "' . $base_slug . '"');
+                }
+            }
+        }
+        
+        return $html;
+    }
+
+    /**
+     * Fix original post slug when post edit page loads
+     * This runs immediately when the user opens the post edit page
+     */
+    public function fix_original_post_slug_on_edit_page()
+    {
+        global $post;
+        
+        if (!$post || !isset($post->ID)) {
+            return;
+        }
+        
+        $post_id = $post->ID;
+        
+        // Skip if this is a translated post
+        $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+        if (empty($original_post_id)) {
+            $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+        }
+        
+        if ($original_post_id) {
+            return;
+        }
+        
+        // Skip if we're creating a translated post
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        if (Xf_Translator_Processor::is_creating_translated_post()) {
+            return;
+        }
+        
+        // Get current slug from database
+        global $wpdb;
+        $current_slug = $wpdb->get_var($wpdb->prepare(
+            "SELECT post_name FROM {$wpdb->posts} WHERE ID = %d",
+            $post_id
+        ));
+        
+        if (!$current_slug) {
+            return;
+        }
+        
+        // If slug ends with -2, -3, etc., check if it's because of translated post conflicts
+        if (preg_match('/^(.+)-(\d+)$/', $current_slug, $matches)) {
+            $base_slug = $matches[1];
+            
+            // Check if conflicts are only with translated posts
+            $conflicting_posts = $wpdb->get_col($wpdb->prepare(
+                "SELECT p.ID 
+                 FROM {$wpdb->posts} p
+                 WHERE p.post_name = %s 
+                 AND p.post_type = %s
+                 AND p.ID != %d
+                 AND p.post_status != 'trash'",
+                $base_slug,
+                $post->post_type,
+                $post_id
+            ));
+            
+            if (!empty($conflicting_posts)) {
+                // Check if all conflicts are with translated posts
+                $all_translated = true;
+                foreach ($conflicting_posts as $conflict_id) {
+                    $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
+                                    get_post_meta($conflict_id, '_api_translator_original_post_id', true);
+                    if (!$is_translated) {
+                        $all_translated = false;
+                        break;
+                    }
+                }
+                
+                if ($all_translated) {
+                    // All conflicts are with translated posts - fix the slug immediately
+                    error_log('XF Translator: Fixing slug on edit page load for post ID ' . $post_id . ' from "' . $current_slug . '" to "' . $base_slug . '"');
+                    
+                    $result = $wpdb->update(
+                        $wpdb->posts,
+                        array('post_name' => $base_slug),
+                        array('ID' => $post_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                    
+                    if ($result !== false) {
+                        clean_post_cache($post_id);
+                        wp_cache_delete($post_id, 'posts');
+                        wp_cache_delete('post_' . $post_id, 'posts');
+                        delete_option('rewrite_rules');
+                        error_log('XF Translator: Successfully fixed slug on edit page load');
+                    }
+                }
+            }
+        }
     }
 
 }

@@ -92,6 +92,130 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
                         </div>
     </div>
 
+    <!-- Bulk Translate ACF Fields for Existing Translated Posts -->
+    <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+        <h2><?php _e('Translate ACF Fields for Existing Translated Posts', 'xf-translator'); ?></h2>
+        <p>
+            <?php _e('This tool will translate ACF fields for existing translated posts in batches. It will find all translated posts and translate their ACF fields (like "top_quote") that were previously just copied from the original posts.', 'xf-translator'); ?>
+        </p>
+        <p class="description" style="color: #d63638; font-weight: 600;">
+            <?php _e('⚠️ Important: This will use your API credits to translate ACF fields. Posts will be processed in batches of 300 to avoid timeouts. Make sure you have configured translatable ACF fields above before running this.', 'xf-translator'); ?>
+        </p>
+        
+        <?php
+        // Check if this is a continuation
+        $is_continuation = isset($_GET['continue_acf_bulk']) && $_GET['continue_acf_bulk'] == '1';
+        $current_offset = isset($_GET['offset']) ? (int) $_GET['offset'] : 0;
+        $batch_size = isset($_GET['batch_size']) ? (int) $_GET['batch_size'] : 300;
+        
+        if ($is_continuation) {
+            echo '<div class="notice notice-info" style="margin: 15px 0;"><p>';
+            echo sprintf(__('Continuing from post %d. Processing next batch of %d posts...', 'xf-translator'), $current_offset, $batch_size);
+            echo '</p></div>';
+        }
+        ?>
+        
+        <form method="post" action="" style="margin-top: 15px;">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="bulk_translate_acf_fields">
+            <input type="hidden" name="batch_size" value="<?php echo esc_attr($batch_size); ?>">
+            <input type="hidden" name="offset" value="<?php echo esc_attr($current_offset); ?>">
+            
+            <table class="form-table">
+                <tr>
+                    <th scope="row">
+                        <label for="batch_size_input"><?php _e('Batch Size', 'xf-translator'); ?></label>
+                    </th>
+                    <td>
+                        <input type="number" 
+                               id="batch_size_input" 
+                               name="batch_size" 
+                               value="<?php echo esc_attr($batch_size); ?>" 
+                               min="50" 
+                               max="500" 
+                               step="50"
+                               style="width: 100px;">
+                        <p class="description"><?php _e('Number of posts to process per batch (recommended: 300).', 'xf-translator'); ?></p>
+                    </td>
+                </tr>
+            </table>
+            
+            <button type="submit" 
+                    class="button button-primary" 
+                    onclick="return confirm('<?php 
+                        if ($is_continuation) {
+                            esc_attr_e('This will continue translating ACF fields for the next batch of translated posts. Continue?', 'xf-translator');
+                        } else {
+                            esc_attr_e('This will translate ACF fields for existing translated posts in batches. This may take a long time and use API credits. Are you sure you want to continue?', 'xf-translator');
+                        }
+                    ?>');">
+                <?php 
+                if ($is_continuation) {
+                    _e('Continue Next Batch', 'xf-translator');
+                } else {
+                    _e('Start Translating ACF Fields (First Batch)', 'xf-translator');
+                }
+                ?>
+            </button>
+        </form>
+        
+        <?php
+        // Show admin notices if any
+        settings_errors('xf_translator_messages');
+        ?>
+    </div>
+
+    <!-- Translate ACF Options Fields Only -->
+    <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff3cd; border: 1px solid #ffc107; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+        <h2><?php _e('Translate ACF Options Fields', 'xf-translator'); ?></h2>
+        <p>
+            <?php _e('This tool will translate ACF fields that are stored in ACF Options Pages (not attached to individual posts). These fields appear on all posts/pages, like "default_top_quote" or global site settings.', 'xf-translator'); ?>
+        </p>
+        <p class="description" style="color: #856404; font-weight: 600;">
+            <?php _e('⚠️ Important: This will translate options fields for ALL configured languages. Make sure you have configured translatable ACF fields above before running this.', 'xf-translator'); ?>
+        </p>
+        
+        <?php
+        // Show which fields are configured
+        $translatable_acf_fields = $settings->get_translatable_acf_fields();
+        if (!empty($translatable_acf_fields)) {
+            echo '<div style="background: #fff; padding: 15px; border: 1px solid #ddd; margin: 15px 0; border-radius: 3px;">';
+            echo '<strong>' . __('Configured ACF Fields:', 'xf-translator') . '</strong> ';
+            echo '<span style="color: #666;">' . implode(', ', array_map('esc_html', $translatable_acf_fields)) . '</span>';
+            echo '</div>';
+        }
+        
+        // Show which languages will be processed
+        $languages = $settings->get('languages', array());
+        if (!empty($languages)) {
+            echo '<div style="background: #fff; padding: 15px; border: 1px solid #ddd; margin: 15px 0; border-radius: 3px;">';
+            echo '<strong>' . __('Languages to translate:', 'xf-translator') . '</strong> ';
+            $lang_names = array();
+            foreach ($languages as $lang) {
+                $lang_names[] = $lang['name'] . ' (' . $lang['prefix'] . ')';
+            }
+            echo '<span style="color: #666;">' . implode(', ', array_map('esc_html', $lang_names)) . '</span>';
+            echo '</div>';
+        }
+        ?>
+        
+        <form method="post" action="" style="margin-top: 15px;">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="translate_acf_options_fields">
+            <button type="submit" 
+                    class="button button-primary" 
+                    style="background: #ffc107; border-color: #ffc107; color: #000; font-weight: 600;"
+                    onclick="return confirm('<?php esc_attr_e('This will translate ACF options fields for all configured languages. This will use API credits. Are you sure you want to continue?', 'xf-translator'); ?>');">
+                <?php _e('Translate ACF Options Fields for All Languages', 'xf-translator'); ?>
+            </button>
+        </form>
+        
+        <?php
+        // Show admin notices if any
+        settings_errors('xf_translator_messages');
+        ?>
+    </div>
+
     <!-- Step 2: Select Fields and Language -->
     <!-- <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
         <h3><?php _e('Select Fields and Language', 'xf-translator'); ?></h3>

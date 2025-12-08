@@ -382,7 +382,7 @@ if (!defined('ABSPATH')) {
 </div>
 
 <!-- Slug Cleanup Section -->
-<div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+<!-- <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
     <h2><?php _e('Fix Old Translated Post Slugs', 'xf-translator'); ?></h2>
     <p>
         <?php _e('This tool will fix translated posts that have "-2", "-3", etc. appended to their slugs. It will update them to match the original English post slugs.', 'xf-translator'); ?>
@@ -405,4 +405,4 @@ if (!defined('ABSPATH')) {
     // Show admin notices if any
     settings_errors('xf_translator_messages');
     ?>
-</div>
+</div> -->

@@ -159,6 +159,290 @@ $failed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 
     </div>
 </div>
 
+<!-- Inline Script for Translation Jobs Table (Fallback if external JS doesn't load) -->
+<script type="text/javascript">
+(function() {
+    'use strict';
+    
+    // Check if jQuery is available
+    if (typeof jQuery === 'undefined') {
+        console.error('XF Translator: jQuery is not loaded');
+        return;
+    }
+    
+    var $ = jQuery;
+    
+    // Wait for DOM to be ready
+    $(document).ready(function() {
+        console.log('XF Translator Queue Tab: Inline script executing');
+        
+        // Check if apiTranslator is defined (from external script)
+        if (typeof apiTranslator === 'undefined') {
+            console.warn('XF Translator: apiTranslator not defined, creating fallback');
+            // Create fallback apiTranslator object
+            window.apiTranslator = {
+                ajaxUrl: '<?php echo esc_js(admin_url('admin-ajax.php')); ?>',
+                nonce: '<?php echo esc_js(wp_create_nonce('xf_translator_ajax')); ?>'
+            };
+            console.log('XF Translator: Fallback apiTranslator created', window.apiTranslator);
+        }
+        
+        // Initialize translation jobs if table exists
+        if ($('#translation-jobs-table').length) {
+            console.log('XF Translator: Found translation jobs table, will initialize via external script or fallback');
+            
+            // If external script hasn't loaded after 1 second, use fallback
+            setTimeout(function() {
+                if ($('#jobs-table-body').html().indexOf('Loading jobs...') !== -1 && typeof loadTranslationJobs === 'undefined') {
+                    console.log('XF Translator: External script not loaded, using inline fallback');
+                    loadTranslationJobsInline();
+                }
+            }, 1000);
+        }
+        
+        // State management
+        var translationJobsState = {
+            currentPage: 1,
+            perPage: 50,
+            status: '',
+            search: ''
+        };
+        
+        function escapeHtml(text) {
+            if (!text) return '';
+            var map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.toString().replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
+        
+        function loadTranslationJobsInline() {
+            $('#jobs-loading').show();
+            $('#jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px;">Loading jobs...</td></tr>');
+            
+            $.ajax({
+                url: window.apiTranslator.ajaxUrl,
+                type: 'POST',
+                data: {
+                    action: 'xf_get_translation_jobs',
+                    page: translationJobsState.currentPage,
+                    per_page: translationJobsState.perPage,
+                    status: translationJobsState.status,
+                    search: translationJobsState.search,
+                    nonce: window.apiTranslator.nonce
+                },
+                success: function(response) {
+                    $('#jobs-loading').hide();
+                    console.log('XF Translator: AJAX response received', response);
+                    
+                    if (response && response.success && response.data && response.data.jobs) {
+                        renderTranslationJobsTable(response.data.jobs);
+                        if (response.data.pagination) {
+                            renderTranslationJobsPagination(response.data.pagination);
+                        }
+                    } else {
+                        var errorMsg = response && response.data && response.data.message ? response.data.message : 'Failed to load jobs';
+                        $('#jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232;">' + errorMsg + '</td></tr>');
+                        $('#jobs-pagination').hide();
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#jobs-loading').hide();
+                    console.error('XF Translator: AJAX error', {status: status, error: error, xhr: xhr});
+                    $('#jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232;">Error loading jobs. Status: ' + xhr.status + '</td></tr>');
+                    $('#jobs-pagination').hide();
+                }
+            });
+        }
+        
+        function renderTranslationJobsTable(jobs) {
+            var html = '';
+            if (jobs.length === 0) {
+                html = '<tr><td colspan="6" style="text-align: center; padding: 20px;">No jobs found.</td></tr>';
+            } else {
+                jobs.forEach(function(job) {
+                    var postCell = '';
+                    if (job.translated_post_title && job.status === 'completed') {
+                        postCell = '<a href="' + job.translated_post_link + '" target="_blank" style="font-weight: bold;">' + 
+                            escapeHtml(job.translated_post_title) + '</a><br>' +
+                            '<small style="color: #666;">Translated Post ID: ' + job.translated_post_id;
+                        if (job.post_title) {
+                            postCell += ' | Original: <a href="' + job.post_edit_link + '" target="_blank" style="color: #666;">' + 
+                                escapeHtml(job.post_title) + '</a>';
+                        }
+                        postCell += '</small>';
+                    } else if (job.post_edit_link !== '#') {
+                        postCell = '<a href="' + job.post_edit_link + '" target="_blank">' + 
+                            escapeHtml(job.post_title || 'Post not found') + '</a><br>' +
+                            '<small style="color: #666;">Post ID: ' + job.parent_post_id + '</small>';
+                    } else {
+                        postCell = escapeHtml(job.post_title || 'Post not found') + '<br>' +
+                            '<small style="color: #666;">Post ID: ' + job.parent_post_id + '</small>';
+                    }
+                    
+                    var statusActions = '';
+                    if (job.status === 'failed') {
+                        statusActions = '<div style="margin-top: 5px;">';
+                        if (job.error_message) {
+                            statusActions += '<button type="button" class="button button-small view-error-detail" ' +
+                                'data-error-message="' + escapeHtml(job.error_message) + '" ' +
+                                'data-queue-id="' + job.id + '" style="margin-right: 5px; font-size: 11px;">View Detail</button>';
+                        }
+                        statusActions += '<form method="post" action="" style="display: inline-block; margin: 0;">' +
+                            '<input type="hidden" name="api_translator_action" value="retry_queue_entry">' +
+                            '<input type="hidden" name="queue_entry_id" value="' + job.id + '">' +
+                            '<input type="hidden" name="api_translator_nonce" value="' + $('input[name="api_translator_nonce"]').val() + '">' +
+                            '<button type="submit" class="button button-small" style="background: #46b450; color: #fff; border-color: #46b450; font-size: 11px;">Retry</button>' +
+                            '</form></div>';
+                    }
+                    
+                    html += '<tr>' +
+                        '<td><strong>#' + job.id + '</strong></td>' +
+                        '<td>' + postCell + '</td>' +
+                        '<td>' + escapeHtml(job.lng || '') + '</td>' +
+                        '<td><span style="padding: 3px 8px; background: #f0f0f0; border-radius: 3px; font-size: 11px;">' + 
+                            escapeHtml(job.type || 'NEW') + '</span></td>' +
+                        '<td><span style="padding: 3px 8px; background: ' + job.status_color + '; color: #fff; border-radius: 3px; font-size: 11px; margin-right: 5px;">' + 
+                            escapeHtml(job.status ? job.status.charAt(0).toUpperCase() + job.status.slice(1) : '') + '</span>' + statusActions + '</td>' +
+                        '<td>' + escapeHtml(job.created || '') + '</td>' +
+                        '</tr>';
+                });
+            }
+            $('#jobs-table-body').html(html);
+        }
+        
+        function renderTranslationJobsPagination(pagination) {
+            var $pagination = $('#jobs-pagination');
+            var $info = $('#jobs-pagination-info');
+            var $prev = $('#jobs-prev-page');
+            var $next = $('#jobs-next-page');
+            var $pageNumbers = $('#jobs-page-numbers');
+            
+            if (!pagination || pagination.total_pages <= 1) {
+                $pagination.hide();
+                return;
+            }
+            
+            $pagination.show();
+            
+            var start = (pagination.current_page - 1) * pagination.per_page + 1;
+            var end = Math.min(pagination.current_page * pagination.per_page, pagination.total_items);
+            $info.text('Showing ' + start + ' - ' + end + ' of ' + pagination.total_items + ' jobs');
+            
+            $prev.prop('disabled', pagination.current_page <= 1);
+            $next.prop('disabled', pagination.current_page >= pagination.total_pages);
+            
+            // Render page numbers
+            var html = '';
+            var startPage = Math.max(1, pagination.current_page - 2);
+            var endPage = Math.min(pagination.total_pages, pagination.current_page + 2);
+            
+            if (startPage > 1) {
+                html += '<button type="button" class="button jobs-page-btn" data-page="1">1</button>';
+                if (startPage > 2) {
+                    html += '<span>...</span>';
+                }
+            }
+            
+            for (var i = startPage; i <= endPage; i++) {
+                if (i === pagination.current_page) {
+                    html += '<button type="button" class="button button-primary" disabled>' + i + '</button>';
+                } else {
+                    html += '<button type="button" class="button jobs-page-btn" data-page="' + i + '">' + i + '</button>';
+                }
+            }
+            
+            if (endPage < pagination.total_pages) {
+                if (endPage < pagination.total_pages - 1) {
+                    html += '<span>...</span>';
+                }
+                html += '<button type="button" class="button jobs-page-btn" data-page="' + pagination.total_pages + '">' + pagination.total_pages + '</button>';
+            }
+            
+            $pageNumbers.html(html);
+        }
+        
+        // Event handlers for filters and pagination
+        $('#job-status-filter').on('change', function() {
+            translationJobsState.status = $(this).val();
+            translationJobsState.currentPage = 1;
+            loadTranslationJobsInline();
+        });
+        
+        var searchTimeout;
+        $('#job-search').on('input', function() {
+            clearTimeout(searchTimeout);
+            var searchValue = $(this).val();
+            searchTimeout = setTimeout(function() {
+                translationJobsState.search = searchValue;
+                translationJobsState.currentPage = 1;
+                loadTranslationJobsInline();
+            }, 500);
+        });
+        
+        $('#clear-filters').on('click', function() {
+            $('#job-status-filter').val('');
+            $('#job-search').val('');
+            translationJobsState.status = '';
+            translationJobsState.search = '';
+            translationJobsState.currentPage = 1;
+            loadTranslationJobsInline();
+        });
+        
+        $(document).on('click', '#jobs-prev-page', function() {
+            if (translationJobsState.currentPage > 1) {
+                translationJobsState.currentPage--;
+                loadTranslationJobsInline();
+            }
+        });
+        
+        $(document).on('click', '#jobs-next-page', function() {
+            translationJobsState.currentPage++;
+            loadTranslationJobsInline();
+        });
+        
+        $(document).on('click', '.jobs-page-btn', function() {
+            translationJobsState.currentPage = parseInt($(this).data('page'));
+            loadTranslationJobsInline();
+        });
+        
+        // Error Detail Modal Handler
+        $(document).on('click', '.view-error-detail', function() {
+            var errorMessage = $(this).data('error-message');
+            var queueId = $(this).data('queue-id');
+            
+            if (!errorMessage || errorMessage.trim() === '') {
+                errorMessage = 'No error message available.';
+            }
+            
+            $('#error-detail-content').html(
+                '<div style="margin-bottom: 15px;"><strong>Queue Entry ID:</strong> #' + queueId + '</div>' +
+                '<div style="margin-bottom: 10px;"><strong>Error Message:</strong></div>' +
+                '<div>' + $('<div>').text(errorMessage).html() + '</div>'
+            );
+            
+            $('#error-detail-modal').fadeIn();
+        });
+        
+        // Close modal handlers
+        $(document).on('click', '.api-translator-modal-close', function() {
+            $('#error-detail-modal').fadeOut();
+        });
+        
+        // Close modal when clicking outside
+        $(document).on('click', '#error-detail-modal', function(e) {
+            if ($(e.target).hasClass('api-translator-modal')) {
+                $(this).fadeOut();
+            }
+        });
+    });
+})();
+</script>
+
 <!-- <div class="api-translator-section">
     <h2><?php _e('Recent Queue Activity', 'xf-translator'); ?></h2>
     

@@ -279,6 +279,342 @@ $failed_old_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
     </div>
 </div>
 
+<!-- Inline Script for Existing Jobs Table (Fallback if external JS doesn't load) -->
+<script type="text/javascript">
+(function() {
+    'use strict';
+    
+    // Check if jQuery is available
+    if (typeof jQuery === 'undefined') {
+        console.error('XF Translator: jQuery is not loaded');
+        return;
+    }
+    
+    var $ = jQuery;
+    
+    // Wait for DOM to be ready
+    $(document).ready(function() {
+        console.log('XF Translator Existing Queue Tab: Inline script executing');
+        
+        // Check if apiTranslator is defined (from external script)
+        if (typeof apiTranslator === 'undefined') {
+            console.warn('XF Translator: apiTranslator not defined, creating fallback');
+            // Create fallback apiTranslator object
+            window.apiTranslator = {
+                ajaxUrl: '<?php echo esc_js(admin_url('admin-ajax.php')); ?>',
+                nonce: '<?php echo esc_js(wp_create_nonce('xf_translator_ajax')); ?>'
+            };
+            console.log('XF Translator: Fallback apiTranslator created', window.apiTranslator);
+        }
+        
+        // Initialize existing jobs if table exists
+        if ($('#existing-translation-jobs-table').length) {
+            console.log('XF Translator: Found existing jobs table, will initialize via external script or fallback');
+            
+            // If external script hasn't loaded after 1 second, use fallback
+            setTimeout(function() {
+                if ($('#existing-jobs-table-body').html().indexOf('Loading jobs...') !== -1 && typeof loadExistingJobs === 'undefined') {
+                    console.log('XF Translator: External script not loaded, using inline fallback');
+                    loadExistingJobsInline();
+                }
+            }, 1000);
+        }
+        
+        // State management
+        var existingJobsState = {
+            currentPage: 1,
+            perPage: 50,
+            status: '',
+            search: ''
+        };
+        
+        function escapeHtmlExisting(text) {
+            if (!text) return '';
+            var map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.toString().replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
+        
+        function loadExistingJobsInline() {
+            $('#existing-jobs-loading').show();
+            $('#existing-jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px;">Loading jobs...</td></tr>');
+            
+            $.ajax({
+                url: window.apiTranslator.ajaxUrl,
+                type: 'POST',
+                data: {
+                    action: 'xf_get_existing_jobs',
+                    page: existingJobsState.currentPage,
+                    per_page: existingJobsState.perPage,
+                    status: existingJobsState.status,
+                    search: existingJobsState.search,
+                    nonce: window.apiTranslator.nonce
+                },
+                success: function(response) {
+                    $('#existing-jobs-loading').hide();
+                    console.log('XF Translator: AJAX response received', response);
+                    
+                    if (response && response.success && response.data && response.data.jobs) {
+                        renderExistingJobsTable(response.data.jobs);
+                        if (response.data.pagination) {
+                            renderExistingJobsPagination(response.data.pagination);
+                        }
+                    } else {
+                        var errorMsg = response && response.data && response.data.message ? response.data.message : 'Failed to load jobs';
+                        $('#existing-jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232;">' + errorMsg + '</td></tr>');
+                        $('#existing-jobs-pagination').hide();
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#existing-jobs-loading').hide();
+                    console.error('XF Translator: AJAX error', {status: status, error: error, xhr: xhr});
+                    $('#existing-jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232;">Error loading jobs. Status: ' + xhr.status + '</td></tr>');
+                    $('#existing-jobs-pagination').hide();
+                }
+            });
+        }
+        
+        function renderExistingJobsTable(jobs) {
+            var html = '';
+            if (jobs.length === 0) {
+                html = '<tr><td colspan="6" style="text-align: center; padding: 20px;">No jobs found.</td></tr>';
+            } else {
+                jobs.forEach(function(job) {
+                    var postCell = '';
+                    if (job.post_edit_link !== '#') {
+                        postCell = '<a href="' + job.post_edit_link + '" target="_blank">' + 
+                            escapeHtmlExisting(job.post_title || 'Post not found') + '</a><br>' +
+                            '<small style="color: #666;">Post ID: ' + job.parent_post_id + '</small>';
+                    } else {
+                        postCell = escapeHtmlExisting(job.post_title || 'Post not found') + '<br>' +
+                            '<small style="color: #666;">Post ID: ' + job.parent_post_id + '</small>';
+                    }
+                    
+                    var statusActions = '';
+                    if (job.status === 'failed') {
+                        statusActions = '<div style="margin-top: 5px;">';
+                        if (job.error_message) {
+                            statusActions += '<button type="button" class="button button-small view-error-detail" ' +
+                                'data-error-message="' + escapeHtmlExisting(job.error_message) + '" ' +
+                                'data-queue-id="' + job.id + '" style="margin-right: 5px; font-size: 11px;">View Detail</button>';
+                        }
+                        statusActions += '<form method="post" action="" style="display: inline-block; margin: 0;">' +
+                            '<input type="hidden" name="api_translator_action" value="retry_queue_entry">' +
+                            '<input type="hidden" name="queue_entry_id" value="' + job.id + '">' +
+                            '<input type="hidden" name="api_translator_nonce" value="' + $('input[name="api_translator_nonce"]').val() + '">' +
+                            '<button type="submit" class="button button-small" style="background: #46b450; color: #fff; border-color: #46b450; font-size: 11px;">Retry</button>' +
+                            '</form></div>';
+                    }
+                    
+                    html += '<tr>' +
+                        '<td><strong>#' + job.id + '</strong></td>' +
+                        '<td>' + postCell + '</td>' +
+                        '<td>' + escapeHtmlExisting(job.lng || '') + '</td>' +
+                        '<td><span style="padding: 3px 8px; background: #f0f0f0; border-radius: 3px; font-size: 11px;">' + 
+                            escapeHtmlExisting(job.type || 'OLD') + '</span></td>' +
+                        '<td><span style="padding: 3px 8px; background: ' + job.status_color + '; color: #fff; border-radius: 3px; font-size: 11px; margin-right: 5px;">' + 
+                            escapeHtmlExisting(job.status ? job.status.charAt(0).toUpperCase() + job.status.slice(1) : '') + '</span>' + statusActions + '</td>' +
+                        '<td>' + escapeHtmlExisting(job.created || '') + '</td>' +
+                        '</tr>';
+                });
+            }
+            $('#existing-jobs-table-body').html(html);
+        }
+        
+        function renderExistingJobsPagination(pagination) {
+            var $pagination = $('#existing-jobs-pagination');
+            var $info = $('#existing-jobs-pagination-info');
+            var $prev = $('#existing-jobs-prev-page');
+            var $next = $('#existing-jobs-next-page');
+            var $pageNumbers = $('#existing-jobs-page-numbers');
+            
+            if (!pagination || pagination.total_pages <= 1) {
+                $pagination.hide();
+                return;
+            }
+            
+            $pagination.show();
+            
+            var start = (pagination.current_page - 1) * pagination.per_page + 1;
+            var end = Math.min(pagination.current_page * pagination.per_page, pagination.total_items);
+            $info.text('Showing ' + start + ' - ' + end + ' of ' + pagination.total_items + ' jobs');
+            
+            $prev.prop('disabled', pagination.current_page <= 1);
+            $next.prop('disabled', pagination.current_page >= pagination.total_pages);
+            
+            // Render page numbers
+            var html = '';
+            var startPage = Math.max(1, pagination.current_page - 2);
+            var endPage = Math.min(pagination.total_pages, pagination.current_page + 2);
+            
+            if (startPage > 1) {
+                html += '<button type="button" class="button existing-jobs-page-btn" data-page="1">1</button>';
+                if (startPage > 2) {
+                    html += '<span>...</span>';
+                }
+            }
+            
+            for (var i = startPage; i <= endPage; i++) {
+                if (i === pagination.current_page) {
+                    html += '<button type="button" class="button button-primary" disabled>' + i + '</button>';
+                } else {
+                    html += '<button type="button" class="button existing-jobs-page-btn" data-page="' + i + '">' + i + '</button>';
+                }
+            }
+            
+            if (endPage < pagination.total_pages) {
+                if (endPage < pagination.total_pages - 1) {
+                    html += '<span>...</span>';
+                }
+                html += '<button type="button" class="button existing-jobs-page-btn" data-page="' + pagination.total_pages + '">' + pagination.total_pages + '</button>';
+            }
+            
+            $pageNumbers.html(html);
+        }
+        
+        // Event handlers for filters and pagination
+        $('#existing-job-status-filter').on('change', function() {
+            existingJobsState.status = $(this).val();
+            existingJobsState.currentPage = 1;
+            loadExistingJobsInline();
+        });
+        
+        var existingSearchTimeout;
+        $('#existing-job-search').on('input', function() {
+            clearTimeout(existingSearchTimeout);
+            var searchValue = $(this).val();
+            existingSearchTimeout = setTimeout(function() {
+                existingJobsState.search = searchValue;
+                existingJobsState.currentPage = 1;
+                loadExistingJobsInline();
+            }, 500);
+        });
+        
+        $('#clear-existing-filters').on('click', function() {
+            $('#existing-job-status-filter').val('');
+            $('#existing-job-search').val('');
+            existingJobsState.status = '';
+            existingJobsState.search = '';
+            existingJobsState.currentPage = 1;
+            loadExistingJobsInline();
+        });
+        
+        $(document).on('click', '#existing-jobs-prev-page', function() {
+            if (existingJobsState.currentPage > 1) {
+                existingJobsState.currentPage--;
+                loadExistingJobsInline();
+            }
+        });
+        
+        $(document).on('click', '#existing-jobs-next-page', function() {
+            existingJobsState.currentPage++;
+            loadExistingJobsInline();
+        });
+        
+        $(document).on('click', '.existing-jobs-page-btn', function() {
+            existingJobsState.currentPage = parseInt($(this).data('page'));
+            loadExistingJobsInline();
+        });
+        
+        // Error Detail Modal Handler
+        $(document).on('click', '.view-error-detail', function() {
+            var errorMessage = $(this).data('error-message');
+            var queueId = $(this).data('queue-id');
+            
+            if (!errorMessage || errorMessage.trim() === '') {
+                errorMessage = 'No error message available.';
+            }
+            
+            $('#error-detail-content').html(
+                '<div style="margin-bottom: 15px;"><strong>Queue Entry ID:</strong> #' + queueId + '</div>' +
+                '<div style="margin-bottom: 10px;"><strong>Error Message:</strong></div>' +
+                '<div>' + $('<div>').text(errorMessage).html() + '</div>'
+            );
+            
+            $('#error-detail-modal').fadeIn();
+        });
+        
+        // Close modal handlers
+        $(document).on('click', '.api-translator-modal-close', function() {
+            $('#error-detail-modal').fadeOut();
+        });
+        
+        // Close modal when clicking outside
+        $(document).on('click', '#error-detail-modal', function(e) {
+            if ($(e.target).hasClass('api-translator-modal')) {
+                $(this).fadeOut();
+            }
+        });
+    });
+})();
+</script>
+
+<!-- Error Detail Modal -->
+<div id="error-detail-modal" class="api-translator-modal" style="display: none;">
+    <div class="api-translator-modal-content" style="max-width: 700px; max-height: 80vh; overflow-y: auto;">
+        <div class="api-translator-modal-header" style="padding: 15px 20px; background: #dc3232; color: #fff; border-bottom: 1px solid #ddd;">
+            <h2 style="margin: 0; font-size: 18px;"><?php _e('Translation Error Details', 'xf-translator'); ?></h2>
+            <span class="api-translator-modal-close" style="float: right; cursor: pointer; font-size: 24px; line-height: 1; opacity: 0.8;">&times;</span>
+        </div>
+        <div class="api-translator-modal-body" style="padding: 20px;">
+            <div id="error-detail-content">
+                <p style="margin: 0; color: #666;"><?php _e('Loading error details...', 'xf-translator'); ?></p>
+            </div>
+        </div>
+        <div class="api-translator-modal-footer" style="padding: 15px 20px; background: #f9f9f9; border-top: 1px solid #ddd; text-align: right;">
+            <button type="button" class="button api-translator-modal-close"><?php _e('Close', 'xf-translator'); ?></button>
+        </div>
+    </div>
+</div>
+
+<style>
+.api-translator-modal {
+    position: fixed;
+    z-index: 100000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.api-translator-modal-content {
+    background-color: #fff;
+    border-radius: 4px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    position: relative;
+}
+
+.api-translator-modal-close {
+    cursor: pointer;
+}
+
+.api-translator-modal-close:hover {
+    opacity: 1 !important;
+}
+
+#error-detail-content {
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #333;
+    background: #f9f9f9;
+    padding: 15px;
+    border-radius: 4px;
+    border-left: 4px solid #dc3232;
+}
+</style>
+
 <!-- <div class="api-translator-section">
     <h2><?php _e('Recent Queue Activity (OLD Posts)', 'xf-translator'); ?></h2>
     

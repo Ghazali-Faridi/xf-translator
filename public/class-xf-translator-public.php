@@ -216,14 +216,28 @@ class Xf_Translator_Public {
 
 	/**
 	 * Render floating language switcher
+	 * 
+	 * Note: This switcher is visible to ALL users (logged in or not) on the frontend.
+	 * It only hides in the WordPress admin area.
 	 */
 	public function render_language_switcher() {
+		// Debug logging
+		$is_logged_in = is_user_logged_in();
+		$is_admin_area = is_admin();
+		$current_url = home_url( add_query_arg( null, null ) );
+		$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : 'unknown';
+		error_log( '[XF-Translator] render_language_switcher() called - User logged in: ' . ( $is_logged_in ? 'YES' : 'NO' ) . ', is_admin: ' . ( $is_admin_area ? 'YES' : 'NO' ) . ', URL: ' . $request_uri );
+		
+		// Only hide in admin area - show for all users on frontend (logged in or not)
 		if ( is_admin() ) {
+			error_log( '[XF-Translator] Blocked: is_admin() returned true' );
 			return;
 		}
 
 		$languages = $this->settings->get( 'languages', array() );
+		error_log( '[XF-Translator] Languages count: ' . count( $languages ) );
 		if ( empty( $languages ) ) {
+			error_log( '[XF-Translator] Blocked: Languages array is empty' );
 			return;
 		}
 
@@ -313,9 +327,13 @@ class Xf_Translator_Public {
 		}
 
 		// Show switcher if we have at least one language option
+		error_log( '[XF-Translator] Items count: ' . count( $items ) );
 		if ( empty( $items ) ) {
+			error_log( '[XF-Translator] Blocked: Items array is empty' );
 			return;
 		}
+		
+		error_log( '[XF-Translator] Proceeding to render switcher HTML' );
 
 		static $assets_printed = false;
 		if ( ! $assets_printed ) {
@@ -323,11 +341,14 @@ class Xf_Translator_Public {
 			?>
 			<style>
 				.xf-lang-switcher {
-					position: fixed;
-					left: 24px;
-					bottom: 24px;
-					z-index: 9999;
+					position: fixed !important;
+					left: 24px !important;
+					bottom: 24px !important;
+					z-index: 9999 !important;
 					font-family: inherit;
+					display: block !important;
+					visibility: visible !important;
+					opacity: 1 !important;
 				}
 				.xf-lang-switcher button {
 					cursor: pointer;
@@ -396,23 +417,36 @@ class Xf_Translator_Public {
 				}
 			</style>
 			<script>
-				document.addEventListener('DOMContentLoaded', function () {
-					document.querySelectorAll('.xf-lang-switcher').forEach(function (switcher) {
-						var toggle = switcher.querySelector('.xf-lang-toggle');
-						if (!toggle) {
-							return;
-						}
-						toggle.addEventListener('click', function (event) {
-							event.preventDefault();
-							switcher.classList.toggle('is-open');
-						});
-						document.addEventListener('click', function (e) {
-							if (!switcher.contains(e.target)) {
-								switcher.classList.remove('is-open');
+				(function() {
+					function initLanguageSwitcher() {
+						var switchers = document.querySelectorAll('.xf-lang-switcher');
+						console.log('[XF-Translator] Found ' + switchers.length + ' language switcher(s)');
+						
+						switchers.forEach(function (switcher) {
+							console.log('[XF-Translator] Initializing switcher:', switcher);
+							var toggle = switcher.querySelector('.xf-lang-toggle');
+							if (!toggle) {
+								console.warn('[XF-Translator] Toggle button not found in switcher');
+								return;
 							}
+							toggle.addEventListener('click', function (event) {
+								event.preventDefault();
+								switcher.classList.toggle('is-open');
+							});
+							document.addEventListener('click', function (e) {
+								if (!switcher.contains(e.target)) {
+									switcher.classList.remove('is-open');
+								}
+							});
 						});
-					});
-				});
+					}
+					
+					if (document.readyState === 'loading') {
+						document.addEventListener('DOMContentLoaded', initLanguageSwitcher);
+					} else {
+						initLanguageSwitcher();
+					}
+				})();
 			</script>
 			<?php
 		}
@@ -428,7 +462,11 @@ class Xf_Translator_Public {
 			$current_label = $items[0]['label'];
 		}
 		?>
-		<div class="xf-lang-switcher" aria-label="<?php esc_attr_e( 'Language switcher', 'xf-translator' ); ?>">
+		<div class="xf-lang-switcher" 
+		     aria-label="<?php esc_attr_e( 'Language switcher', 'xf-translator' ); ?>"
+		     data-xf-debug="rendered"
+		     data-xf-user-logged-in="<?php echo is_user_logged_in() ? 'yes' : 'no'; ?>"
+		     data-xf-items-count="<?php echo count( $items ); ?>">
 			<button class="xf-lang-toggle" type="button">
 				<?php echo esc_html( sprintf( __( 'Language: %s', 'xf-translator' ), $current_label ) ); ?>
 				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -444,6 +482,8 @@ class Xf_Translator_Public {
 			</div>
 		</div>
 		<?php
+		error_log( '[XF-Translator] Switcher HTML rendered successfully. Current label: ' . $current_label . ', Items: ' . count( $items ) . ', User logged in: ' . ( is_user_logged_in() ? 'YES' : 'NO' ) );
+		error_log( '[XF-Translator] HTML output complete. Check page source for .xf-lang-switcher element.' );
 	}
 
 	/**
@@ -772,6 +812,14 @@ class Xf_Translator_Public {
 			return;
 		}
 		
+		// Debug: Log when this function is called
+		static $filter_logged = false;
+		if (!$filter_logged && (defined('WP_DEBUG') && WP_DEBUG)) {
+			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+			error_log('XF Translator: filter_translated_post_query called for: ' . $request_uri);
+			$filter_logged = true;
+		}
+		
 		// Skip for asset requests (CSS, JS, images, etc.) - more thorough check
 		$request_uri = $_SERVER['REQUEST_URI'] ?? '';
 		
@@ -779,9 +827,11 @@ class Xf_Translator_Public {
 		$request_path = parse_url($request_uri, PHP_URL_PATH);
 		$request_path = $request_path ?: $request_uri;
 		
+		// Get language prefix - use get_current_language_prefix() to handle cases where query_var is empty
+		$lang_prefix = $this->get_current_language_prefix();
+		
 		// Check if the requested file actually exists (this handles all asset files)
 		// First check with language prefix removed
-		$lang_prefix = get_query_var('xf_lang_prefix');
 		if ($lang_prefix) {
 			// Remove language prefix from path for file check
 			$request_path_no_prefix = preg_replace('#^/' . preg_quote($lang_prefix, '#') . '/#', '/', $request_path);
@@ -814,13 +864,43 @@ class Xf_Translator_Public {
 			return;
 		}
 		
-		$lang_prefix = get_query_var('xf_lang_prefix');
+		// On English/default pages: Exclude translated posts from the query
 		if (empty($lang_prefix)) {
+			// Get the post by slug
+			$post_name = get_query_var('name');
+			
+			// If this is a singular query (post/page), ensure we exclude translated posts
+			if ($query->is_singular || !empty($post_name) || !empty($query->get('pagename')) || !empty($query->get('p'))) {
+				global $wpdb;
+				
+				// Get all translated post IDs to exclude
+				$translated_post_ids = $wpdb->get_col(
+					"SELECT DISTINCT p.ID 
+					FROM {$wpdb->posts} p
+					INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
+						AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
+					WHERE p.post_status = 'publish'
+					AND p.post_type IN ('post', 'page')
+					AND p.post_type != 'revision'"
+				);
+				
+				if (!empty($translated_post_ids)) {
+					$existing_not_in = $query->get('post__not_in') ?: array();
+					$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+					error_log('XF Translator: Excluding ' . count($translated_post_ids) . ' translated posts from English singular query');
+				}
+			}
+			
 			return;
 		}
 		
 		// Get the post by slug
 		$post_name = get_query_var('name');
+		
+		// Debug: Log what we're looking for
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			error_log('XF Translator filter_translated_post_query: lang_prefix=' . ($lang_prefix ?: 'empty') . ', post_name=' . ($post_name ?: 'empty'));
+		}
 		
 		// If no post name, this is the home/blog archive page with language prefix
 		// Filter the query to show only translated posts for this language
@@ -871,6 +951,10 @@ class Xf_Translator_Public {
 			$post_name
 		));
 		
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			error_log('XF Translator: After exact slug match, translated_post_id=' . ($translated_post_id ?: 'NOT FOUND') . ' for slug "' . $post_name . '" and language "' . $lang_prefix . '"');
+		}
+		
 		// If not found by exact match, try to find by slug that starts with the post_name
 		// This handles cases where WordPress added a suffix like -2, -3, -4, etc.
 		if (!$translated_post_id) {
@@ -898,21 +982,71 @@ class Xf_Translator_Public {
 			));
 		}
 		
+		// If still not found, try finding the original post by slug, then get its translation
+		// This handles cases where the translated post has a completely different slug
+		if (!$translated_post_id) {
+			// First, find the original post by slug
+			$original_post_id = $wpdb->get_var($wpdb->prepare(
+				"SELECT p.ID FROM {$wpdb->posts} p
+				LEFT JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
+					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
+				WHERE p.post_name = %s
+				AND p.post_status = 'publish'
+				AND p.post_type IN ('post', 'page')
+				AND p.post_type != 'revision'
+				AND pm.post_id IS NULL
+				LIMIT 1",
+				$post_name
+			));
+			
+			// If we found the original post, get its translation for this language
+			if ($original_post_id) {
+				$translated_post_id = $wpdb->get_var($wpdb->prepare(
+					"SELECT p.ID FROM {$wpdb->posts} p
+					INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+						AND pm1.meta_key = '_xf_translator_language' 
+						AND pm1.meta_value = %s
+					INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+						AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+						AND pm2.meta_value = %d
+					WHERE p.post_status = 'publish'
+					AND p.post_type IN ('post', 'page')
+					AND p.post_type != 'revision'
+					LIMIT 1",
+					$lang_prefix,
+					$original_post_id
+				));
+				
+				if ($translated_post_id) {
+					error_log('XF Translator: Found Spanish translation by original post ID. Original: ' . $original_post_id . ', Translated: ' . $translated_post_id . ', Language: ' . $lang_prefix);
+				}
+			}
+		}
+		
 		if ($translated_post_id) {
 			$translated_post = get_post($translated_post_id);
-			$query->set('p', $translated_post_id);
-			$query->set('name', ''); // Clear name query to use ID instead
-			$query->is_404 = false; // Prevent 404
-			$query->is_singular = true; // Mark as singular
-			
-			// Set correct query flags based on post type
-			if ($translated_post && $translated_post->post_type === 'page') {
-				$query->is_page = true;
-				$query->is_single = false;
+			if ($translated_post) {
+				$query->set('p', $translated_post_id);
+				$query->set('name', ''); // Clear name query to use ID instead
+				$query->is_404 = false; // Prevent 404
+				$query->is_singular = true; // Mark as singular
+				
+				// Set correct query flags based on post type
+				if ($translated_post->post_type === 'page') {
+					$query->is_page = true;
+					$query->is_single = false;
+				} else {
+					$query->is_single = true;
+					$query->is_page = false;
+				}
+				
+				error_log('XF Translator: Successfully found translated post ID ' . $translated_post_id . ' for language ' . $lang_prefix . ' (original slug: ' . $post_name . ')');
 			} else {
-				$query->is_single = true;
-				$query->is_page = false;
+				error_log('XF Translator: Found translated post ID ' . $translated_post_id . ' but get_post() returned null for language ' . $lang_prefix);
 			}
+		} else {
+			// Log when we can't find a translation
+			error_log('XF Translator: Could not find translated post for slug "' . $post_name . '" and language "' . $lang_prefix . '". The page may show English content or 404.');
 		}
 	}
 	
@@ -1163,7 +1297,15 @@ class Xf_Translator_Public {
 		if (defined('WP_DEBUG') && WP_DEBUG && !$logged) {
 			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
 			$path = parse_url($request_uri, PHP_URL_PATH);
-			error_log('XF Translator Language Detection: REQUEST_URI=' . $request_uri . ', path=' . $path . ', detected_prefix=' . ($lang_prefix ?: 'empty') . ', query_var=' . get_query_var('xf_lang_prefix'));
+			$query_var = get_query_var('xf_lang_prefix');
+			
+			// If we detected a prefix but query var is empty, try to set it manually
+			if (!empty($lang_prefix) && empty($query_var)) {
+				// This might happen if rewrite rules haven't been flushed
+				error_log('XF Translator Language Detection WARNING: Detected prefix "' . $lang_prefix . '" from URL but query_var is empty. Rewrite rules may need flushing.');
+			}
+			
+			error_log('XF Translator Language Detection: REQUEST_URI=' . $request_uri . ', path=' . $path . ', detected_prefix=' . ($lang_prefix ?: 'empty') . ', query_var=' . ($query_var ?: 'empty'));
 			$logged = true;
 		}
 		
@@ -1844,9 +1986,10 @@ class Xf_Translator_Public {
 			return;
 		}
 		
-		// Skip if this is a singular query (handled by filter_translated_post_query)
+		// Skip if this is the main singular query (handled by filter_translated_post_query)
+		// But filter related posts on singular pages (secondary queries)
 		// Check both is_singular flag and if name/pagename/p is set (indicating singular)
-		if ($query->is_singular || $query->get('name') || $query->get('pagename') || $query->get('p')) {
+		if (($query->is_singular || $query->get('name') || $query->get('pagename') || $query->get('p')) && $query->is_main_query()) {
 			return;
 		}
 		
@@ -1949,8 +2092,42 @@ class Xf_Translator_Public {
 			return $posts;
 		}
 		
-		// Skip if this is a singular query
-		if ($query->is_singular) {
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		
+		// For singular queries on English pages, filter out translated posts even from main query
+		// This prevents translated posts from appearing on English post pages
+		if (empty($lang_prefix) && $query->is_singular) {
+			// On English pages, filter out all translated posts
+			global $wpdb;
+			$translated_post_ids = $wpdb->get_col(
+				"SELECT DISTINCT p.ID 
+				FROM {$wpdb->posts} p
+				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
+					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
+				WHERE p.post_status = 'publish'
+				AND p.post_type IN ('post', 'page')
+				AND p.post_type != 'revision'"
+			);
+			
+			if (!empty($translated_post_ids)) {
+				$filtered_posts = array();
+				foreach ($posts as $post) {
+					if (!in_array($post->ID, $translated_post_ids)) {
+						$filtered_posts[] = $post;
+					}
+				}
+				$removed_count = count($posts) - count($filtered_posts);
+				if ($removed_count > 0) {
+					error_log('XF Translator: Filtered singular query on English page. Removed ' . $removed_count . ' translated post(s). Original count: ' . count($posts) . ', Filtered count: ' . count($filtered_posts));
+				}
+				return $filtered_posts;
+			}
+		}
+		
+		// For singular queries on language-prefixed pages, only filter if it's NOT the main query
+		// The main singular query should show the correct translated post (handled by filter_translated_post_query)
+		if ($query->is_singular && $query->is_main_query() && !empty($lang_prefix)) {
 			return $posts;
 		}
 		
@@ -1959,19 +2136,17 @@ class Xf_Translator_Public {
 			return $posts;
 		}
 		
-		// Only filter home/blog archive queries (for "More News" section)
-		// query_posts() modifies the global query, so we need to filter it even if not is_main_query()
-		// But skip widget queries and other secondary queries that aren't home/blog
+		// Filter home/blog archive queries AND related posts on singular pages
 		$is_home_or_archive = $query->is_home || $query->is_front_page() || $query->is_archive;
+		$is_singular_related = $query->is_singular && !$query->is_main_query();
 		
-		// If it's not a main query AND not a home/archive query, skip it (likely a widget)
-		if (!$query->is_main_query() && !$is_home_or_archive) {
+		// If it's not a main query AND not a home/archive query AND not a related post query, skip it (likely a widget)
+		if (!$query->is_main_query() && !$is_home_or_archive && !$is_singular_related) {
 			return $posts;
 		}
 		
-		// Only filter home/blog archive queries (for "More News" section)
-		// Skip other query types
-		if (!$is_home_or_archive) {
+		// Filter home/blog archive queries OR related posts on singular pages
+		if (!$is_home_or_archive && !$is_singular_related) {
 			return $posts;
 		}
 		
@@ -2030,9 +2205,16 @@ class Xf_Translator_Public {
 				$translation_map[intval($row->original_id)] = intval($row->translated_id);
 			}
 			
-			// Debug: Log translation map
-			if ($query->is_home || $query->is_front_page()) {
+			// Debug: Log translation map with details
+			if ($query->is_home || $query->is_front_page() || $query->is_singular) {
 				error_log('XF Translator: Found ' . count($translation_map) . ' translated posts for language: ' . $lang_prefix);
+				if (!empty($translation_map)) {
+					$map_details = array();
+					foreach ($translation_map as $orig_id => $trans_id) {
+						$map_details[] = "orig:$orig_id=>trans:$trans_id";
+					}
+					error_log('XF Translator: Translation map details: ' . implode(', ', $map_details));
+				}
 			}
 			
 			if (!empty($translation_map)) {
@@ -2043,22 +2225,53 @@ class Xf_Translator_Public {
 				foreach ($posts as $post) {
 					// Check if this post is already a translated post (check post meta directly)
 					$post_lang = get_post_meta($post->ID, '_xf_translator_language', true);
+					$original_post_id = get_post_meta($post->ID, '_xf_translator_original_post_id', true);
+					if (!$original_post_id) {
+						$original_post_id = get_post_meta($post->ID, '_api_translator_original_post_id', true);
+					}
+					
 					if ($post_lang === $lang_prefix) {
 						// This is already a translated post for this language, keep it
 						$filtered_posts[] = $post;
+						if ($query->is_home || $query->is_front_page() || $query->is_singular) {
+							error_log('XF Translator: Kept post ' . $post->ID . ' - already translated for language ' . $lang_prefix);
+						}
 					} elseif (isset($translation_map[$post->ID])) {
 						// This is an original post, get its translated version
 						$translated_id = $translation_map[$post->ID];
 						$translated_post = get_post($translated_id);
 						if ($translated_post && $translated_post->post_status === 'publish') {
 							$filtered_posts[] = $translated_post;
+							if ($query->is_home || $query->is_front_page() || $query->is_singular) {
+								error_log('XF Translator: Replaced original post ' . $post->ID . ' with translated post ' . $translated_id . ' for language ' . $lang_prefix);
+							}
+						} else {
+							if ($query->is_home || $query->is_front_page() || $query->is_singular) {
+								error_log('XF Translator: Translation ' . $translated_id . ' for original post ' . $post->ID . ' not found or not published');
+							}
+						}
+					} elseif ($original_post_id && isset($translation_map[$original_post_id])) {
+						// This post is a translation for a different language, but we found the original
+						// Get the translation for the requested language
+						$translated_id = $translation_map[$original_post_id];
+						$translated_post = get_post($translated_id);
+						if ($translated_post && $translated_post->post_status === 'publish') {
+							$filtered_posts[] = $translated_post;
+							if ($query->is_home || $query->is_front_page() || $query->is_singular) {
+								error_log('XF Translator: Replaced post ' . $post->ID . ' (original: ' . $original_post_id . ') with translated post ' . $translated_id . ' for language ' . $lang_prefix);
+							}
+						}
+					} else {
+						// Post is neither translated nor has a translation
+						if ($query->is_home || $query->is_front_page() || $query->is_singular) {
+							$map_keys = array_keys($translation_map);
+							error_log('XF Translator: Skipping post ' . $post->ID . ' - no translation found for language ' . $lang_prefix . ' (post_lang: ' . ($post_lang ?: 'none') . ', original_post_id: ' . ($original_post_id ?: 'none') . ', in_map: ' . (isset($translation_map[$post->ID]) ? 'yes' : 'no') . ', map_has_original: ' . ($original_post_id && isset($translation_map[$original_post_id]) ? 'yes' : 'no') . ', map_keys: ' . implode(',', array_slice($map_keys, 0, 5)) . ')');
 						}
 					}
-					// If post is neither translated nor has a translation, skip it
 				}
 				// Debug: Log how many posts matched
-				if ($query->is_home || $query->is_front_page()) {
-					error_log('XF Translator: Filtered to ' . count($filtered_posts) . ' posts out of ' . count($posts) . ' original posts');
+				if ($query->is_home || $query->is_front_page() || $query->is_singular) {
+					error_log('XF Translator: Filtered to ' . count($filtered_posts) . ' posts out of ' . count($posts) . ' original posts. Translation map has ' . count($translation_map) . ' entries.');
 				}
 				return $filtered_posts;
 			} else {
@@ -2306,6 +2519,22 @@ class Xf_Translator_Public {
 		// Get current language prefix early to determine if we need to process
 		$lang_prefix = $this->get_current_language_prefix();
 		
+		// Validate that the language prefix is actually configured (security check)
+		if (!empty($lang_prefix)) {
+			$languages = $this->settings->get('languages', array());
+			$is_valid_prefix = false;
+			foreach ($languages as $language) {
+				if (isset($language['prefix']) && strtolower($language['prefix']) === strtolower($lang_prefix)) {
+					$is_valid_prefix = true;
+					break;
+				}
+			}
+			if (!$is_valid_prefix) {
+				error_log('XF Translator ACF: Invalid language prefix detected: ' . $lang_prefix . ' - not in configured languages. Falling back to English.');
+				$lang_prefix = ''; // Reset to English/default
+			}
+		}
+		
 		// Debug logging for sbposts__content to see if filter is called
 		if ($field_name === 'sbposts__content') {
 			error_log('XF Translator ACF: filter_acf_load_value called for sbposts__content - post_id: ' . $post_id . ', value empty: ' . (empty($value) ? 'YES' : 'NO') . ', value type: ' . gettype($value) . ', lang_prefix: ' . ($lang_prefix ?: 'empty'));
@@ -2331,6 +2560,35 @@ class Xf_Translator_Public {
 			'sbposts__content',
 			'select_posts',
 		);
+		
+		// For post fields (not options), ensure we're loading from the correct post
+		// When on a translated page, if post_id is the original post, get the translated post's field
+		if (is_numeric($post_id) && !empty($lang_prefix) && !in_array($field_name, $strict_filter_fields, true)) {
+			$current_post_id = (int) $post_id;
+			$original_post_id = $this->get_original_post_id($current_post_id);
+			
+			// If current post is NOT a translated post (no original_post_id meta), but we're on a translated page,
+			// this means we're viewing the original post's page but the URL has a language prefix
+			// OR the filter was called with original post ID when it should use translated post ID
+			if (!$original_post_id) {
+				// This is likely the original post - find the translated version
+				$translated_post_id = $this->get_translated_post_id($current_post_id, $lang_prefix);
+				if ($translated_post_id && $translated_post_id !== $current_post_id && function_exists('get_field')) {
+					// Check if translated post has this field (it should, as fields are copied during translation)
+					// Temporarily remove filter to avoid recursion
+					remove_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10);
+					$translated_value = get_field($field_name, $translated_post_id);
+					add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
+					
+					if ($translated_value !== null && $translated_value !== false && (!empty($translated_value) || is_numeric($translated_value))) {
+						error_log('XF Translator ACF: Loaded field "' . $field_name . '" from translated post ' . $translated_post_id . ' (was called with original post ' . $current_post_id . ')');
+						return $translated_value;
+					}
+				}
+			}
+			// If current post IS a translated post, the value should already be correct (from the translated post)
+			// But if it's empty, it means the field wasn't copied - return empty (don't fallback to original)
+		}
 		
 		// If value is empty and it's not a field we need to process, return early
 		if (empty($value) && !in_array($field_name, $strict_filter_fields, true)) {
@@ -2362,16 +2620,30 @@ class Xf_Translator_Public {
 				$acf_option_key = ($option_name === 'option' || $option_name === '') ? 'options' : $option_name;
 				
 				// Try to get translated value from options table
-				$xf_option_key = '_xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $lang_prefix;
-				error_log('XF Translator ACF Options: Looking for translation with key: ' . $xf_option_key);
+				// Try multiple key formats to handle different storage scenarios
+				$possible_keys = array(
+					'_xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $lang_prefix,
+					'_xf_translator_acf_options_option_' . $field_key . '_' . $lang_prefix, // Alternative format
+					'_xf_translator_acf_options_' . $field_key . '_' . $lang_prefix, // Without options page name
+				);
 				
-				$translated_value = get_option($xf_option_key, '');
+				// Also try with different option page variations
+				if ($acf_option_key === 'options') {
+					$possible_keys[] = '_xf_translator_acf_options_options_' . $field_key . '_' . $lang_prefix;
+					$possible_keys[] = '_xf_translator_acf_options_' . $field_key . '_' . $lang_prefix;
+				}
 				
-				// Also try with 'option' instead of 'options' in case it was saved differently
-				if (empty($translated_value) && $acf_option_key === 'options') {
-					$xf_option_key_alt = '_xf_translator_acf_options_option_' . $field_key . '_' . $lang_prefix;
-					error_log('XF Translator ACF Options: Trying alternative key: ' . $xf_option_key_alt);
-					$translated_value = get_option($xf_option_key_alt, '');
+				$translated_value = '';
+				foreach ($possible_keys as $key_to_try) {
+					$translated_value = get_option($key_to_try, '');
+					if (!empty($translated_value)) {
+						error_log('XF Translator ACF Options: Found translation with key: ' . $key_to_try);
+						break;
+					}
+				}
+				
+				if (empty($translated_value)) {
+					error_log('XF Translator ACF Options: Looking for translation with keys: ' . implode(', ', $possible_keys));
 				}
 				
 				if (!empty($translated_value)) {
@@ -2399,20 +2671,43 @@ class Xf_Translator_Public {
 					}
 				}
 				
-				// Debug: Check what options exist in the database
+				// Debug: Check what options exist in the database for THIS specific language
 				global $wpdb;
-				$all_options = $wpdb->get_results($wpdb->prepare(
-					"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
-					'_xf_translator_acf_options_%' . $field_key . '%'
+				// First, check for options matching the exact language prefix we're looking for
+				$lang_specific_options = $wpdb->get_results($wpdb->prepare(
+					"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND option_name LIKE %s",
+					'_xf_translator_acf_options_%' . $field_key . '%',
+					'%_' . $wpdb->esc_like($lang_prefix)
 				));
-				if (!empty($all_options)) {
-					$option_names = array_map(function($o) { return $o->option_name; }, $all_options);
-					error_log('XF Translator ACF Options: Found related options in DB: ' . implode(', ', $option_names));
+				if (!empty($lang_specific_options)) {
+					$lang_option_names = array_map(function($o) { return $o->option_name; }, $lang_specific_options);
+					error_log('XF Translator ACF Options: Found ' . count($lang_specific_options) . ' options for field "' . $field_key . '" and language "' . $lang_prefix . '": ' . implode(', ', $lang_option_names));
 				} else {
-					error_log('XF Translator ACF Options: No related options found in DB for field: ' . $field_key);
+					error_log('XF Translator ACF Options: No options found for field "' . $field_key . '" and language "' . $lang_prefix . '"');
+					// Check what languages DO have translations for this field (for debugging)
+					$all_field_options = $wpdb->get_results($wpdb->prepare(
+						"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+						'_xf_translator_acf_options_%' . $field_key . '%'
+					));
+					if (!empty($all_field_options)) {
+						$all_option_names = array_map(function($o) { return $o->option_name; }, $all_field_options);
+						error_log('XF Translator ACF Options: Found options for field "' . $field_key . '" in other languages: ' . implode(', ', $all_option_names));
+						// Extract language codes from option names to show what languages are available
+						$available_langs = array();
+						foreach ($all_option_names as $opt_name) {
+							if (preg_match('/_([a-z]{2}(?:-[A-Z]{2})?)$/i', $opt_name, $matches)) {
+								$available_langs[] = $matches[1];
+							}
+						}
+						if (!empty($available_langs)) {
+							$available_langs = array_unique($available_langs);
+							error_log('XF Translator ACF Options: Available languages for field "' . $field_key . '": ' . implode(', ', $available_langs) . ' (requested: ' . $lang_prefix . ')');
+						}
+					}
 				}
 				
-				error_log('XF Translator ACF Options: No translation found for field: ' . $field_key);
+				error_log('XF Translator ACF Options: No translation found for field: ' . $field_key . ' (options page: ' . $acf_option_key . ', lang: ' . $lang_prefix . ')');
+				error_log('XF Translator ACF Options: Expected key format: _xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $lang_prefix);
 			} else {
 				error_log('XF Translator ACF Options: Field key is empty, field array: ' . print_r($field, true));
 			}

@@ -218,13 +218,27 @@ class Xf_Translator {
         add_action('xf_translator_check_custom_fields', array($plugin_admin, 'check_custom_fields_after_update'), 10, 1);
         
         // Allow duplicate slugs for translated posts - use high priority to run early
-        $this->loader->add_filter('pre_wp_unique_post_slug', $plugin_admin, 'allow_duplicate_slug_for_translated_posts', 5, 5);
+        // This filter now handles both translated posts AND original posts to prevent conflicts
+        // WordPress passes 6 arguments: null (override_slug), slug, post_id, post_status, post_type, post_parent
+        $this->loader->add_filter('pre_wp_unique_post_slug', $plugin_admin, 'allow_duplicate_slug_for_translated_posts', 5, 6);
         
         // Also hook into wp_insert_post_data to preserve slug before WordPress processes it
         $this->loader->add_filter('wp_insert_post_data', $plugin_admin, 'preserve_slug_for_translated_posts', 5, 2);
         
         // Hook after post is inserted to fix slug if WordPress changed it
         $this->loader->add_action('wp_insert_post', $plugin_admin, 'fix_translated_post_slug_after_insert', 10, 3);
+        
+        // Hook after post is updated to fix slug for original posts if WordPress added -2 due to translated post conflicts
+        $this->loader->add_action('post_updated', $plugin_admin, 'fix_original_post_slug_after_update', 10, 3);
+        $this->loader->add_action('save_post', $plugin_admin, 'fix_original_post_slug_after_save', 20, 2);
+        $this->loader->add_action('wp_after_insert_post', $plugin_admin, 'fix_original_post_slug_after_insert', 10, 4);
+        
+        // Filter permalink display in admin to show correct slug even if database has -2
+        $this->loader->add_filter('get_sample_permalink_html', $plugin_admin, 'fix_permalink_display_in_admin', 10, 5);
+        
+        // Hook when post edit page loads to fix slug immediately
+        $this->loader->add_action('admin_head-post.php', $plugin_admin, 'fix_original_post_slug_on_edit_page');
+        $this->loader->add_action('admin_head-post-new.php', $plugin_admin, 'fix_original_post_slug_on_edit_page');
 
 	}
 
