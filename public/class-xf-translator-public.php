@@ -245,12 +245,11 @@ class Xf_Translator_Public {
 		}
 
 		// Get current post/page ID - try multiple methods
+		// Skip post ID for home page to avoid using page permalinks (e.g., /home/)
+		$is_home_page = is_home() || is_front_page();
 		$post_id = 0;
-		if ( is_singular() ) {
+		if ( is_singular() && ! $is_home_page ) {
 			$post_id = get_queried_object_id();
-		} elseif ( is_home() || is_front_page() ) {
-			// For home page, try to get the page ID
-			$post_id = get_option( 'page_on_front' ) ?: get_option( 'page_for_posts' );
 		}
 
 		$items = array();
@@ -264,8 +263,8 @@ class Xf_Translator_Public {
 			'active' => empty( $current_lang_prefix ),
 		);
 
-		// If we have a post ID, get translations
-		if ( $post_id ) {
+		// If we have a post ID (and not on home page), get translations
+		if ( $post_id && ! $is_home_page ) {
 			$original_post_id = $this->get_original_post_id( $post_id );
 			
 			// Get current language from post meta if not in URL
@@ -314,7 +313,7 @@ class Xf_Translator_Public {
 				);
 			}
 		} else {
-			// For non-singular pages, show language links to home
+			// For non-singular pages or home page, show language links to home
 			foreach ( $languages as $language ) {
 				if ( empty( $language['prefix'] ) ) {
 					continue;
@@ -2275,6 +2274,20 @@ class Xf_Translator_Public {
 		// Get current language prefix from URL (use the method that detects from URL path)
 		$lang_prefix = $this->get_current_language_prefix();
 		
+		// Get posts_per_page limit from query to respect pagination
+		$posts_per_page = $query->get('posts_per_page');
+		if (empty($posts_per_page) || $posts_per_page == -1) {
+			// Try to get from global query (query_posts() modifies global $wp_query)
+			global $wp_query;
+			if (!empty($wp_query) && !empty($wp_query->query_vars['posts_per_page'])) {
+				$posts_per_page = intval($wp_query->query_vars['posts_per_page']);
+			}
+			// If still not set or unlimited, check the original posts count to maintain same limit
+			if (empty($posts_per_page) || $posts_per_page == -1) {
+				$posts_per_page = count($posts);
+			}
+		}
+		
 		// If post__in is already set (by filter_content_by_language), we still need to filter results
 		// to respect post__not_in exclusions (posts already shown in widgets)
 		$post_in_set = $query->get('post__in');
@@ -2345,6 +2358,12 @@ class Xf_Translator_Public {
 			if (!empty($post_not_in) && is_array($post_not_in) && count($post_not_in) > 20) {
 				// Too many posts in exclusion list, likely accumulated incorrectly
 				// Query all translated posts directly (ignore the exclusion list since it's wrong)
+				// Add LIMIT to respect posts_per_page
+				$limit_clause = '';
+				if (!empty($posts_per_page) && $posts_per_page > 0) {
+					// Add buffer for excluded posts - we'll limit after filtering
+					$limit_clause = ' LIMIT ' . intval($posts_per_page * 2);
+				}
 				$translated_post_ids = $wpdb->get_col($wpdb->prepare(
 					"SELECT DISTINCT p.ID 
 					FROM {$wpdb->posts} p
@@ -2356,7 +2375,7 @@ class Xf_Translator_Public {
 					WHERE p.post_status = 'publish'
 					AND p.post_type IN ('post', 'page')
 					AND p.post_type != 'revision'
-					ORDER BY p.post_date DESC",
+					ORDER BY p.post_date DESC" . $limit_clause,
 					$lang_prefix
 				));
 				
@@ -2395,8 +2414,12 @@ class Xf_Translator_Public {
 								$translated_posts[] = $post;
 							}
 						}
+						// Limit to posts_per_page after filtering
+						if (!empty($posts_per_page) && $posts_per_page > 0 && count($translated_posts) > $posts_per_page) {
+							$translated_posts = array_slice($translated_posts, 0, $posts_per_page);
+						}
 						if ($query->is_home || $query->is_front_page()) {
-							error_log('XF Translator: Querying all translated posts (ignoring large exclusion list of ' . count($post_not_in) . '). Found ' . count($translated_posts) . ' posts after excluding ' . count($widget_post_ids) . ' widget posts.');
+							error_log('XF Translator: Querying all translated posts (ignoring large exclusion list of ' . count($post_not_in) . '). Found ' . count($translated_posts) . ' posts after excluding ' . count($widget_post_ids) . ' widget posts and limiting to ' . $posts_per_page . '.');
 						}
 						return $translated_posts;
 					}
@@ -2435,6 +2458,11 @@ class Xf_Translator_Public {
 					error_log('XF Translator: Converting post__not_in. Original count: ' . count($post_not_in) . ', Translated count: ' . count($post_not_in_clean) . ', IDs: ' . implode(', ', array_slice($post_not_in_clean, 0, 10)));
 				}
 				$placeholders = implode(',', array_fill(0, count($post_not_in_clean), '%d'));
+				// Add LIMIT to respect posts_per_page
+				$limit_clause = '';
+				if (!empty($posts_per_page) && $posts_per_page > 0) {
+					$limit_clause = ' LIMIT ' . intval($posts_per_page);
+				}
 				$sql = $wpdb->prepare(
 					"SELECT DISTINCT p.ID 
 					FROM {$wpdb->posts} p
@@ -2447,7 +2475,7 @@ class Xf_Translator_Public {
 					AND p.post_type IN ('post', 'page')
 					AND p.post_type != 'revision'
 					AND p.ID NOT IN ($placeholders)
-					ORDER BY p.post_date DESC",
+					ORDER BY p.post_date DESC" . $limit_clause,
 					array_merge(array($lang_prefix), $post_not_in_clean)
 				);
 				$translated_post_ids = $wpdb->get_col($sql);
@@ -2460,8 +2488,12 @@ class Xf_Translator_Public {
 							$translated_posts[] = $post;
 						}
 					}
+					// Ensure we don't exceed posts_per_page (should already be limited by SQL, but double-check)
+					if (!empty($posts_per_page) && $posts_per_page > 0 && count($translated_posts) > $posts_per_page) {
+						$translated_posts = array_slice($translated_posts, 0, $posts_per_page);
+					}
 					if ($query->is_home || $query->is_front_page()) {
-						error_log('XF Translator: Querying translated posts directly. Found ' . count($translated_posts) . ' posts after excluding ' . count($post_not_in) . ' posts.');
+						error_log('XF Translator: Querying translated posts directly. Found ' . count($translated_posts) . ' posts after excluding ' . count($post_not_in) . ' posts and limiting to ' . $posts_per_page . '.');
 					}
 					return $translated_posts;
 				} else {
@@ -2592,9 +2624,14 @@ class Xf_Translator_Public {
 					return strtotime($b->post_date) - strtotime($a->post_date);
 				});
 				
+				// Limit to posts_per_page to respect pagination
+				if (!empty($posts_per_page) && $posts_per_page > 0 && count($filtered_posts) > $posts_per_page) {
+					$filtered_posts = array_slice($filtered_posts, 0, $posts_per_page);
+				}
+				
 				// Debug: Log how many posts matched
 				if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-					error_log('XF Translator: Filtered to ' . count($filtered_posts) . ' posts out of ' . count($posts) . ' original posts. Translation map has ' . count($translation_map) . ' entries.');
+					error_log('XF Translator: Filtered to ' . count($filtered_posts) . ' posts out of ' . count($posts) . ' original posts. Translation map has ' . count($translation_map) . ' entries. Limited to ' . $posts_per_page . ' posts.');
 				}
 				return $filtered_posts;
 			} else {
