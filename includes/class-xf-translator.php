@@ -163,6 +163,11 @@ class Xf_Translator {
         $this->loader->add_action('restrict_manage_posts', $plugin_admin, 'add_language_filter_dropdown');
         $this->loader->add_action('pre_get_posts', $plugin_admin, 'filter_posts_by_language');
         
+        // Add translation meta box to post/page edit screen
+        $this->loader->add_action('add_meta_boxes', $plugin_admin, 'add_translation_meta_box');
+        $this->loader->add_action('wp_ajax_xf_translate_post_to_language', $plugin_admin, 'ajax_translate_post_to_language');
+        $this->loader->add_action('wp_ajax_xf_check_translation_status', $plugin_admin, 'ajax_check_translation_status');
+        
         // Register AJAX handlers for test translation
         $this->loader->add_action('wp_ajax_xf_get_post_content', $plugin_admin, 'ajax_get_post_content');
         $this->loader->add_action('wp_ajax_xf_test_translation', $plugin_admin, 'ajax_test_translation');
@@ -191,6 +196,9 @@ class Xf_Translator {
         $this->loader->add_action('save_post', $plugin_admin, 'create_translation_queue_entries', 10, 2);
         $this->loader->add_action('wp_after_insert_post', $plugin_admin, 'create_translation_queue_entries_after_insert', 10, 4);
         $this->loader->add_action('transition_post_status', $plugin_admin, 'create_translation_queue_entries_on_publish', 10, 3);
+        
+        // Hook for processing single translation in background
+        $this->loader->add_action('xf_translator_process_single_translation', $plugin_admin, 'process_single_translation_background', 10, 1);
         
         // Hook to detect post edits and create EDIT queue entries
         $this->loader->add_action('pre_post_update', $plugin_admin, 'store_pre_edit_values', 10, 1);

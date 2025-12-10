@@ -50,6 +50,36 @@ $languages = $settings->get('languages', array());
             </button>
         </form>
     </div>
+    
+    <div class="notice-inline notice-warning" style="margin-bottom: 20px; padding: 15px; border-left: 4px solid #dc3232;">
+        <form method="post" action="" class="xf-delete-menu-form" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;" onsubmit="return confirm('<?php echo esc_js(__('Are you sure you want to delete all translated menus for the selected language? This action cannot be undone.', 'xf-translator')); ?>');">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="delete_translated_menus">
+            <label for="delete-menu-language" style="font-weight: 600; color: #dc3232;"><?php _e('Delete all translated menus for:', 'xf-translator'); ?></label>
+            <select id="delete-menu-language" name="target_language" required>
+                <option value=""><?php _e('Select Language', 'xf-translator'); ?></option>
+                <?php foreach ($languages as $language) : ?>
+                    <option value="<?php echo esc_attr($language['name']); ?>">
+                        <?php echo esc_html($language['name']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <button type="submit" class="button button-secondary" style="background-color: #dc3232; border-color: #dc3232; color: #fff;">
+                <?php _e('Delete Translated Menus', 'xf-translator'); ?>
+            </button>
+        </form>
+    </div>
+    
+    <div class="notice-inline notice-info" style="margin-bottom: 20px; padding: 15px; border-left: 4px solid #0073aa;">
+        <form method="post" action="" class="xf-cleanup-menu-items-form" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;" onsubmit="return confirm('<?php echo esc_js(__('This will remove all translated menu items that appear in English menus. Are you sure?', 'xf-translator')); ?>');">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="cleanup_orphaned_menu_items">
+            <label style="font-weight: 600;"><?php _e('Clean up orphaned translated menu items from English menus:', 'xf-translator'); ?></label>
+            <button type="submit" class="button button-secondary">
+                <?php _e('Clean Up Menu Items', 'xf-translator'); ?>
+            </button>
+        </form>
+    </div>
     <?php endif; ?>
     
     <?php settings_errors('api_translator_messages'); ?>

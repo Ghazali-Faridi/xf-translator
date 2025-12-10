@@ -88,6 +88,14 @@ class Xf_Translator_Menu_Processor {
             update_term_meta($translated_menu_id, '_xf_translator_language', $target_language_prefix);
         } else {
             $translated_menu_id = $translated_menu->term_id;
+            
+            // Clear existing menu items to prevent duplicates when re-translating
+            $existing_items = wp_get_nav_menu_items($translated_menu_id);
+            if (!empty($existing_items)) {
+                foreach ($existing_items as $existing_item) {
+                    wp_delete_post($existing_item->ID, true);
+                }
+            }
         }
         
         // Get menu items

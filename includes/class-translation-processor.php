@@ -81,7 +81,7 @@ class Xf_Translator_Processor
             $query .= $wpdb->prepare(" AND created <= %s", $min_created_time);
         }
 
-        $query .= " ORDER BY id ASC LIMIT 1";
+        $query .= " ORDER BY id DESC LIMIT 1";
 
         // Get the latest pending entry
         $queue_entry = $wpdb->get_row($query, ARRAY_A);

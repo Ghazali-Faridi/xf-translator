@@ -247,6 +247,14 @@ class Xf_Translator_Admin {
                 $this->handle_translate_all_menus();
                 break;
                 
+            case 'delete_translated_menus':
+                $this->handle_delete_translated_menus();
+                break;
+                
+            case 'cleanup_orphaned_menu_items':
+                $this->handle_cleanup_orphaned_menu_items();
+                break;
+                
             case 'translate_menu_item':
                 $this->handle_translate_menu_item();
                 break;
@@ -2307,6 +2315,252 @@ class Xf_Translator_Admin {
         if (!empty($failed_menus)) {
             $failed_list = implode(', ', $failed_menus);
             add_settings_error('api_translator_messages', 'menu_bulk_translation_failed', sprintf(__('Failed menus: %s', 'xf-translator'), $failed_list), 'error');
+        }
+    }
+    
+    /**
+     * Handle delete translated menus for a specific language
+     */
+    private function handle_delete_translated_menus() {
+        if (!isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'delete_menu_error', __('Target language is required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $target_language = sanitize_text_field($_POST['target_language']);
+        $languages = $this->settings->get('languages', array());
+        $target_language_prefix = '';
+        
+        foreach ($languages as $language) {
+            if ($language['name'] === $target_language) {
+                $target_language_prefix = $language['prefix'];
+                break;
+            }
+        }
+        
+        if (empty($target_language_prefix)) {
+            add_settings_error('api_translator_messages', 'delete_menu_error', __('Invalid target language.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $all_menus = wp_get_nav_menus();
+        
+        if (empty($all_menus)) {
+            add_settings_error('api_translator_messages', 'delete_menu_error', __('No menus found.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $deleted_count = 0;
+        $not_found_count = 0;
+        $menus_to_delete = array();
+        
+        // First, find all translated menus for this language
+        // Method 1: Find through original menus
+        foreach ($all_menus as $menu) {
+            // Only process original menus (skip already translated menus)
+            $original_menu_id = get_term_meta($menu->term_id, '_xf_translator_original_menu_id', true);
+            if (!empty($original_menu_id)) {
+                continue;
+            }
+            
+            // Get translated menu ID for this language
+            $translated_menu_id = get_term_meta($menu->term_id, '_xf_translator_menu_' . $target_language_prefix, true);
+            
+            if ($translated_menu_id) {
+                $translated_menu = wp_get_nav_menu_object($translated_menu_id);
+                
+                if ($translated_menu) {
+                    $menus_to_delete[$translated_menu_id] = $menu->term_id; // Store original menu ID for cleanup
+                } else {
+                    // Menu was already deleted, clean up orphaned meta
+                    delete_term_meta($menu->term_id, '_xf_translator_menu_' . $target_language_prefix);
+                    $not_found_count++;
+                }
+            }
+        }
+        
+        // Method 2: Find directly by language meta (in case some menus weren't found through original menus)
+        foreach ($all_menus as $menu) {
+            $menu_language = get_term_meta($menu->term_id, '_xf_translator_language', true);
+            if ($menu_language === $target_language_prefix) {
+                // This is a translated menu for the target language
+                if (!isset($menus_to_delete[$menu->term_id])) {
+                    $menus_to_delete[$menu->term_id] = null; // Will find original menu ID from meta
+                }
+            }
+        }
+        
+        // Get menu locations before deletion
+        $menu_locations = get_nav_menu_locations();
+        $locations_updated = false;
+        
+        // Delete all found translated menus
+        foreach ($menus_to_delete as $translated_menu_id => $original_menu_id) {
+            $translated_menu = wp_get_nav_menu_object($translated_menu_id);
+            
+            if ($translated_menu) {
+                // Remove from menu locations if assigned
+                foreach ($menu_locations as $location => $menu_id) {
+                    if ($menu_id == $translated_menu_id) {
+                        $menu_locations[$location] = 0;
+                        $locations_updated = true;
+                    }
+                }
+                
+                // Delete the translated menu (this will also delete all menu items)
+                $delete_result = wp_delete_nav_menu($translated_menu_id);
+                
+                if ($delete_result && !is_wp_error($delete_result)) {
+                    // Clean up meta data from original menu if we have the original menu ID
+                    if ($original_menu_id) {
+                        delete_term_meta($original_menu_id, '_xf_translator_menu_' . $target_language_prefix);
+                    } else {
+                        // Find original menu ID from meta
+                        $found_original_id = get_term_meta($translated_menu_id, '_xf_translator_original_menu_id', true);
+                        if ($found_original_id) {
+                            delete_term_meta($found_original_id, '_xf_translator_menu_' . $target_language_prefix);
+                        }
+                    }
+                    $deleted_count++;
+                }
+            } else {
+                // Menu was already deleted, clean up orphaned meta
+                if ($original_menu_id) {
+                    delete_term_meta($original_menu_id, '_xf_translator_menu_' . $target_language_prefix);
+                }
+                $not_found_count++;
+            }
+        }
+        
+        // Also delete all menu items with this language meta (orphaned items)
+        global $wpdb;
+        $menu_items_deleted = 0;
+        $menu_item_ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT post_id FROM {$wpdb->postmeta} 
+            WHERE meta_key = '_xf_translator_language' 
+            AND meta_value = %s",
+            $target_language_prefix
+        ));
+        
+        if (!empty($menu_item_ids)) {
+            foreach ($menu_item_ids as $menu_item_id) {
+                $menu_item = get_post($menu_item_id);
+                if ($menu_item && $menu_item->post_type === 'nav_menu_item') {
+                    if (wp_delete_post($menu_item_id, true)) {
+                        $menu_items_deleted++;
+                    }
+                }
+            }
+        }
+        
+        // Update menu locations if needed
+        if ($locations_updated) {
+            set_theme_mod('nav_menu_locations', $menu_locations);
+        }
+        
+        // Clear any cached menu data
+        wp_cache_flush();
+        
+        if ($deleted_count > 0) {
+            $message = sprintf(
+                __('Successfully deleted %1$d translated menu(s) for %2$s.', 'xf-translator'),
+                $deleted_count,
+                $target_language
+            );
+            add_settings_error('api_translator_messages', 'delete_menu_success', $message, 'success');
+        }
+        
+        if ($menu_items_deleted > 0) {
+            $message = sprintf(
+                __('Also deleted %1$d orphaned menu item(s) for %2$s.', 'xf-translator'),
+                $menu_items_deleted,
+                $target_language
+            );
+            add_settings_error('api_translator_messages', 'delete_menu_items', $message, 'success');
+        }
+        
+        if ($not_found_count > 0) {
+            $message = sprintf(
+                __('Cleaned up %1$d orphaned menu reference(s) for %2$s.', 'xf-translator'),
+                $not_found_count,
+                $target_language
+            );
+            add_settings_error('api_translator_messages', 'delete_menu_cleanup', $message, 'info');
+        }
+        
+        if ($deleted_count === 0 && $not_found_count === 0 && $menu_items_deleted === 0) {
+            add_settings_error('api_translator_messages', 'delete_menu_no_menus', __('No translated menus found for the selected language.', 'xf-translator'), 'info');
+        }
+    }
+    
+    /**
+     * Handle cleanup of orphaned translated menu items from English menus
+     */
+    private function handle_cleanup_orphaned_menu_items() {
+        global $wpdb;
+        
+        // Get all menu items that have language meta (translated items)
+        $menu_item_ids = $wpdb->get_col(
+            "SELECT DISTINCT post_id FROM {$wpdb->postmeta} 
+            WHERE meta_key = '_xf_translator_language'"
+        );
+        
+        if (empty($menu_item_ids)) {
+            add_settings_error('api_translator_messages', 'cleanup_no_items', __('No translated menu items found to clean up.', 'xf-translator'), 'info');
+            return;
+        }
+        
+        $deleted_count = 0;
+        $all_menus = wp_get_nav_menus();
+        
+        foreach ($menu_item_ids as $menu_item_id) {
+            $menu_item = get_post($menu_item_id);
+            
+            if (!$menu_item || $menu_item->post_type !== 'nav_menu_item') {
+                continue;
+            }
+            
+            // Get the menu(s) this item belongs to
+            $menu_terms = wp_get_object_terms($menu_item_id, 'nav_menu');
+            
+            if (empty($menu_terms)) {
+                // Orphaned item not in any menu, delete it
+                if (wp_delete_post($menu_item_id, true)) {
+                    $deleted_count++;
+                }
+                continue;
+            }
+            
+            // Check if this item is in a translated menu or original menu
+            $is_in_translated_menu = false;
+            foreach ($menu_terms as $menu_term) {
+                $original_menu_id = get_term_meta($menu_term->term_id, '_xf_translator_original_menu_id', true);
+                if (!empty($original_menu_id)) {
+                    // This is a translated menu, item should be here
+                    $is_in_translated_menu = true;
+                    break;
+                }
+            }
+            
+            // If item is in an original menu (not translated menu), it's orphaned - delete it
+            if (!$is_in_translated_menu) {
+                if (wp_delete_post($menu_item_id, true)) {
+                    $deleted_count++;
+                }
+            }
+        }
+        
+        // Clear cache
+        wp_cache_flush();
+        
+        if ($deleted_count > 0) {
+            $message = sprintf(
+                __('Successfully removed %1$d orphaned translated menu item(s) from English menus.', 'xf-translator'),
+                $deleted_count
+            );
+            add_settings_error('api_translator_messages', 'cleanup_success', $message, 'success');
+        } else {
+            add_settings_error('api_translator_messages', 'cleanup_no_orphans', __('No orphaned menu items found. All translated menu items are in their correct menus.', 'xf-translator'), 'info');
         }
     }
     
@@ -6014,6 +6268,416 @@ class Xf_Translator_Admin {
                 }
             }
         }
+    }
+
+    /**
+     * Add translation meta box to post/page edit screen
+     */
+    public function add_translation_meta_box() {
+        // Add meta box to posts and pages
+        add_meta_box(
+            'xf_translator_translate',
+            __('Translate to Language', 'xf-translator'),
+            array($this, 'render_translation_meta_box'),
+            array('post', 'page'),
+            'side',
+            'default'
+        );
+    }
+    
+    /**
+     * Render translation meta box content
+     */
+    public function render_translation_meta_box($post) {
+        // Only show for original posts (not translations)
+        $is_translated = get_post_meta($post->ID, '_xf_translator_original_post_id', true) || 
+                         get_post_meta($post->ID, '_api_translator_original_post_id', true);
+        
+        if ($is_translated) {
+            echo '<p>' . __('This is a translated post. To translate, edit the original post.', 'xf-translator') . '</p>';
+            return;
+        }
+        
+        // Get languages from settings
+        $languages = $this->settings->get('languages', array());
+        
+        if (empty($languages)) {
+            echo '<p>' . __('No languages configured. Please add languages in Unite.AI Translations > Settings.', 'xf-translator') . '</p>';
+            return;
+        }
+        
+        // Check existing translations
+        global $wpdb;
+        $existing_translations = array();
+        foreach ($languages as $language) {
+            $translated_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT p.ID FROM {$wpdb->posts} p
+                INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+                    AND pm1.meta_key = '_xf_translator_language' 
+                    AND pm1.meta_value = %s
+                INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+                    AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+                    AND pm2.meta_value = %d
+                WHERE p.post_status != 'trash'
+                LIMIT 1",
+                $language['prefix'],
+                $post->ID
+            ));
+            
+            if ($translated_id) {
+                $existing_translations[$language['prefix']] = $translated_id;
+            }
+        }
+        
+        wp_nonce_field('xf_translator_translate_post', 'xf_translator_translate_nonce');
+        ?>
+        <div id="xf-translator-meta-box">
+            <p class="description"><?php _e('Select a language to translate this post/page:', 'xf-translator'); ?></p>
+            
+            <?php foreach ($languages as $language) : 
+                $lang_name = isset($language['name']) ? $language['name'] : $language['prefix'];
+                $lang_prefix = $language['prefix'];
+                $has_translation = isset($existing_translations[$lang_prefix]);
+                $translated_id = $has_translation ? $existing_translations[$lang_prefix] : 0;
+            ?>
+                <div class="xf-translator-language-item" style="margin-bottom: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 3px;">
+                    <strong><?php echo esc_html($lang_name); ?></strong>
+                    <?php if ($has_translation) : ?>
+                        <span style="color: #46b450; margin-left: 10px;">✓ <?php _e('Translated', 'xf-translator'); ?></span>
+                        <div style="margin-top: 8px;">
+                            <a href="<?php echo esc_url(get_edit_post_link($translated_id)); ?>" class="button button-small" target="_blank">
+                                <?php _e('Edit Translation', 'xf-translator'); ?>
+                            </a>
+                            <!-- <button type="button" class="button button-small xf-translate-btn" 
+                                    data-post-id="<?php echo esc_attr($post->ID); ?>" 
+                                    data-lang-prefix="<?php echo esc_attr($lang_prefix); ?>"
+                                    data-lang-name="<?php echo esc_attr($lang_name); ?>">
+                                <?php _e('Re-translate', 'xf-translator'); ?>
+                            </button> -->
+                        </div>
+                    <?php else : ?>
+                        <button type="button" class="button button-primary xf-translate-btn" 
+                                data-post-id="<?php echo esc_attr($post->ID); ?>" 
+                                data-lang-prefix="<?php echo esc_attr($lang_prefix); ?>"
+                                data-lang-name="<?php echo esc_attr($lang_name); ?>">
+                            <?php _e('Translate', 'xf-translator'); ?>
+                        </button>
+                    <?php endif; ?>
+                    <span class="xf-translate-spinner" style="display: none; margin-left: 10px;">
+                        <span class="spinner is-active" style="float: none; margin: 0;"></span>
+                        <?php _e('Translating...', 'xf-translator'); ?>
+                    </span>
+                    <div class="xf-translate-message" style="margin-top: 5px; display: none;"></div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+        
+        <style>
+            #xf-translator-meta-box .xf-translate-btn {
+                margin-top: 5px;
+            }
+            #xf-translator-meta-box .xf-translate-message {
+                padding: 5px;
+                border-radius: 3px;
+            }
+            #xf-translator-meta-box .xf-translate-message.success {
+                background: #d4edda;
+                color: #155724;
+                border: 1px solid #c3e6cb;
+            }
+            #xf-translator-meta-box .xf-translate-message.error {
+                background: #f8d7da;
+                color: #721c24;
+                border: 1px solid #f5c6cb;
+            }
+        </style>
+        
+        <script>
+        jQuery(document).ready(function($) {
+            $('.xf-translate-btn').on('click', function(e) {
+                e.preventDefault();
+                var $btn = $(this);
+                var $item = $btn.closest('.xf-translator-language-item');
+                var $spinner = $item.find('.xf-translate-spinner');
+                var $message = $item.find('.xf-translate-message');
+                var postId = $btn.data('post-id');
+                var langPrefix = $btn.data('lang-prefix');
+                var langName = $btn.data('lang-name');
+                
+                // Disable button and show spinner
+                $btn.prop('disabled', true);
+                $spinner.show();
+                $message.hide().removeClass('success error');
+                
+                // Make AJAX request - should return quickly (just adds to queue)
+                $.ajax({
+                    url: ajaxurl,
+                    type: 'POST',
+                    timeout: 10000, // 10 second timeout (should return in < 1 second)
+                    data: {
+                        action: 'xf_translate_post_to_language',
+                        post_id: postId,
+                        lang_prefix: langPrefix,
+                        nonce: '<?php echo wp_create_nonce('xf_translator_translate_post'); ?>'
+                    },
+                    success: function(response) {
+                        $spinner.hide();
+                        
+                        if (response.success) {
+                            $message.html(response.data.message).addClass('success').show();
+                            
+                            // Poll for status to show when translation completes
+                            if (response.data.queue_id) {
+                                var queueId = response.data.queue_id;
+                                var pollCount = 0;
+                                var maxPolls = 90; // Poll for up to 3 minutes (90 * 2 seconds)
+                                
+                                var pollStatus = function() {
+                                    pollCount++;
+                                    if (pollCount > maxPolls) {
+                                        $message.html('<?php _e('Translation is processing. Please refresh the page in a moment to see the result.', 'xf-translator'); ?>').addClass('success').show();
+                                        $btn.prop('disabled', false);
+                                        return;
+                                    }
+                                    
+                                    $.ajax({
+                                        url: ajaxurl,
+                                        type: 'POST',
+                                        timeout: 5000, // 5 second timeout for status check
+                                        data: {
+                                            action: 'xf_check_translation_status',
+                                            queue_id: queueId,
+                                            nonce: '<?php echo wp_create_nonce('xf_translator_translate_post'); ?>'
+                                        },
+                                        success: function(statusResponse) {
+                                            if (statusResponse.success && statusResponse.data.status === 'completed') {
+                                                $message.html('<?php _e('Translation completed! Refreshing page...', 'xf-translator'); ?>').addClass('success').show();
+                                                $btn.prop('disabled', false);
+                                                setTimeout(function() {
+                                                    location.reload();
+                                                }, 1500);
+                                            } else if (statusResponse.success && statusResponse.data.status === 'failed') {
+                                                var errorMsg = statusResponse.data.error_message || '<?php _e('Translation failed. Please check the translation queue.', 'xf-translator'); ?>';
+                                                $message.html(errorMsg).addClass('error').show();
+                                                $btn.prop('disabled', false);
+                                            } else {
+                                                // Still processing, poll again
+                                                setTimeout(pollStatus, 2000); // Poll every 2 seconds
+                                            }
+                                        },
+                                        error: function() {
+                                            // On error, continue polling (might be temporary network issue)
+                                            setTimeout(pollStatus, 2000);
+                                        }
+                                    });
+                                };
+                                
+                                // Start polling after 5 seconds (give cron time to process)
+                                setTimeout(pollStatus, 5000);
+                            } else {
+                                $btn.prop('disabled', false);
+                            }
+                        } else {
+                            $btn.prop('disabled', false);
+                            $message.html(response.data.message || '<?php _e('Translation failed. Please try again.', 'xf-translator'); ?>').addClass('error').show();
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        $spinner.hide();
+                        $btn.prop('disabled', false);
+                        $message.html('<?php _e('An error occurred. Please try again.', 'xf-translator'); ?>').addClass('error').show();
+                    }
+                });
+            });
+        });
+        </script>
+        <?php
+    }
+    
+    /**
+     * AJAX handler to translate post to specific language
+     */
+    public function ajax_translate_post_to_language() {
+        // Verify nonce
+        check_ajax_referer('xf_translator_translate_post', 'nonce');
+        
+        // Check permissions
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error(array('message' => __('You do not have permission to translate posts.', 'xf-translator')));
+            return;
+        }
+        
+        $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+        $lang_prefix = isset($_POST['lang_prefix']) ? sanitize_text_field($_POST['lang_prefix']) : '';
+        
+        if (!$post_id || !$lang_prefix) {
+            wp_send_json_error(array('message' => __('Post ID and language are required.', 'xf-translator')));
+            return;
+        }
+        
+        // Get post
+        $post = get_post($post_id);
+        if (!$post) {
+            wp_send_json_error(array('message' => __('Post not found.', 'xf-translator')));
+            return;
+        }
+        
+        // Check if this is already a translated post
+        if (get_post_meta($post_id, '_xf_translator_original_post_id', true) || 
+            get_post_meta($post_id, '_api_translator_original_post_id', true)) {
+            wp_send_json_error(array('message' => __('This is a translated post. Please translate the original post.', 'xf-translator')));
+            return;
+        }
+        
+        // Get language info
+        $languages = $this->settings->get('languages', array());
+        $target_language = null;
+        foreach ($languages as $lang) {
+            if ($lang['prefix'] === $lang_prefix) {
+                $target_language = $lang;
+                break;
+            }
+        }
+        
+        if (!$target_language) {
+            wp_send_json_error(array('message' => __('Invalid language.', 'xf-translator')));
+            return;
+        }
+        
+        // Check if translation already exists
+        global $wpdb;
+        $existing_translated_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT p.ID FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+                AND pm1.meta_key = '_xf_translator_language' 
+                AND pm1.meta_value = %s
+            INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+                AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+                AND pm2.meta_value = %d
+            WHERE p.post_status != 'trash'
+            LIMIT 1",
+            $lang_prefix,
+            $post_id
+        ));
+        
+        // Add to translation queue
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        // Check if queue entry already exists
+        $existing_queue = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM $table_name 
+            WHERE parent_post_id = %d AND lng = %s AND status = 'pending'",
+            $post_id,
+            $target_language['name']
+        ));
+        
+        if (!$existing_queue) {
+            // Create queue entry with very old timestamp to bypass delay checks
+            // This ensures it's eligible for immediate processing by cron
+            $old_timestamp = date('Y-m-d H:i:s', strtotime('-1 year'));
+            
+            $result = $wpdb->insert(
+                $table_name,
+                array(
+                    'parent_post_id' => $post_id,
+                    'translated_post_id' => $existing_translated_id ? $existing_translated_id : null,
+                    'lng' => $target_language['name'],
+                    'status' => 'pending',
+                    // Manual/explicit translation request for existing posts should use type OLD
+                    'type' => 'OLD',
+                    'created' => $old_timestamp // Set to old timestamp to bypass delay checks
+                ),
+                array('%d', '%d', '%s', '%s', '%s', '%s')
+            );
+            
+            if ($result === false) {
+                wp_send_json_error(array('message' => __('Failed to add translation to queue.', 'xf-translator')));
+                return;
+            }
+        }
+        
+        // Get the queue entry ID
+        $queue_id = $existing_queue ? $existing_queue : $wpdb->insert_id;
+        
+        // If updating existing queue entry, also set old timestamp to ensure it's processed
+        if ($existing_queue) {
+            $old_timestamp = date('Y-m-d H:i:s', strtotime('-1 year'));
+            $wpdb->update(
+                $table_name,
+                array('created' => $old_timestamp, 'status' => 'pending', 'type' => 'OLD'),
+                array('id' => $queue_id),
+                array('%s', '%s', '%s'),
+                array('%d')
+            );
+        }
+        
+        // Trigger cron immediately if possible (so it processes right away)
+        if (function_exists('spawn_cron')) {
+            spawn_cron();
+        }
+        
+        // Return immediately - translation will be processed by next cron run
+        wp_send_json_success(array(
+            'message' => sprintf(__('Translation added to queue for %s. It will be processed by the next cron job.', 'xf-translator'), $target_language['name']),
+            'queue_id' => $queue_id,
+            'status' => 'queued'
+        ));
+    }
+    
+    /**
+     * Process single translation in background (called by cron)
+     */
+    public function process_single_translation_background($queue_id) {
+        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
+        $processor = new Xf_Translator_Processor();
+        
+        // Process the translation
+        $result = $processor->process_queue_entry_by_id($queue_id);
+        
+        if ($result && defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('XF Translator: Background translation processed for queue ID: ' . $queue_id);
+        }
+    }
+    
+    /**
+     * AJAX handler to check translation status
+     */
+    public function ajax_check_translation_status() {
+        // Verify nonce
+        check_ajax_referer('xf_translator_translate_post', 'nonce');
+        
+        // Check permissions
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error(array('message' => __('Unauthorized', 'xf-translator')));
+            return;
+        }
+        
+        $queue_id = isset($_POST['queue_id']) ? intval($_POST['queue_id']) : 0;
+        
+        if (!$queue_id) {
+            wp_send_json_error(array('message' => __('Queue ID is required.', 'xf-translator')));
+            return;
+        }
+        
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        $queue_entry = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $table_name WHERE id = %d",
+            $queue_id
+        ));
+        
+        if (!$queue_entry) {
+            wp_send_json_error(array('message' => __('Queue entry not found.', 'xf-translator')));
+            return;
+        }
+        
+        wp_send_json_success(array(
+            'status' => $queue_entry->status,
+            'translated_post_id' => $queue_entry->translated_post_id,
+            'error_message' => $queue_entry->error_message
+        ));
     }
 
 }
