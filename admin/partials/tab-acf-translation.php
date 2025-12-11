@@ -166,7 +166,7 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
     </div>
 
     <!-- Translate ACF Options Fields Only -->
-    <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff3cd; border: 1px solid #ffc107; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+    <!-- <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff3cd; border: 1px solid #ffc107; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
         <h2><?php _e('Translate ACF Options Fields', 'xf-translator'); ?></h2>
         <p>
             <?php _e('This tool will translate ACF fields that are stored in ACF Options Pages (not attached to individual posts). These fields appear on all posts/pages, like "default_top_quote" or global site settings.', 'xf-translator'); ?>
@@ -214,7 +214,7 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
         // Show admin notices if any
         settings_errors('xf_translator_messages');
         ?>
-    </div>
+    </div> -->
 
     <!-- Step 2: Select Fields and Language -->
     <!-- <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">
