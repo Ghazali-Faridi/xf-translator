@@ -5616,6 +5616,10 @@ class Xf_Translator_Admin {
         
         // Get current parent field value
         $parent_value = get_field($parent_field, $post_id);
+
+        // Try to get the ACF field object (to use field keys when updating)
+        $parent_field_obj = function_exists('acf_get_field') ? acf_get_field($parent_field) : null;
+        $parent_field_key = ($parent_field_obj && isset($parent_field_obj['key'])) ? $parent_field_obj['key'] : $parent_field;
         
         if ($parent_value === null || $parent_value === false) {
             error_log('XF Translator: Cannot update nested field "' . $field_path . '" - parent field not found in post ID: ' . $post_id);
@@ -5670,8 +5674,9 @@ class Xf_Translator_Admin {
             }
             
             if ($updated) {
-                $result = update_field($parent_field, $parent_value, $post_id);
-                error_log('XF Translator: Updated ' . $rows_updated_count . ' row(s) of repeater field "' . $parent_field . '" for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
+                // Use field key if available to improve ACF reliability
+                $result = update_field($parent_field_key, $parent_value, $post_id);
+                error_log('XF Translator: Updated ' . $rows_updated_count . ' row(s) of repeater field "' . $parent_field . '" (key: ' . $parent_field_key . ') for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
                 return $result;
             } else {
                 error_log('XF Translator: No rows updated for repeater field "' . $field_path . '" in post ID: ' . $post_id . ' - translated values count: ' . count($translated_values));
@@ -5679,8 +5684,9 @@ class Xf_Translator_Admin {
         } elseif (is_array($parent_value)) {
             // It's a group field - single value
             $parent_value[$sub_field] = $translated_value;
-            $result = update_field($parent_field, $parent_value, $post_id);
-            error_log('XF Translator: Updated group field "' . $field_path . '" for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
+            // Use field key if available
+            $result = update_field($parent_field_key, $parent_value, $post_id);
+            error_log('XF Translator: Updated group field "' . $field_path . '" (key: ' . $parent_field_key . ') for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
             return $result;
         }
         

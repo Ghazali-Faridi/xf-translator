@@ -96,11 +96,11 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
     <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
         <h2><?php _e('Translate ACF Fields for Existing Translated Posts', 'xf-translator'); ?></h2>
         <p>
-            <?php _e('This tool will translate ACF fields for existing translated posts in batches. It will find all translated posts and translate their ACF fields (like "top_quote") that were previously just copied from the original posts.', 'xf-translator'); ?>
+            <?php _e('This tool will translate ACF fields for existing translated posts in batches. It will find all translated posts and translate their ACF fields that were previously just copied from the original posts.', 'xf-translator'); ?>
         </p>
-        <p class="description" style="color: #d63638; font-weight: 600;">
-            <?php _e('⚠️ Important: This will use your API credits to translate ACF fields. Posts will be processed in batches of 300 to avoid timeouts. Make sure you have configured translatable ACF fields above before running this.', 'xf-translator'); ?>
-        </p>
+        <!-- <p class="description" style="color: #d63638; font-weight: 600;">
+            <?php // _e('⚠️ Important: This will use your API credits to translate ACF fields. Posts will be processed in batches of 300 to avoid timeouts. Make sure you have configured translatable ACF fields above before running this.', 'xf-translator'); ?>
+        </p> -->
         
         <?php
         // Check if this is a continuation

@@ -3202,24 +3202,28 @@ class Xf_Translator_Public {
 						}
 					}
 					
-					// Get the select_posts sub-field key
+					// Get the sub-field keys for select_posts and button_label
 					$select_posts_field_key = '';
+					$button_label_field_key = '';
 					if ($field_key && function_exists('acf_get_field')) {
 						$repeater_field = acf_get_field($field_key);
 						if ($repeater_field && isset($repeater_field['sub_fields'])) {
 							foreach ($repeater_field['sub_fields'] as $sub_field) {
-								if (isset($sub_field['name']) && $sub_field['name'] === 'select_posts') {
-									$select_posts_field_key = $sub_field['key'];
-									break;
+								if (isset($sub_field['name'])) {
+									if ($sub_field['name'] === 'select_posts') {
+										$select_posts_field_key = $sub_field['key'];
+									} elseif ($sub_field['name'] === 'button_label') {
+										$button_label_field_key = $sub_field['key'];
+									}
 								}
 							}
 						}
 					}
 					
-					error_log('XF Translator ACF: sbposts__content - select_posts_field_key: ' . ($select_posts_field_key ?: 'NOT FOUND'));
+					error_log('XF Translator ACF: sbposts__content - select_posts_field_key: ' . ($select_posts_field_key ?: 'NOT FOUND') . ', button_label_field_key: ' . ($button_label_field_key ?: 'NOT FOUND'));
 					
 					for ($i = 0; $i < $repeater_count; $i++) {
-						// Try multiple meta key patterns
+						// Try multiple meta key patterns for select_posts
 						$select_posts = null;
 						
 						// Pattern 1: field_name_row_index_select_posts
@@ -3238,15 +3242,45 @@ class Xf_Translator_Public {
 							$select_posts = get_post_meta($source_post_id, $meta_key3, true);
 						}
 						
+						// Load button_label field
+						$button_label = null;
+						
+						// Pattern 1: field_name_row_index_button_label
+						$button_meta_key1 = $field_name . '_' . $i . '_button_label';
+						$button_label = get_post_meta($source_post_id, $button_meta_key1, true);
+						
+						// Pattern 2: field_key_row_index_button_label_field_key
+						if (empty($button_label) && $field_key && $button_label_field_key) {
+							$button_meta_key2 = $field_key . '_' . $i . '_' . $button_label_field_key;
+							$button_label = get_post_meta($source_post_id, $button_meta_key2, true);
+						}
+						
+						// Pattern 3: field_key_row_index_button_label (field name)
+						if (empty($button_label) && $field_key) {
+							$button_meta_key3 = $field_key . '_' . $i . '_button_label';
+							$button_label = get_post_meta($source_post_id, $button_meta_key3, true);
+						}
+						
+						// Build the row with both fields
+						$row_data = array();
+						
 						if (!empty($select_posts)) {
 							// Ensure it's an array
 							if (!is_array($select_posts)) {
 								$select_posts = array($select_posts);
 							}
-							$repeater_rows[] = array('select_posts' => $select_posts);
-							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . count($select_posts) . ' posts: ' . implode(', ', $select_posts));
+							$row_data['select_posts'] = $select_posts;
+						}
+						
+						if ($button_label !== null && $button_label !== false && $button_label !== '') {
+							$row_data['button_label'] = $button_label;
+						}
+						
+						if (!empty($row_data)) {
+							$repeater_rows[] = $row_data;
+							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . (isset($row_data['select_posts']) ? count($row_data['select_posts']) : 0) . ' posts' . (isset($row_data['button_label']) ? ', button_label: "' . $row_data['button_label'] . '"' : '') . (isset($row_data['select_posts']) ? ' - IDs: ' . implode(', ', $row_data['select_posts']) : ''));
 						} else {
-							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' - No select_posts found (tried: ' . $meta_key1 . ($field_key ? ', ' . $meta_key3 : '') . ')');
+							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' - No data found (tried select_posts: ' . $meta_key1 . ($field_key ? ', ' . $meta_key3 : '') . ' and button_label: ' . $button_meta_key1 . ($field_key ? ', ' . $button_meta_key3 : '') . ')');
 						}
 					}
 					
@@ -3330,6 +3364,24 @@ class Xf_Translator_Public {
 						error_log('XF Translator ACF: sbposts__content - Using original post ' . $original_post_id . ' as source');
 					}
 					
+					// Get the sub-field keys for select_posts and button_label
+					$select_posts_field_key = '';
+					$button_label_field_key = '';
+					if ($field_key && function_exists('acf_get_field')) {
+						$repeater_field = acf_get_field($field_key);
+						if ($repeater_field && isset($repeater_field['sub_fields'])) {
+							foreach ($repeater_field['sub_fields'] as $sub_field) {
+								if (isset($sub_field['name'])) {
+									if ($sub_field['name'] === 'select_posts') {
+										$select_posts_field_key = $sub_field['key'];
+									} elseif ($sub_field['name'] === 'button_label') {
+										$button_label_field_key = $sub_field['key'];
+									}
+								}
+							}
+						}
+					}
+					
 					// Load repeater rows
 					$repeater_rows = array();
 					for ($i = 0; $i < $repeater_count; $i++) {
@@ -3345,12 +3397,42 @@ class Xf_Translator_Public {
 							$select_posts = get_post_meta($source_post_id, $meta_key2, true);
 						}
 						
+						// Load button_label field
+						$button_label = null;
+						
+						// Pattern 1: field_name_row_index_button_label
+						$button_meta_key1 = $field_name . '_' . $i . '_button_label';
+						$button_label = get_post_meta($source_post_id, $button_meta_key1, true);
+						
+						// Pattern 2: field_key_row_index_button_label_field_key
+						if (empty($button_label) && $field_key && $button_label_field_key) {
+							$button_meta_key2 = $field_key . '_' . $i . '_' . $button_label_field_key;
+							$button_label = get_post_meta($source_post_id, $button_meta_key2, true);
+						}
+						
+						// Pattern 3: field_key_row_index_button_label (field name)
+						if (empty($button_label) && $field_key) {
+							$button_meta_key3 = $field_key . '_' . $i . '_button_label';
+							$button_label = get_post_meta($source_post_id, $button_meta_key3, true);
+						}
+						
+						// Build the row with both fields
+						$row_data = array();
+						
 						if (!empty($select_posts)) {
 							if (!is_array($select_posts)) {
 								$select_posts = array($select_posts);
 							}
-							$repeater_rows[] = array('select_posts' => $select_posts);
-							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . count($select_posts) . ' posts: ' . implode(', ', $select_posts));
+							$row_data['select_posts'] = $select_posts;
+						}
+						
+						if ($button_label !== null && $button_label !== false && $button_label !== '') {
+							$row_data['button_label'] = $button_label;
+						}
+						
+						if (!empty($row_data)) {
+							$repeater_rows[] = $row_data;
+							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . (isset($row_data['select_posts']) ? count($row_data['select_posts']) : 0) . ' posts' . (isset($row_data['button_label']) ? ', button_label: "' . $row_data['button_label'] . '"' : '') . (isset($row_data['select_posts']) ? ' - IDs: ' . implode(', ', $row_data['select_posts']) : ''));
 						}
 					}
 					
@@ -3596,28 +3678,44 @@ class Xf_Translator_Public {
 					
 					$nested_result = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1, $filter_untranslated);
 					
-					// CRITICAL FIX: If select_posts was in the original item, ensure it stays as an array in the result
-					if (isset($item['select_posts']) && is_array($item['select_posts'])) {
-						// If select_posts was converted to something other than an array, fix it
-						if (!isset($nested_result['select_posts']) || !is_array($nested_result['select_posts'])) {
-							// select_posts was lost or converted incorrectly - reconvert it properly
-							$original_select_posts = $item['select_posts'];
-							$converted_select_posts = $this->convert_post_ids_to_translated($original_select_posts, $language_prefix, $depth + 2, $filter_untranslated);
-							
-							// Ensure result is an array
-							if (!is_array($converted_select_posts)) {
-								if (is_numeric($converted_select_posts)) {
-									$converted_select_posts = array((int) $converted_select_posts);
-								} else {
-									$converted_select_posts = array();
+					// CRITICAL FIX: Preserve ALL fields from the original item, not just select_posts
+					// This ensures fields like button_label are not lost during conversion
+					if (is_array($item)) {
+						// If nested_result is not an array, initialize it
+						if (!is_array($nested_result)) {
+							$nested_result = array();
+						}
+						
+						// Preserve all non-select_posts fields from the original item
+						foreach ($item as $field_key => $field_value) {
+							if ($field_key !== 'select_posts') {
+								// Preserve the field as-is (don't convert it)
+								if (!isset($nested_result[$field_key])) {
+									$nested_result[$field_key] = $field_value;
 								}
 							}
-							
-							if (!is_array($nested_result)) {
-								$nested_result = array();
+						}
+						
+						// CRITICAL FIX: If select_posts was in the original item, ensure it stays as an array in the result
+						if (isset($item['select_posts']) && is_array($item['select_posts'])) {
+							// If select_posts was converted to something other than an array, fix it
+							if (!isset($nested_result['select_posts']) || !is_array($nested_result['select_posts'])) {
+								// select_posts was lost or converted incorrectly - reconvert it properly
+								$original_select_posts = $item['select_posts'];
+								$converted_select_posts = $this->convert_post_ids_to_translated($original_select_posts, $language_prefix, $depth + 2, $filter_untranslated);
+								
+								// Ensure result is an array
+								if (!is_array($converted_select_posts)) {
+									if (is_numeric($converted_select_posts)) {
+										$converted_select_posts = array((int) $converted_select_posts);
+									} else {
+										$converted_select_posts = array();
+									}
+								}
+								
+								$nested_result['select_posts'] = $converted_select_posts;
+								error_log('XF Translator: Fixed select_posts conversion - was ' . gettype($nested_result['select_posts'] ?? 'missing') . ', now array with ' . count($converted_select_posts) . ' items');
 							}
-							$nested_result['select_posts'] = $converted_select_posts;
-							error_log('XF Translator: Fixed select_posts conversion - was ' . gettype($nested_result['select_posts'] ?? 'missing') . ', now array with ' . count($converted_select_posts) . ' items');
 						}
 					}
 					
