@@ -7039,6 +7039,103 @@ class Xf_Translator_Admin {
         ));
     }
 
+    /**
+     * Filter categories in admin post edit screen based on post language
+     * 
+     * @param array $terms Array of term objects
+     * @param array $taxonomies Array of taxonomies
+     * @param array $args Query arguments
+     * @param WP_Term_Query $term_query Term query object
+     * @return array Filtered terms
+     */
+    public function filter_admin_categories_by_language($terms, $taxonomies, $args, $term_query) {
+        // Only filter in admin area
+        if (!is_admin()) {
+            return $terms;
+        }
+        
+        // Only filter category taxonomy
+        if (!in_array('category', (array)$taxonomies)) {
+            return $terms;
+        }
+        
+        // Get current post ID - check multiple sources
+        $post_id = 0;
+        
+        // Check if this is an AJAX request for category checklist
+        if (defined('DOING_AJAX') && DOING_AJAX) {
+            // For AJAX requests, check the post_id in the request
+            if (isset($_POST['post_id'])) {
+                $post_id = intval($_POST['post_id']);
+            } elseif (isset($_GET['post_id'])) {
+                $post_id = intval($_GET['post_id']);
+            }
+        } else {
+            // For regular page loads, check screen and GET parameter
+            $screen = get_current_screen();
+            if ($screen && in_array($screen->base, array('post', 'post-new'))) {
+                if (isset($_GET['post'])) {
+                    $post_id = intval($_GET['post']);
+                } elseif ($screen->base === 'post' && isset($GLOBALS['post'])) {
+                    $post_id = $GLOBALS['post']->ID;
+                }
+            }
+        }
+        
+        // If no post ID found and not a new post screen, don't filter
+        if (!$post_id) {
+            $screen = get_current_screen();
+            if (!$screen || $screen->base !== 'post-new') {
+                return $terms;
+            }
+            // For new posts, default to showing only English categories (no language)
+            $post_language = '';
+        } else {
+            // Get post language from meta
+            $post_language = get_post_meta($post_id, '_xf_translator_language', true);
+            
+            // If still no language, check if it's a translated post via original_post_id
+            if (empty($post_language)) {
+                $original_post_id = get_post_meta($post_id, '_xf_translator_original_post_id', true);
+                if (!$original_post_id) {
+                    $original_post_id = get_post_meta($post_id, '_api_translator_original_post_id', true);
+                }
+                
+                // If this is a translated post but doesn't have language meta, try to get it
+                if ($original_post_id) {
+                    // This shouldn't happen, but if it does, we'll show all categories
+                    return $terms;
+                }
+            }
+        }
+        
+        // Filter terms based on language
+        $filtered_terms = array();
+        foreach ($terms as $term) {
+            if (!is_object($term)) {
+                $filtered_terms[] = $term;
+                continue;
+            }
+            
+            // Get category language
+            $term_language = get_term_meta($term->term_id, '_xf_translator_language', true);
+            
+            // If post has no language (English/original), show only categories with no language
+            if (empty($post_language)) {
+                if (empty($term_language)) {
+                    $filtered_terms[] = $term;
+                }
+            } else {
+                // If post has a language, show only categories with the same language
+                if ($term_language === $post_language) {
+                    $filtered_terms[] = $term;
+                }
+            }
+        }
+        
+        return $filtered_terms;
+    }
+
 }
 
 

@@ -247,6 +247,9 @@ class Xf_Translator {
         // Hook when post edit page loads to fix slug immediately
         $this->loader->add_action('admin_head-post.php', $plugin_admin, 'fix_original_post_slug_on_edit_page');
         $this->loader->add_action('admin_head-post-new.php', $plugin_admin, 'fix_original_post_slug_on_edit_page');
+        
+        // Filter categories in admin based on post language
+        $this->loader->add_filter('get_terms', $plugin_admin, 'filter_admin_categories_by_language', 10, 4);
 
 	}
 
