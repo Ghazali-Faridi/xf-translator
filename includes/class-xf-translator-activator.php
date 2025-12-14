@@ -45,6 +45,9 @@ class Xf_Translator_Activator {
 		if ($enable_old && !wp_next_scheduled('xf_translator_process_old_cron')) {
 			wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_old_cron');
 		}
+		
+		// Flush rewrite rules to register new author archive rules
+		flush_rewrite_rules();
 	}
 
 }

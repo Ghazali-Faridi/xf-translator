@@ -63,8 +63,22 @@ class Xf_Translator_Public {
 		require_once plugin_dir_path(dirname(__FILE__)) . 'admin/class-settings.php';
 		$this->settings = new Settings();
 		
-		// Add rewrite rules on init
-		add_action('init', array($this, 'add_rewrite_rules'));
+		// Add rewrite rules on init (use priority 10 to ensure they're added before WordPress defaults)
+		add_action('init', array($this, 'add_rewrite_rules'), 10);
+		
+		// Also hook into author_rewrite_rules filter to add language-prefixed author rules
+		// This is a more reliable method that merges with WordPress default author rules
+		add_filter('author_rewrite_rules', array($this, 'add_author_rewrite_rules'), 10, 1);
+		
+		// Hook into 'request' filter with priority 0 to intercept author archives
+		// This runs at the same priority as lang-soft-router mu-plugin to handle /fr/author/author-slug/
+		add_filter('request', array($this, 'handle_author_archive_request'), 0);
+		
+		// Parse request to manually handle author archives if rewrite rules don't match
+		add_action('parse_request', array($this, 'parse_author_archive_request'), 1);
+		
+		// Flush rewrite rules once after plugin activation or settings change
+		add_action('init', array($this, 'maybe_flush_rewrite_rules'), 999);
 		
 		// Force homepage template for language-prefixed homepages
 		add_filter('template_include', array($this, 'force_homepage_template_for_language'), 99);
@@ -78,6 +92,9 @@ class Xf_Translator_Public {
 		add_filter('get_the_categories', array($this, 'filter_get_the_categories'), 10, 2);
 		add_filter('term_link', array($this, 'filter_term_link'), 10, 3);
 		add_filter('get_term', array($this, 'filter_get_term'), 10, 2);
+		
+		// Filter author links to include language prefix
+		add_filter('author_link', array($this, 'add_language_prefix_to_author_link'), 10, 3);
 		
 		// Filter taxonomy archive queries to show translated posts
 		add_action('pre_get_posts', array($this, 'filter_taxonomy_archive_query'), 10, 1);
@@ -736,7 +753,9 @@ class Xf_Translator_Public {
 		// Register query var so it's accessible in WP_Query.
 		add_rewrite_tag( '%xf_lang_prefix%', '([^/]+)' );
 		global $wp;
-		$wp->add_query_var( 'xf_lang_prefix' );
+		if ( isset( $wp ) ) {
+			$wp->add_query_var( 'xf_lang_prefix' );
+		}
 		
 		// Get all public taxonomies for rewrite rules
 		$taxonomies = get_taxonomies( array( 'public' => true, 'publicly_queryable' => true ), 'objects' );
@@ -764,7 +783,43 @@ class Xf_Translator_Public {
 				'top'
 			);
 
+			// Author archives with language prefix (must come before single post rules)
+			// Get author base (default is 'author', but can be changed by plugins like Edit Author Slug)
+			// We need to get this from the global wp_rewrite object, but ensure it's initialized
+			global $wp_rewrite;
+			if ( ! isset( $wp_rewrite ) ) {
+				$wp_rewrite = new WP_Rewrite();
+			}
+			
+			// Initialize rewrite rules if not already done (this sets author_base)
+			if ( empty( $wp_rewrite->author_base ) ) {
+				$wp_rewrite->init();
+			}
+			
+			$author_base = ! empty( $wp_rewrite->author_base ) ? $wp_rewrite->author_base : 'author';
+			
+			// Debug: Log the rewrite rules being added
+			if (defined('WP_DEBUG') && WP_DEBUG) {
+				error_log('XF Translator: Adding author archive rewrite rule - URL prefix: ' . $url_prefix . ', Author base: ' . $author_base . ', Pattern: ^' . $escaped_url_prefix . '/' . preg_quote( $author_base, '/' ) . '/([^/]+)/?$');
+			}
+			
+			// Author archive: /fr/author/author-slug/
+			// Use 'top' priority to ensure it's checked before default WordPress rules
+			add_rewrite_rule(
+				'^' . $escaped_url_prefix . '/' . preg_quote( $author_base, '/' ) . '/([^/]+)/?$',
+				'index.php?author_name=$matches[1]&xf_lang_prefix=' . urlencode( $stored_prefix ),
+				'top'
+			);
+
+			// Paginated author archive: /fr/author/author-slug/page/2/
+			add_rewrite_rule(
+				'^' . $escaped_url_prefix . '/' . preg_quote( $author_base, '/' ) . '/([^/]+)/page/([0-9]+)/?$',
+				'index.php?author_name=$matches[1]&paged=$matches[2]&xf_lang_prefix=' . urlencode( $stored_prefix ),
+				'top'
+			);
+
 			// Single posts/pages with language prefix: /frCA/post-slug/
+			// Note: This must come after author rules to avoid conflicts
 			add_rewrite_rule(
 				'^' . $escaped_url_prefix . '/([^/]+)/?$',
 				'index.php?name=$matches[1]&xf_lang_prefix=' . urlencode( $stored_prefix ),
@@ -807,6 +862,216 @@ class Xf_Translator_Public {
 	}
 	
 	/**
+	 * Add author rewrite rules via filter (alternative method)
+	 * This ensures our rules are merged with WordPress default author rules
+	 * 
+	 * @param array $author_rewrite Existing author rewrite rules
+	 * @return array Modified author rewrite rules
+	 */
+	public function add_author_rewrite_rules($author_rewrite) {
+		$languages = $this->settings->get('languages', array());
+		
+		if (empty($languages)) {
+			return $author_rewrite;
+		}
+		
+		global $wp_rewrite;
+		$author_base = !empty($wp_rewrite->author_base) ? $wp_rewrite->author_base : 'author';
+		
+		foreach ($languages as $language) {
+			if (empty($language['prefix'])) {
+				continue;
+			}
+			
+			$stored_prefix = $language['prefix'];
+			$url_prefix = $this->get_url_prefix_for_language($language);
+			
+			if (!$url_prefix) {
+				continue;
+			}
+			
+			$escaped_url_prefix = preg_quote($url_prefix, '/');
+			
+			// Add language-prefixed author archive rules at the beginning for priority
+			// Use array_merge to put our rules first
+			$new_rules = array(
+				'^' . $escaped_url_prefix . '/' . preg_quote($author_base, '/') . '/([^/]+)/?$' => 'index.php?author_name=$matches[1]&xf_lang_prefix=' . urlencode($stored_prefix),
+				'^' . $escaped_url_prefix . '/' . preg_quote($author_base, '/') . '/([^/]+)/page/([0-9]+)/?$' => 'index.php?author_name=$matches[1]&paged=$matches[2]&xf_lang_prefix=' . urlencode($stored_prefix),
+			);
+			
+			$author_rewrite = array_merge($new_rules, $author_rewrite);
+		}
+		
+		return $author_rewrite;
+	}
+	
+	/**
+	 * Handle author archive requests via 'request' filter (runs early, before other plugins)
+	 * This intercepts /fr/author/author-slug/ before lang-soft-router mu-plugin interferes
+	 * 
+	 * @param array $query_vars Query variables
+	 * @return array Modified query variables
+	 */
+	public function handle_author_archive_request($query_vars) {
+		// Only on frontend
+		if (is_admin()) {
+			return $query_vars;
+		}
+		
+		// Get request URI
+		$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+		$request_path = parse_url($request_uri, PHP_URL_PATH);
+		$request_path = trim($request_path, '/');
+		
+		if (empty($request_path)) {
+			return $query_vars;
+		}
+		
+		// Get languages and check if path starts with a language prefix
+		$languages = $this->settings->get('languages', array());
+		global $wp_rewrite;
+		$author_base = !empty($wp_rewrite->author_base) ? $wp_rewrite->author_base : 'author';
+		
+		foreach ($languages as $language) {
+			if (empty($language['prefix'])) {
+				continue;
+			}
+			
+			$url_prefix = $this->get_url_prefix_for_language($language);
+			if (!$url_prefix) {
+				continue;
+			}
+			
+			// Check if request path matches: /{lang_prefix}/author/{author_slug}/ or /{lang_prefix}/author/{author_slug}/page/{num}/
+			$pattern = '#^' . preg_quote($url_prefix, '#') . '/' . preg_quote($author_base, '#') . '/([^/]+)(?:/page/([0-9]+))?/?$#';
+			if (preg_match($pattern, $request_path, $matches)) {
+				$author_slug = $matches[1];
+				$paged = isset($matches[2]) ? intval($matches[2]) : 0;
+				
+				// Verify the author exists
+				$user = get_user_by('slug', $author_slug);
+				if (!$user) {
+					return $query_vars; // Author doesn't exist, let WordPress handle 404
+				}
+				
+				// Set query vars for author archive
+				$query_vars['author_name'] = $author_slug;
+				$query_vars['xf_lang_prefix'] = $language['prefix'];
+				
+				if ($paged > 0) {
+					$query_vars['paged'] = $paged;
+				}
+				
+				// Clear any conflicting query vars that might have been set by other plugins
+				unset($query_vars['name']);
+				unset($query_vars['pagename']);
+				unset($query_vars['page_id']);
+				unset($query_vars['p']);
+				unset($query_vars['attachment']);
+				
+				if (defined('WP_DEBUG') && WP_DEBUG) {
+					error_log('XF Translator: Handled author archive via request filter - author: ' . $author_slug . ', lang: ' . $language['prefix'] . ', paged: ' . $paged);
+				}
+				
+				return $query_vars;
+			}
+		}
+		
+		return $query_vars;
+	}
+	
+	/**
+	 * Parse request to manually handle author archives with language prefixes
+	 * This is a fallback if rewrite rules don't match or other plugins interfere
+	 * 
+	 * @param WP $wp WordPress environment instance
+	 */
+	public function parse_author_archive_request($wp) {
+		// Only on frontend
+		if (is_admin()) {
+			return;
+		}
+		
+		// Get request URI
+		$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+		$request_path = parse_url($request_uri, PHP_URL_PATH);
+		$request_path = trim($request_path, '/');
+		
+		if (empty($request_path)) {
+			return;
+		}
+		
+		// Get languages and check if path starts with a language prefix
+		$languages = $this->settings->get('languages', array());
+		global $wp_rewrite;
+		$author_base = !empty($wp_rewrite->author_base) ? $wp_rewrite->author_base : 'author';
+		
+		foreach ($languages as $language) {
+			if (empty($language['prefix'])) {
+				continue;
+			}
+			
+			$url_prefix = $this->get_url_prefix_for_language($language);
+			if (!$url_prefix) {
+				continue;
+			}
+			
+			// Check if request path matches: /{lang_prefix}/author/{author_slug}/ or /{lang_prefix}/author/{author_slug}/page/{num}/
+			$pattern = '#^' . preg_quote($url_prefix, '#') . '/' . preg_quote($author_base, '#') . '/([^/]+)(?:/page/([0-9]+))?/?$#';
+			if (preg_match($pattern, $request_path, $matches)) {
+				$author_slug = $matches[1];
+				$paged = isset($matches[2]) ? intval($matches[2]) : 0;
+				
+				// Verify the author exists
+				$user = get_user_by('slug', $author_slug);
+				if (!$user) {
+					return; // Author doesn't exist, let WordPress handle 404
+				}
+				
+				// Set query vars manually
+				$wp->query_vars['author_name'] = $author_slug;
+				$wp->query_vars['xf_lang_prefix'] = $language['prefix'];
+				
+				if ($paged > 0) {
+					$wp->query_vars['paged'] = $paged;
+				}
+				
+				// Clear any conflicting query vars
+				unset($wp->query_vars['name']);
+				unset($wp->query_vars['pagename']);
+				unset($wp->query_vars['page_id']);
+				unset($wp->query_vars['p']);
+				
+				if (defined('WP_DEBUG') && WP_DEBUG) {
+					error_log('XF Translator: Manually parsed author archive request - author: ' . $author_slug . ', lang: ' . $language['prefix'] . ', paged: ' . $paged);
+				}
+				
+				return;
+			}
+		}
+	}
+	
+	/**
+	 * Flush rewrite rules if needed (after plugin activation or settings change)
+	 * This ensures author archive rewrite rules are registered
+	 */
+	public function maybe_flush_rewrite_rules() {
+		// Only flush once - check option to avoid performance issues
+		$flush_flag = get_option('xf_translator_flush_rewrite_rules');
+		if ($flush_flag === '1') {
+			return;
+		}
+		
+		// Flush rewrite rules to register author archive rules
+		flush_rewrite_rules(false);
+		update_option('xf_translator_flush_rewrite_rules', '1');
+		
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			error_log('XF Translator: Flushed rewrite rules to register author archive rules');
+		}
+	}
+	
+	/**
 	 * Filter query to find translated post by language prefix
 	 */
 	public function filter_translated_post_query($query) {
@@ -829,6 +1094,26 @@ class Xf_Translator_Public {
 		
 		// Get language prefix - use get_current_language_prefix() to handle cases where query_var is empty
 		$lang_prefix = $this->get_current_language_prefix();
+		
+		// Check if this is an author archive early - check query vars and request path
+		$author_name = get_query_var('author_name');
+		$author = get_query_var('author');
+		
+		// Also check the request path for author archive pattern
+		global $wp_rewrite;
+		$author_base = isset( $wp_rewrite->author_base ) ? $wp_rewrite->author_base : 'author';
+		$is_author_path = false;
+		if (preg_match('#/' . preg_quote($author_base, '#') . '/([^/]+)/?#', $request_path, $matches)) {
+			$is_author_path = true;
+		}
+		
+		// Skip if this is an author archive - let WordPress handle it normally
+		if (!empty($author_name) || !empty($author) || $is_author_path || $query->is_author) {
+			if (defined('WP_DEBUG') && WP_DEBUG) {
+				error_log('XF Translator: Skipping filter_translated_post_query for author archive - author_name=' . ($author_name ?: 'empty') . ', author=' . ($author ?: 'empty') . ', is_author_path=' . ($is_author_path ? 'true' : 'false') . ', is_author=' . ($query->is_author ? 'true' : 'false'));
+			}
+			return;
+		}
 		
 		// Debug: Log language detection
 		if (defined('WP_DEBUG') && WP_DEBUG) {
@@ -1245,6 +1530,78 @@ class Xf_Translator_Public {
 		}
 		
 		return $new_permalink;
+	}
+	
+	/**
+	 * Modify author link to include language prefix
+	 * 
+	 * @param string $link The author's archive URL
+	 * @param int $author_id The author's ID
+	 * @param string $author_nicename The author's nice name
+	 * @return string Modified author link with language prefix
+	 */
+	public function add_language_prefix_to_author_link($link, $author_id, $author_nicename) {
+		// Only on frontend
+		if (is_admin()) {
+			return $link;
+		}
+		
+		// Get current language prefix from URL or query var
+		$current_lang_prefix = $this->get_current_language_prefix();
+		
+		// If no language prefix is active, return original link
+		if (empty($current_lang_prefix)) {
+			return $link;
+		}
+		
+		// Get URL prefix for the current language
+		$languages = $this->settings->get('languages', array());
+		$url_prefix = '';
+		
+		foreach ($languages as $language) {
+			if (!empty($language['prefix']) && strtolower($language['prefix']) === strtolower($current_lang_prefix)) {
+				$url_prefix = $this->get_url_prefix_for_language($language);
+				break;
+			}
+		}
+		
+		// If no URL prefix found, return original link
+		if (empty($url_prefix)) {
+			return $link;
+		}
+		
+		// Parse the URL
+		$parsed_url = parse_url($link);
+		$scheme = isset($parsed_url['scheme']) ? $parsed_url['scheme'] . '://' : '';
+		$host = isset($parsed_url['host']) ? $parsed_url['host'] : '';
+		$port = isset($parsed_url['port']) ? ':' . $parsed_url['port'] : '';
+		$path = isset($parsed_url['path']) ? $parsed_url['path'] : '';
+		
+		// Check if prefix is already in the URL
+		if (strpos($path, '/' . $url_prefix . '/') !== false) {
+			return $link; // Already has prefix
+		}
+		
+		// Remove leading slash if present
+		$path = ltrim($path, '/');
+		
+		// Add language prefix to the path
+		if (empty($path)) {
+			$new_path = '/' . $url_prefix . '/';
+		} else {
+			$new_path = '/' . $url_prefix . '/' . $path;
+		}
+		
+		// Reconstruct the URL
+		$new_link = $scheme . $host . $port . $new_path;
+		if (isset($parsed_url['query'])) {
+			$new_link .= '?' . $parsed_url['query'];
+		}
+		if (isset($parsed_url['fragment'])) {
+			$new_link .= '#' . $parsed_url['fragment'];
+		}
+		
+		return $new_link;
 	}
 	
 	/**
@@ -2095,6 +2452,13 @@ class Xf_Translator_Public {
 	public function filter_content_by_language($query) {
 		// Only filter on frontend
 		if (is_admin()) {
+			return;
+		}
+		
+		// Skip if this is an author archive - let WordPress handle it normally
+		$author_name = get_query_var('author_name');
+		$author = get_query_var('author');
+		if (!empty($author_name) || !empty($author) || $query->is_author) {
 			return;
 		}
 		
