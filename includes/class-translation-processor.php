@@ -324,25 +324,200 @@ class Xf_Translator_Processor
             $translatable_acf_fields = $this->settings->get_translatable_acf_fields();
 
             if (!empty($translatable_acf_fields)) {
-                $acf_fields = get_fields($post_id);
+                foreach ($translatable_acf_fields as $acf_field_key) {
+                    // Check if this is a nested field (contains '/')
+                    if (strpos($acf_field_key, '/') !== false) {
+                        // Use helper method for nested/repeated fields
+                        $acf_value = $this->get_nested_acf_field_value($acf_field_key, $post_id);
+                    } else {
+                        // Simple field - use get_field directly
+                        $acf_value = get_field($acf_field_key, $post_id);
+                    }
 
-                if ($acf_fields && is_array($acf_fields)) {
-                    foreach ($translatable_acf_fields as $acf_field_key) {
-                        if (isset($acf_fields[$acf_field_key])) {
-                            $acf_value = $acf_fields[$acf_field_key];
-
-                            // Only include ACF fields that contain text content (string/numeric)
-                            // Skip complex fields like images, galleries, etc.
-                            if (!empty($acf_value) && (is_string($acf_value) || is_numeric($acf_value))) {
-                                $data['acf_' . $acf_field_key] = $acf_value;
-                            }
-                        }
+                    // Only include ACF fields that contain text content (string/numeric)
+                    // Skip complex fields like images, galleries, etc.
+                    if ($acf_value !== null && $acf_value !== false && 
+                        !empty(trim((string)$acf_value)) && (is_string($acf_value) || is_numeric($acf_value))) {
+                        $data['acf_' . $acf_field_key] = $acf_value;
                     }
                 }
             }
         }
 
         return $data;
+    }
+
+    /**
+     * Get nested ACF field value from a field path (e.g., "sbposts__content/button_label")
+     * 
+     * @param string $field_path Field path (e.g., "parent_field/sub_field" or "parent_field/0/sub_field" for specific row)
+     * @param int $post_id Post ID
+     * @return mixed Field value, or null if not found. For repeaters, returns combined string with row separator.
+     */
+    private function get_nested_acf_field_value($field_path, $post_id) {
+        // Check if path contains a separator (nested field)
+        if (strpos($field_path, '/') === false) {
+            // Simple field, use get_field directly
+            $value = get_field($field_path, $post_id);
+            // Only return string/numeric values
+            if (($value !== null && $value !== false) && (is_string($value) || is_numeric($value)) && !empty(trim((string)$value))) {
+                return $value;
+            }
+            return null;
+        }
+        
+        // Split the path
+        $path_parts = explode('/', $field_path);
+        $parent_field = $path_parts[0];
+        $sub_field = $path_parts[1];
+        
+        // Get parent field value
+        $parent_value = get_field($parent_field, $post_id);
+        
+        if ($parent_value === null || $parent_value === false) {
+            error_log('XF Translator: Parent field "' . $parent_field . '" not found for nested field "' . $field_path . '" in post ID: ' . $post_id);
+            return null;
+        }
+        
+        // Check if parent is a repeater (array of rows)
+        if (is_array($parent_value) && isset($parent_value[0]) && is_array($parent_value[0])) {
+            // It's a repeater - extract sub-field from all rows
+            $values = array();
+            $row_count = 0;
+            foreach ($parent_value as $row_index => $row) {
+                if (isset($row[$sub_field])) {
+                    $value = $row[$sub_field];
+                    // Only include non-empty string/numeric values
+                    if (($value !== null && $value !== false) && (is_string($value) || is_numeric($value)) && !empty(trim((string)$value))) {
+                        $values[$row_index] = (string)$value;
+                        $row_count++;
+                    }
+                }
+            }
+            
+            if (empty($values)) {
+                error_log('XF Translator: No translatable values found in repeater field "' . $field_path . '" for post ID: ' . $post_id);
+                return null;
+            }
+            
+            // Use a unique separator format: |||XF_ROW_SEP_<count>|||
+            // This format is very unlikely to appear in translations and includes row count
+            $row_count_for_sep = count($values);
+            $separator = '|||XF_ROW_SEP_' . $row_count_for_sep . '|||';
+            $combined = $separator . implode($separator, $values) . $separator;
+            
+            error_log('XF Translator: Extracted ' . $row_count . ' row(s) from repeater field "' . $field_path . '" for post ID: ' . $post_id);
+            return $combined;
+        } elseif (is_array($parent_value) && isset($parent_value[$sub_field])) {
+            // It's a group field - single value
+            $value = $parent_value[$sub_field];
+            if (($value !== null && $value !== false) && (is_string($value) || is_numeric($value)) && !empty(trim((string)$value))) {
+                return $value;
+            }
+            return null;
+        } else {
+            error_log('XF Translator: Sub-field "' . $sub_field . '" not found in parent field "' . $parent_field . '" for nested field "' . $field_path . '" in post ID: ' . $post_id);
+            return null;
+        }
+    }
+
+    /**
+     * Update nested ACF field value in a post
+     * 
+     * @param string $field_path Field path (e.g., "sbposts__content/button_label")
+     * @param mixed $translated_value Translated value (for repeaters, uses XF_ROW_SEP markers)
+     * @param int $post_id Post ID
+     * @return bool Success
+     */
+    private function update_nested_acf_field_value($field_path, $translated_value, $post_id) {
+        // Check if path contains a separator (nested field)
+        if (strpos($field_path, '/') === false) {
+            // Simple field, use update_field directly
+            return update_field($field_path, $translated_value, $post_id);
+        }
+        
+        // Split the path
+        $path_parts = explode('/', $field_path);
+        $parent_field = $path_parts[0];
+        $sub_field = $path_parts[1];
+        
+        // Get current parent field value
+        $parent_value = get_field($parent_field, $post_id);
+
+        // Try to get the ACF field object (to use field keys when updating)
+        $parent_field_obj = function_exists('acf_get_field') ? acf_get_field($parent_field) : null;
+        $parent_field_key = ($parent_field_obj && isset($parent_field_obj['key'])) ? $parent_field_obj['key'] : $parent_field;
+        
+        if ($parent_value === null || $parent_value === false) {
+            error_log('XF Translator: Cannot update nested field "' . $field_path . '" - parent field not found in post ID: ' . $post_id);
+            return false;
+        }
+        
+        // Check if parent is a repeater (array of rows)
+        if (is_array($parent_value) && isset($parent_value[0]) && is_array($parent_value[0])) {
+            // It's a repeater - parse translated value using separator format
+            $translated_values = array();
+            
+            if (is_string($translated_value)) {
+                // Parse format: |||XF_ROW_SEP_<count>|||value1|||XF_ROW_SEP_<count>|||value2...
+                // Extract the row count from the separator
+                if (preg_match('/\|\|\|XF_ROW_SEP_(\d+)\|\|\|/', $translated_value, $sep_match)) {
+                    $expected_row_count = (int)$sep_match[1];
+                    $separator = '|||XF_ROW_SEP_' . $expected_row_count . '|||';
+                    
+                    // Split by separator and remove empty first/last elements
+                    $parts = explode($separator, $translated_value);
+                    $parts = array_filter($parts, function($part) {
+                        return !empty(trim($part));
+                    });
+                    $parts = array_values($parts); // Re-index
+                    
+                    // Map translated values to row indices
+                    foreach ($parts as $index => $part) {
+                        $translated_values[$index] = trim($part);
+                    }
+                    
+                    error_log('XF Translator: Parsed ' . count($translated_values) . ' translated value(s) from repeater field "' . $field_path . '" for post ID: ' . $post_id);
+                } else {
+                    // Fallback: try to detect any separator pattern
+                    error_log('XF Translator: Could not parse separator format for field "' . $field_path . '", trying fallback');
+                    // If separator format not found, treat as single value (unlikely but handle gracefully)
+                    if (!empty(trim($translated_value))) {
+                        $translated_values[0] = trim($translated_value);
+                    }
+                }
+            }
+            
+            // Update each row that has a translation
+            $updated = false;
+            $rows_updated_count = 0;
+            foreach ($parent_value as $row_index => $row) {
+                if (isset($translated_values[$row_index]) && !empty($translated_values[$row_index])) {
+                    $row[$sub_field] = $translated_values[$row_index];
+                    $parent_value[$row_index] = $row;
+                    $updated = true;
+                    $rows_updated_count++;
+                }
+            }
+            
+            if ($updated) {
+                // Use field key if available to improve ACF reliability
+                $result = update_field($parent_field_key, $parent_value, $post_id);
+                error_log('XF Translator: Updated ' . $rows_updated_count . ' row(s) of repeater field "' . $parent_field . '" (key: ' . $parent_field_key . ') for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
+                return $result;
+            } else {
+                error_log('XF Translator: No rows updated for repeater field "' . $field_path . '" in post ID: ' . $post_id . ' - translated values count: ' . count($translated_values));
+            }
+        } elseif (is_array($parent_value)) {
+            // It's a group field - single value
+            $parent_value[$sub_field] = $translated_value;
+            // Use field key if available
+            $result = update_field($parent_field_key, $parent_value, $post_id);
+            error_log('XF Translator: Updated group field "' . $field_path . '" (key: ' . $parent_field_key . ') for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
+            return $result;
+        }
+        
+        return false;
     }
     
     /**
@@ -1693,8 +1868,14 @@ class Xf_Translator_Processor
 
             // Update the field
             if (strpos($field_key, 'acf_') === 0 && function_exists('update_field')) {
-                // ACF field
-                update_field($actual_field_name, $translated_value, $translated_post_id);
+                // ACF field - check if it's a nested field
+                if (strpos($actual_field_name, '/') !== false) {
+                    // Nested field - use special update method
+                    $this->update_nested_acf_field_value($actual_field_name, $translated_value, $translated_post_id);
+                } else {
+                    // Simple field - use standard update
+                    update_field($actual_field_name, $translated_value, $translated_post_id);
+                }
             } elseif (strpos($field_key, 'meta_') === 0) {
                 // Regular post meta - save both to translated post and with language prefix for frontend filtering
                 update_post_meta($translated_post_id, $actual_field_name, $translated_value);

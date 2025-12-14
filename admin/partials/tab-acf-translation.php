@@ -165,56 +165,141 @@ $translatable_acf_fields = $settings->get_translatable_acf_fields();
         ?>
     </div>
 
-    <!-- Translate ACF Options Fields Only -->
-    <!-- <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff3cd; border: 1px solid #ffc107; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
-        <h2><?php _e('Translate ACF Options Fields', 'xf-translator'); ?></h2>
+    <!-- Translate ACF Options Fields (e.g., footer-options) -->
+    <div class="api-translator-section" style="margin-top: 30px; padding: 20px; background: #fff; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+        <h2><?php _e('Translate ACF Options Pages', 'xf-translator'); ?></h2>
         <p>
-            <?php _e('This tool will translate ACF fields that are stored in ACF Options Pages (not attached to individual posts). These fields appear on all posts/pages, like "default_top_quote" or global site settings.', 'xf-translator'); ?>
+            <?php _e('Translate site-wide ACF Options Pages (e.g., footer-options, header-options, theme-options). These are global settings pages, not posts.', 'xf-translator'); ?>
         </p>
-        <p class="description" style="color: #856404; font-weight: 600;">
-            <?php _e('⚠️ Important: This will translate options fields for ALL configured languages. Make sure you have configured translatable ACF fields above before running this.', 'xf-translator'); ?>
-        </p>
-        
+
         <?php
-        // Show which fields are configured
-        $translatable_acf_fields = $settings->get_translatable_acf_fields();
-        if (!empty($translatable_acf_fields)) {
-            echo '<div style="background: #fff; padding: 15px; border: 1px solid #ddd; margin: 15px 0; border-radius: 3px;">';
-            echo '<strong>' . __('Configured ACF Fields:', 'xf-translator') . '</strong> ';
-            echo '<span style="color: #666;">' . implode(', ', array_map('esc_html', $translatable_acf_fields)) . '</span>';
-            echo '</div>';
-        }
-        
-        // Show which languages will be processed
-        $languages = $settings->get('languages', array());
-        if (!empty($languages)) {
-            echo '<div style="background: #fff; padding: 15px; border: 1px solid #ddd; margin: 15px 0; border-radius: 3px;">';
-            echo '<strong>' . __('Languages to translate:', 'xf-translator') . '</strong> ';
-            $lang_names = array();
-            foreach ($languages as $lang) {
-                $lang_names[] = $lang['name'] . ' (' . $lang['prefix'] . ')';
+        // Detect available options pages
+        $options_pages = array('', 'options', 'option');
+        if (function_exists('acf_get_options_pages')) {
+            $acf_pages = acf_get_options_pages();
+            if ($acf_pages && is_array($acf_pages)) {
+                foreach ($acf_pages as $slug => $page) {
+                    if (!empty($slug) && !in_array($slug, $options_pages, true)) {
+                        $options_pages[] = $slug;
+                    }
+                }
             }
-            echo '<span style="color: #666;">' . implode(', ', array_map('esc_html', $lang_names)) . '</span>';
-            echo '</div>';
         }
+
+        $common_pages = array('acf-options', 'footer-options', 'header-options', 'theme-options', 'site-options', 'global-options');
+        foreach ($common_pages as $page_slug) {
+            if (!in_array($page_slug, $options_pages, true)) {
+                $options_pages[] = $page_slug;
+            }
+        }
+
+        global $wpdb;
+        $option_keys = $wpdb->get_col(
+            "SELECT DISTINCT option_name FROM {$wpdb->options} 
+             WHERE option_name LIKE 'options_%' 
+             OR option_name LIKE 'acf-options_%'
+             OR option_name LIKE 'footer-options_%'
+             OR option_name LIKE 'header-options_%'
+             OR option_name LIKE 'theme-options_%'
+             OR option_name LIKE 'site-options_%'
+             OR option_name LIKE 'global-options_%'
+             LIMIT 100"
+        );
+
+        foreach ($option_keys as $key) {
+            $parts = explode('_', $key, 2);
+            if (!empty($parts[0]) && !in_array($parts[0], $options_pages, true)) {
+                $options_pages[] = $parts[0];
+            }
+        }
+
+        $options_pages = array_values(array_unique($options_pages));
         ?>
-        
-        <form method="post" action="" style="margin-top: 15px;">
+
+        <div style="background: #f8f9f9; padding: 12px 15px; border: 1px solid #e2e4e7; margin: 15px 0; border-radius: 4px;">
+            <strong><?php _e('Detected options pages:', 'xf-translator'); ?></strong>
+            <?php if (!empty($options_pages)) : ?>
+                <span style="color: #555;"><?php echo esc_html(implode(', ', $options_pages)); ?></span>
+            <?php else : ?>
+                <span style="color: #dc3232;"><?php _e('No options pages detected.', 'xf-translator'); ?></span>
+            <?php endif; ?>
+        </div>
+
+        <div style="background: #f8f9f9; padding: 12px 15px; border: 1px solid #e2e4e7; margin: 15px 0; border-radius: 4px;">
+            <strong><?php _e('Configured translatable ACF fields:', 'xf-translator'); ?></strong>
+            <?php if (!empty($translatable_acf_fields)) : ?>
+                <span style="color: #555;"><?php echo esc_html(implode(', ', $translatable_acf_fields)); ?></span>
+            <?php else : ?>
+                <span style="color: #dc3232;"><?php _e('No ACF fields selected yet. Choose fields above first.', 'xf-translator'); ?></span>
+            <?php endif; ?>
+        </div>
+
+        <?php if (empty($languages)) : ?>
+            <div class="notice notice-warning" style="margin: 15px 0;">
+                <p><?php _e('Add at least one language in the Settings tab before translating options pages.', 'xf-translator'); ?></p>
+            </div>
+        <?php endif; ?>
+
+        <form method="post" action="" style="margin-top: 10px;">
             <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
             <input type="hidden" name="api_translator_action" value="translate_acf_options_fields">
-            <button type="submit" 
-                    class="button button-primary" 
-                    style="background: #ffc107; border-color: #ffc107; color: #000; font-weight: 600;"
-                    onclick="return confirm('<?php esc_attr_e('This will translate ACF options fields for all configured languages. This will use API credits. Are you sure you want to continue?', 'xf-translator'); ?>');">
-                <?php _e('Translate ACF Options Fields for All Languages', 'xf-translator'); ?>
+
+            <table class="form-table">
+                <tr>
+                    <th scope="row">
+                        <label><?php _e('Target languages', 'xf-translator'); ?></label>
+                    </th>
+                    <td>
+                        <?php if (!empty($languages)) : ?>
+                            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                                <?php foreach ($languages as $lang) : ?>
+                                    <label style="display: inline-flex; align-items: center; gap: 6px; background: #fff; padding: 6px 10px; border: 1px solid #e2e4e7; border-radius: 4px;">
+                                        <input type="checkbox" name="language_prefix[]" value="<?php echo esc_attr($lang['prefix']); ?>">
+                                        <span><?php echo esc_html($lang['name']); ?> (<?php echo esc_html($lang['prefix']); ?>)</span>
+                                    </label>
+                                <?php endforeach; ?>
+                            </div>
+                            <p class="description"><?php _e('If none are selected, all configured languages will be processed.', 'xf-translator'); ?></p>
+                        <?php else : ?>
+                            <em><?php _e('No languages configured.', 'xf-translator'); ?></em>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label><?php _e('Options pages', 'xf-translator'); ?></label>
+                    </th>
+                    <td>
+                        <?php if (!empty($options_pages)) : ?>
+                            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                                <?php foreach ($options_pages as $page_slug) : ?>
+                                    <label style="display: inline-flex; align-items: center; gap: 6px; background: #fff; padding: 6px 10px; border: 1px solid #e2e4e7; border-radius: 4px;">
+                                        <input type="checkbox" name="option_pages[]" value="<?php echo esc_attr($page_slug); ?>">
+                                        <span><?php echo esc_html($page_slug === '' ? 'options' : $page_slug); ?></span>
+                                    </label>
+                                <?php endforeach; ?>
+                            </div>
+                            <p class="description"><?php _e('If none are selected, all detected options pages will be processed.', 'xf-translator'); ?></p>
+                        <?php else : ?>
+                            <em><?php _e('No options pages detected.', 'xf-translator'); ?></em>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            </table>
+
+            <button type="submit"
+                    class="button button-primary"
+                    <?php echo empty($translatable_acf_fields) ? 'disabled' : ''; ?>
+                    onclick="return confirm('<?php esc_attr_e('Translate ACF options pages now? This will use API credits.', 'xf-translator'); ?>');">
+                <?php _e('Translate Options Pages', 'xf-translator'); ?>
             </button>
         </form>
-        
+
         <?php
         // Show admin notices if any
         settings_errors('xf_translator_messages');
         ?>
-    </div> -->
+    </div>
 
     <!-- Step 2: Select Fields and Language -->
     <!-- <div class="api-translator-section" style="margin-top: 30px; border: 1px solid #ddd; padding: 20px; background: #f9f9f9;">

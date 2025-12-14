@@ -250,6 +250,14 @@ class Xf_Translator {
         
         // Filter categories in admin based on post language
         $this->loader->add_filter('get_terms', $plugin_admin, 'filter_admin_categories_by_language', 10, 4);
+        
+        // Filter ACF relationship and post_object fields to show only posts matching current post language
+        $this->loader->add_filter('acf/fields/relationship/query', $plugin_admin, 'filter_acf_posts_by_language', 10, 3);
+        $this->loader->add_filter('acf/fields/post_object/query', $plugin_admin, 'filter_acf_posts_by_language', 10, 3);
+        
+        // Also filter specific fields for "You May Like" and sidebar posts
+        $this->loader->add_filter('acf/fields/relationship/query/name=yml__select_posts', $plugin_admin, 'filter_acf_posts_by_language', 10, 3);
+        $this->loader->add_filter('acf/fields/post_object/query/name=select_posts', $plugin_admin, 'filter_acf_posts_by_language', 10, 3);
 
 	}
 

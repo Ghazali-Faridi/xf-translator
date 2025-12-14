@@ -80,6 +80,25 @@ $languages = $settings->get('languages', array());
             </button>
         </form>
     </div>
+<!--     
+    <div class="notice-inline notice-warning" style="margin-bottom: 20px; padding: 15px; border-left: 4px solid #f0ad4e;">
+        <form method="post" action="" class="xf-delete-duplicates-form" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;" onsubmit="return confirm('<?php echo esc_js(__('This will delete duplicate menu items from the selected language menus and also remove menu items from other languages stored in those menus. Are you sure?', 'xf-translator')); ?>');">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="delete_duplicate_menu_items">
+            <label for="delete-duplicates-language" style="font-weight: 600; color: #f0ad4e;"><?php _e('Delete duplicate menu items from:', 'xf-translator'); ?></label>
+            <select id="delete-duplicates-language" name="target_language" required>
+                <option value=""><?php _e('Select Language', 'xf-translator'); ?></option>
+                <?php foreach ($languages as $language) : ?>
+                    <option value="<?php echo esc_attr($language['name']); ?>">
+                        <?php echo esc_html($language['name']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <button type="submit" class="button button-secondary" style="background-color: #f0ad4e; border-color: #f0ad4e; color: #fff;">
+                <?php _e('Delete Duplicates', 'xf-translator'); ?>
+            </button>
+        </form>
+    </div> -->
     <?php endif; ?>
     
     <?php settings_errors('api_translator_messages'); ?>

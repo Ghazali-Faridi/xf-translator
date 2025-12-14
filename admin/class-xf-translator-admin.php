@@ -275,6 +275,10 @@ class Xf_Translator_Admin {
                 $this->handle_cleanup_orphaned_menu_items();
                 break;
                 
+            case 'delete_duplicate_menu_items':
+                $this->handle_delete_duplicate_menu_items();
+                break;
+                
             case 'translate_menu_item':
                 $this->handle_translate_menu_item();
                 break;
@@ -728,6 +732,12 @@ class Xf_Translator_Admin {
         }
         
         if (!$post) {
+            return;
+        }
+        
+        // Skip system post types that shouldn't be translated
+        $excluded_post_types = array('nav_menu_item', 'attachment', 'revision', 'customize_changeset');
+        if (in_array($post->post_type, $excluded_post_types, true)) {
             return;
         }
         
@@ -2581,6 +2591,131 @@ class Xf_Translator_Admin {
             add_settings_error('api_translator_messages', 'cleanup_success', $message, 'success');
         } else {
             add_settings_error('api_translator_messages', 'cleanup_no_orphans', __('No orphaned menu items found. All translated menu items are in their correct menus.', 'xf-translator'), 'info');
+        }
+    }
+    
+    /**
+     * Handle deletion of duplicate menu items from a specific language
+     */
+    private function handle_delete_duplicate_menu_items() {
+        if (!isset($_POST['target_language'])) {
+            add_settings_error('api_translator_messages', 'delete_duplicates_error', __('Target language is required.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $target_language = sanitize_text_field($_POST['target_language']);
+        $languages = $this->settings->get('languages', array());
+        $target_language_prefix = '';
+        
+        foreach ($languages as $language) {
+            if ($language['name'] === $target_language) {
+                $target_language_prefix = $language['prefix'];
+                break;
+            }
+        }
+        
+        if (empty($target_language_prefix)) {
+            add_settings_error('api_translator_messages', 'delete_duplicates_error', __('Invalid target language.', 'xf-translator'), 'error');
+            return;
+        }
+        
+        $all_menus = wp_get_nav_menus();
+        $translated_menus = array();
+        
+        // Find all translated menus for the target language
+        foreach ($all_menus as $menu) {
+            $menu_language = get_term_meta($menu->term_id, '_xf_translator_language', true);
+            if ($menu_language === $target_language_prefix) {
+                $translated_menus[] = $menu;
+            }
+        }
+        
+        if (empty($translated_menus)) {
+            add_settings_error('api_translator_messages', 'delete_duplicates_no_menus', __('No translated menus found for the selected language.', 'xf-translator'), 'info');
+            return;
+        }
+        
+        $duplicates_deleted = 0;
+        $cross_language_deleted = 0;
+        
+        // Process each translated menu
+        foreach ($translated_menus as $menu) {
+            $menu_items = wp_get_nav_menu_items($menu->term_id);
+            
+            if (empty($menu_items)) {
+                continue;
+            }
+            
+            // Group items by their unique identifier (title + URL + parent)
+            $item_groups = array();
+            
+            foreach ($menu_items as $menu_item) {
+                // Get item language meta
+                $item_language = get_post_meta($menu_item->ID, '_xf_translator_language', true);
+                
+                // Delete items from other languages stored in this menu
+                if (!empty($item_language) && $item_language !== $target_language_prefix) {
+                    if (wp_delete_post($menu_item->ID, true)) {
+                        $cross_language_deleted++;
+                    }
+                    continue;
+                }
+                
+                // Create a unique key for duplicate detection
+                // Use title, URL, object_id, and parent to identify duplicates
+                $item_key = md5(
+                    $menu_item->title . '|' . 
+                    $menu_item->url . '|' . 
+                    $menu_item->object_id . '|' . 
+                    $menu_item->menu_item_parent
+                );
+                
+                if (!isset($item_groups[$item_key])) {
+                    $item_groups[$item_key] = array();
+                }
+                
+                $item_groups[$item_key][] = $menu_item;
+            }
+            
+            // For each group with more than one item, delete duplicates (keep the first one)
+            foreach ($item_groups as $key => $group) {
+                if (count($group) > 1) {
+                    // Keep the first item, delete the rest
+                    for ($i = 1; $i < count($group); $i++) {
+                        if (wp_delete_post($group[$i]->ID, true)) {
+                            $duplicates_deleted++;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Clear cache
+        wp_cache_flush();
+        
+        // Report results
+        if ($duplicates_deleted > 0 || $cross_language_deleted > 0) {
+            $messages = array();
+            
+            if ($duplicates_deleted > 0) {
+                $messages[] = sprintf(
+                    __('Deleted %1$d duplicate menu item(s) from %2$s menus.', 'xf-translator'),
+                    $duplicates_deleted,
+                    $target_language
+                );
+            }
+            
+            if ($cross_language_deleted > 0) {
+                $messages[] = sprintf(
+                    __('Deleted %1$d menu item(s) from other languages found in %2$s menus.', 'xf-translator'),
+                    $cross_language_deleted,
+                    $target_language
+                );
+            }
+            
+            add_settings_error('api_translator_messages', 'delete_duplicates_success', implode(' ', $messages), 'success');
+        } else {
+            add_settings_error('api_translator_messages', 'delete_duplicates_none', __('No duplicate menu items or cross-language items found in the selected language menus.', 'xf-translator'), 'info');
         }
     }
     
@@ -5969,7 +6104,18 @@ class Xf_Translator_Admin {
      */
     private function handle_translate_acf_options_fields()
     {
-        $result = $this->translate_acf_options_fields();
+        $language_prefixes = array();
+        $selected_option_pages = array();
+
+        if (isset($_POST['language_prefix'])) {
+            $language_prefixes = array_filter(array_map('sanitize_text_field', (array) $_POST['language_prefix']));
+        }
+
+        if (isset($_POST['option_pages'])) {
+            $selected_option_pages = array_filter(array_map('sanitize_text_field', (array) $_POST['option_pages']));
+        }
+
+        $result = $this->translate_acf_options_fields($language_prefixes, $selected_option_pages);
         
         if ($result['success']) {
             add_settings_error(
@@ -5994,11 +6140,11 @@ class Xf_Translator_Admin {
     }
 
     /**
-     * Translate ACF options fields for all configured languages
+     * Translate ACF options fields for configured languages / pages
      * 
      * @return array Result array with 'success', 'translated', 'languages_processed', 'not_found', 'errors' keys
      */
-    public function translate_acf_options_fields()
+    public function translate_acf_options_fields($language_prefixes = array(), $selected_option_pages = array())
     {
         $result = array(
             'success' => true,
@@ -6027,10 +6173,39 @@ class Xf_Translator_Admin {
             $result['success'] = false;
             return $result;
         }
+
+        // If specific languages were requested, filter to those
+        if (!empty($language_prefixes)) {
+            $languages = array_values(array_filter($languages, function ($lang) use ($language_prefixes) {
+                return in_array($lang['prefix'], $language_prefixes, true);
+            }));
+
+            if (empty($languages)) {
+                $result['errors'][] = 'Selected languages not found in configuration.';
+                error_log('XF Translator: Selected languages not found for options translation: ' . implode(', ', $language_prefixes));
+                $result['success'] = false;
+                return $result;
+            }
+        }
         
         // Get all ACF options pages dynamically
         $options_pages = $this->get_all_acf_options_pages();
         error_log('XF Translator: Found ' . count($options_pages) . ' ACF options pages: ' . implode(', ', $options_pages));
+
+        // If specific option pages were requested, filter to those
+        if (!empty($selected_option_pages)) {
+            // Always include default aliases so legacy saves under "option"/"options" are still caught
+            $with_defaults = array_merge($selected_option_pages, array('', 'options', 'option'));
+            $options_pages = array_values(array_intersect($options_pages, $with_defaults));
+            error_log('XF Translator: Filtering options pages to: ' . implode(', ', $options_pages));
+
+            if (empty($options_pages)) {
+                $result['errors'][] = 'Selected options pages not found.';
+                error_log('XF Translator: Selected options pages not found for options translation: ' . implode(', ', $selected_option_pages));
+                $result['success'] = false;
+                return $result;
+            }
+        }
         
         // Load translation processor
         require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
@@ -7134,6 +7309,103 @@ class Xf_Translator_Admin {
         }
         
         return $filtered_terms;
+    }
+
+    /**
+     * Filter ACF relationship/post_object fields to show only posts matching current post language
+     * 
+     * @param array $args WP_Query arguments
+     * @param array $field ACF field array
+     * @param int $post_id Current post ID
+     * @return array Modified query arguments
+     */
+    public function filter_acf_posts_by_language($args, $field, $post_id) {
+        // Only filter in admin area
+        if (!is_admin()) {
+            return $args;
+        }
+        
+        // Get current post ID - check multiple sources
+        $current_post_id = 0;
+        
+        // First, try the post_id parameter passed to the filter
+        if ($post_id && $post_id > 0) {
+            $current_post_id = $post_id;
+        } else {
+            // Check if this is an AJAX request
+            if (defined('DOING_AJAX') && DOING_AJAX) {
+                // For AJAX requests, check the post_id in the request
+                if (isset($_POST['post_id'])) {
+                    $current_post_id = intval($_POST['post_id']);
+                } elseif (isset($_GET['post_id'])) {
+                    $current_post_id = intval($_GET['post_id']);
+                }
+            } else {
+                // For regular page loads, check screen and GET parameter
+                $screen = get_current_screen();
+                if ($screen && in_array($screen->base, array('post', 'post-new'))) {
+                    if (isset($_GET['post'])) {
+                        $current_post_id = intval($_GET['post']);
+                    } elseif ($screen->base === 'post' && isset($GLOBALS['post'])) {
+                        $current_post_id = $GLOBALS['post']->ID;
+                    }
+                }
+            }
+        }
+        
+        // Get current post language
+        $post_language = '';
+        
+        // Check if we have a post ID (editing existing post)
+        if ($current_post_id && $current_post_id > 0) {
+            $post_language = get_post_meta($current_post_id, '_xf_translator_language', true);
+            
+            // If still no language, check if it's a translated post via original_post_id
+            if (empty($post_language)) {
+                $original_post_id = get_post_meta($current_post_id, '_xf_translator_original_post_id', true);
+                if (!$original_post_id) {
+                    $original_post_id = get_post_meta($current_post_id, '_api_translator_original_post_id', true);
+                }
+                
+                // If this is a translated post but doesn't have language meta, don't filter
+                if ($original_post_id) {
+                    return $args;
+                }
+            }
+        } else {
+            // For new posts, default to showing only English posts (no language)
+            $post_language = '';
+        }
+        
+        // Add meta query to filter by language
+        if (!isset($args['meta_query'])) {
+            $args['meta_query'] = array();
+        }
+        
+        // If post has no language (English/original), show only posts with no language
+        if (empty($post_language)) {
+            $args['meta_query'][] = array(
+                'relation' => 'OR',
+                array(
+                    'key' => '_xf_translator_language',
+                    'compare' => 'NOT EXISTS'
+                ),
+                array(
+                    'key' => '_xf_translator_language',
+                    'value' => '',
+                    'compare' => '='
+                )
+            );
+        } else {
+            // If post has a language, show only posts with the same language
+            $args['meta_query'][] = array(
+                'key' => '_xf_translator_language',
+                'value' => $post_language,
+                'compare' => '='
+            );
+        }
+        
+        return $args;
     }
 
 }
