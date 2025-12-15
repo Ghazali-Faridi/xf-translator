@@ -99,6 +99,9 @@ class Xf_Translator_Public {
 		// Filter taxonomy archive queries to show translated posts
 		add_action('pre_get_posts', array($this, 'filter_taxonomy_archive_query'), 10, 1);
 		
+		// Filter author archive queries to show only translated posts when on language-prefixed URLs
+		add_action('pre_get_posts', array($this, 'filter_author_archive_query'), 10, 1);
+		
 		// Filter meta fields to show translated versions
 		add_filter('get_post_meta', array($this, 'filter_get_post_meta'), 10, 4);
 		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
@@ -2443,6 +2446,91 @@ class Xf_Translator_Public {
 	}
 	
 	/**
+	 * Filter author archive queries to show only translated posts when on language-prefixed URLs
+	 * 
+	 * @param WP_Query $query Query object
+	 */
+	public function filter_author_archive_query($query) {
+		// Only filter on frontend
+		if (is_admin()) {
+			return;
+		}
+		
+		// Only filter main query on author archives
+		if (!$query->is_main_query() || !$query->is_author) {
+			return;
+		}
+		
+		// Get current language prefix from URL
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		
+		// If no language prefix, show only original posts (exclude translations)
+		if (empty($lang_prefix)) {
+			global $wpdb;
+			$translated_post_ids = $wpdb->get_col(
+				"SELECT DISTINCT p.ID 
+				FROM {$wpdb->posts} p
+				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
+					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
+				WHERE p.post_status = 'publish'
+				AND p.post_type IN ('post', 'page')
+				AND p.post_type != 'revision'"
+			);
+			
+			if (!empty($translated_post_ids)) {
+				$existing_not_in = $query->get('post__not_in') ?: array();
+				$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+			}
+			return;
+		}
+		
+		// On language-prefixed author archive: Show only translated posts for this language
+		// Get the author ID
+		$author_id = $query->get('author');
+		if (empty($author_id)) {
+			$author_name = $query->get('author_name');
+			if (!empty($author_name)) {
+				$user = get_user_by('slug', $author_name);
+				if ($user) {
+					$author_id = $user->ID;
+				}
+			}
+		}
+		
+		if (empty($author_id)) {
+			return;
+		}
+		
+		// Get all translated post IDs for this language by this author
+		global $wpdb;
+		$translated_post_ids = $wpdb->get_col($wpdb->prepare(
+			"SELECT DISTINCT p.ID 
+			FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+				AND pm1.meta_key = '_xf_translator_language' 
+				AND pm1.meta_value = %s
+			INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+				AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+			WHERE p.post_status = 'publish'
+			AND p.post_type IN ('post', 'page')
+			AND p.post_type != 'revision'
+			AND p.post_author = %d
+			ORDER BY p.post_date DESC",
+			$lang_prefix,
+			$author_id
+		));
+		
+		if (!empty($translated_post_ids)) {
+			$query->set('post__in', $translated_post_ids);
+			$query->set('orderby', 'date');
+			$query->set('order', 'DESC');
+		} else {
+			// No translated posts for this author in this language, show nothing
+			$query->set('post__in', array(0));
+		}
+	}
+	
+	/**
 	 * Filter all queries to show only content for the current language
 	 * - On English (no prefix): Show only original posts, exclude translated posts
 	 * - On language-prefixed URLs: Show only translated posts for that language
@@ -2455,7 +2543,7 @@ class Xf_Translator_Public {
 			return;
 		}
 		
-		// Skip if this is an author archive - let WordPress handle it normally
+		// Skip if this is an author archive - handled by filter_author_archive_query
 		$author_name = get_query_var('author_name');
 		$author = get_query_var('author');
 		if (!empty($author_name) || !empty($author) || $query->is_author) {
