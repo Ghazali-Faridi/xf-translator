@@ -134,6 +134,9 @@ class Xf_Translator_Public {
 		
 		// Filter query_posts() results (query_posts bypasses pre_get_posts)
 		add_filter('the_posts', array($this, 'filter_query_posts_results'), 10, 2);
+		
+		// Filter HTML lang attribute to match current language
+		add_filter('language_attributes', array($this, 'filter_language_attributes'), 10, 2);
 
 	}
 
@@ -1768,6 +1771,74 @@ class Xf_Translator_Public {
 		}
 		
 		return $lang_prefix ?: '';
+	}
+	
+	/**
+	 * Filter HTML lang attribute to match current language
+	 *
+	 * @param string $output The current language attributes output
+	 * @param string $doctype The type of HTML document (xhtml|html)
+	 * @return string Modified language attributes
+	 */
+	public function filter_language_attributes( $output, $doctype = 'html' ) {
+		// Only filter on frontend
+		if ( is_admin() ) {
+			return $output;
+		}
+		
+		// Get current language prefix
+		$lang_prefix = $this->get_current_language_prefix();
+		
+		// If no language prefix, return default output
+		if ( empty( $lang_prefix ) ) {
+			return $output;
+		}
+		
+		// Convert language prefix to proper lang attribute format
+		$lang_attr = $this->convert_prefix_to_lang_attribute( $lang_prefix );
+		
+		// Replace the lang attribute in the output
+		// WordPress outputs: lang="en-US" or dir="rtl" lang="en-US"
+		// We need to replace it with our detected language while preserving other attributes
+		if ( preg_match( '/lang="[^"]*"/', $output, $matches ) ) {
+			// Replace existing lang attribute
+			$output = preg_replace( '/lang="[^"]*"/', 'lang="' . esc_attr( $lang_attr ) . '"', $output );
+		} else {
+			// If no lang attribute found, add it
+			// Preserve existing attributes (like dir="rtl") by prepending or appending
+			if ( ! empty( $output ) ) {
+				$output = trim( $output ) . ' lang="' . esc_attr( $lang_attr ) . '"';
+			} else {
+				$output = 'lang="' . esc_attr( $lang_attr ) . '"';
+			}
+		}
+		
+		// Also handle xml:lang for xhtml doctype
+		if ( 'xhtml' === $doctype ) {
+			if ( preg_match( '/xml:lang="[^"]*"/', $output, $matches ) ) {
+				$output = preg_replace( '/xml:lang="[^"]*"/', 'xml:lang="' . esc_attr( $lang_attr ) . '"', $output );
+			} else {
+				if ( ! empty( $output ) ) {
+					$output = trim( $output ) . ' xml:lang="' . esc_attr( $lang_attr ) . '"';
+				} else {
+					$output = 'xml:lang="' . esc_attr( $lang_attr ) . '"';
+				}
+			}
+		}
+		
+		return $output;
+	}
+	
+	/**
+	 * Convert language prefix to proper HTML lang attribute format
+	 *
+	 * @param string $prefix Language prefix (e.g., 'en', 'es', 'fr-CA')
+	 * @return string Formatted lang attribute (uses exact prefix value, lowercase)
+	 */
+	private function convert_prefix_to_lang_attribute( $prefix ) {
+		// Return the prefix as-is, just lowercase it
+		// This ensures the lang attribute matches the exact prefix configured
+		return strtolower( $prefix );
 	}
 	
 	/**
