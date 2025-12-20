@@ -60,6 +60,22 @@ $failed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 
         </div>
     <?php endif; ?>
     
+    <?php if ($failed_count > 0) : ?>
+        <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #dc3232;">
+            <h3 style="margin-top: 0;"><?php _e('Reset Failed Queue', 'xf-translator'); ?></h3>
+            <p style="margin: 10px 0; color: #666;">
+                <?php _e('Reset all failed translation jobs back to "pending" status so they can be retried by the background queue processor.', 'xf-translator'); ?>
+            </p>
+            <form method="post" action="" style="margin-top: 10px;">
+                <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+                <input type="hidden" name="api_translator_action" value="reset_failed_queue">
+                <button type="submit" class="button button-secondary" onclick="return confirm('<?php echo esc_js(sprintf(__('Are you sure you want to reset all %d failed job(s) back to pending status?', 'xf-translator'), $failed_count)); ?>');">
+                    <?php _e('Reset Failed Queue', 'xf-translator'); ?>
+                </button>
+            </form>
+        </div>
+    <?php endif; ?>
+    
     <?php if ($pending_count > 0) : ?>
         <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
             <h3 style="margin-top: 0;"><?php _e('Process Pending Jobs', 'xf-translator'); ?></h3>

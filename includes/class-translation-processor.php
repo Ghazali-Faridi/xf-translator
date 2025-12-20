@@ -99,6 +99,62 @@ class Xf_Translator_Processor
             return false; // No pending entries
         }
 
+        // SAFETY: Circuit breaker - Check if this entry has failed too many times
+        // Prevent infinite retry loops that could cause site slowdowns
+        $max_failures = 5; // Maximum number of failures before giving up
+        $failure_check_time = date('Y-m-d H:i:s', strtotime('-1 hour')); // Check failures in last hour
+        
+        $failure_count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}xf_translate_queue 
+            WHERE parent_post_id = %d 
+            AND lng = %s 
+            AND status = 'failed' 
+            AND updated >= %s",
+            $queue_entry['parent_post_id'],
+            $queue_entry['lng'],
+            $failure_check_time
+        ));
+        
+        if ($failure_count >= $max_failures) {
+            // Too many failures - mark as permanently failed and skip
+            $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'failed',
+                    'error_message' => 'Translation failed ' . $failure_count . ' times. Circuit breaker activated to prevent site slowdown. Please check API settings and retry manually if needed.'
+                ),
+                array('id' => $queue_entry['id']),
+                array('%s', '%s'),
+                array('%d')
+            );
+            
+            $this->last_error = "Circuit breaker: Entry #{$queue_entry['id']} has failed {$failure_count} times. Skipping to prevent site slowdown.";
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::warning($this->last_error);
+            } else {
+                error_log('XF Translator: ' . $this->last_error);
+            }
+            return false;
+        }
+
+        // SAFETY: Limit concurrent processing to prevent resource exhaustion
+        // Maximum 20 items can be in "processing" status at any time
+        $max_concurrent_processing = 20;
+        $current_processing_count = $wpdb->get_var(
+            "SELECT COUNT(*) FROM $table_name WHERE status = 'processing'"
+        );
+
+        if ($current_processing_count >= $max_concurrent_processing) {
+            // Too many items already processing - skip this one for now
+            $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
+            } else {
+                error_log("XF Translator: Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
+            }
+            return false; // Leave as pending, will be picked up later
+        }
+
         // Update status to processing
         $wpdb->update(
             $table_name,
@@ -906,8 +962,9 @@ class Xf_Translator_Processor
         }
 
         // Increase PHP execution time limit to allow for API requests
-        // Set to timeout + 50 seconds buffer (increased for DeepSeek which can be slower)
-        $php_time_limit = $timeout + 200;
+        // SAFETY: Cap at 300 seconds (5 minutes) to prevent site-wide slowdowns
+        // This matches the limit used in process_queue_entry_by_id() which is proven safe
+        $php_time_limit = min($timeout + 200, 300); // Cap at 5 minutes max
         if (function_exists('set_time_limit')) {
             @set_time_limit($php_time_limit);
         }
@@ -2196,6 +2253,62 @@ class Xf_Translator_Processor
             );
             // Update the local variable
             $queue_entry['status'] = 'pending';
+        }
+
+        // SAFETY: Circuit breaker - Check if this entry has failed too many times
+        // Prevent infinite retry loops that could cause site slowdowns
+        $max_failures = 5; // Maximum number of failures before giving up
+        $failure_check_time = date('Y-m-d H:i:s', strtotime('-1 hour')); // Check failures in last hour
+        
+        $failure_count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table_name} 
+            WHERE parent_post_id = %d 
+            AND lng = %s 
+            AND status = 'failed' 
+            AND updated >= %s",
+            $queue_entry['parent_post_id'],
+            $queue_entry['lng'],
+            $failure_check_time
+        ));
+        
+        if ($failure_count >= $max_failures) {
+            // Too many failures - mark as permanently failed and skip
+            $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'failed',
+                    'error_message' => 'Translation failed ' . $failure_count . ' times. Circuit breaker activated to prevent site slowdown. Please check API settings and retry manually if needed.'
+                ),
+                array('id' => $queue_entry_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+            
+            $this->last_error = "Circuit breaker: Entry #{$queue_entry_id} has failed {$failure_count} times. Skipping to prevent site slowdown.";
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::warning($this->last_error);
+            } else {
+                error_log('XF Translator: ' . $this->last_error);
+            }
+            return false;
+        }
+
+        // SAFETY: Limit concurrent processing to prevent resource exhaustion
+        // Maximum 20 items can be in "processing" status at any time
+        $max_concurrent_processing = 20;
+        $current_processing_count = $wpdb->get_var(
+            "SELECT COUNT(*) FROM $table_name WHERE status = 'processing'"
+        );
+
+        if ($current_processing_count >= $max_concurrent_processing) {
+            // Too many items already processing - skip this one for now
+            $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry_id} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
+            } else {
+                error_log("XF Translator: Skipping queue entry #{$queue_entry_id} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
+            }
+            return false; // Leave as pending, will be picked up later
         }
 
         // Update status to processing

@@ -16,7 +16,7 @@
  * Plugin Name:       Unite.AI Translations
  * Plugin URI:        https://xfinitive.co
  * Description:       Serverside translation multilingual plugin 
- * Version:           1.0.0
+ * Version:           1.0.1
  * Author:            ghazali
  * Author URI:        https://xfinitive.co/
  * License:           GPL-2.0+
@@ -181,18 +181,81 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 /**
+ * Compatibility function to unschedule all events for a hook
+ * Works with both old and new WordPress versions
+ *
+ * @param string $hook The hook name
+ * @since    1.0.0
+ */
+function xf_translator_unschedule_all_events($hook) {
+	// Use WordPress 5.1+ function if available
+	if (function_exists('wp_unschedule_all_events')) {
+		wp_unschedule_all_events($hook);
+		return;
+	}
+	
+	// Fallback for older WordPress versions
+	// Get all scheduled events for this hook and unschedule them one by one
+	// Use wp_get_scheduled_event() in a loop until no more events are found
+	$max_iterations = 100; // Safety limit to prevent infinite loops
+	$iterations = 0;
+	
+	while ($iterations < $max_iterations) {
+		$timestamp = wp_next_scheduled($hook);
+		if ($timestamp === false) {
+			// No more scheduled events found
+			break;
+		}
+		wp_unschedule_event($timestamp, $hook);
+		$iterations++;
+	}
+}
+
+/**
  * Process NEW translations via cron
  *
  * @since    1.0.0
  */
 function xf_translator_process_new_translations_cron() {
-	// Check if cron is enabled
-	require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	// CRITICAL: Check if cron is enabled FIRST before any processing
+	// This prevents any execution if the option is disabled
+	$settings_file = plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	
+	// Check if settings file exists
+	if (!file_exists($settings_file)) {
+		// If settings file doesn't exist, unschedule events and exit
+		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
+		return;
+	}
+	
+	// Check if class already exists to avoid conflicts
+	if (!class_exists('Settings')) {
+		require_once $settings_file;
+	}
+	
+	// Only proceed if Settings class is available
+	if (!class_exists('Settings')) {
+		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
+		return;
+	}
+	
 	$settings = new Settings();
 	
 	if (!$settings->get('enable_new_translations_cron', true)) {
-		return; // Cron disabled, exit early
+		// Cron disabled - unschedule any remaining events and exit immediately
+		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
+		return;
 	}
+	
+	// SAFETY: Only run in proper cron context to prevent blocking page loads
+	// This prevents WordPress pseudo-cron from running during regular page requests
+	if (!wp_doing_cron() && !defined('WP_CLI')) {
+		return; // Don't run during regular page loads
+	}
+	
+	// SAFETY: Track execution time to prevent long-running processes
+	$start_time = time();
+	$max_execution_time = 240; // 4 minutes max (leaves buffer for cleanup)
 	
 	// Load required files
 	require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
@@ -202,6 +265,12 @@ function xf_translator_process_new_translations_cron() {
 	
 	// Process next NEW translation (type='NEW', status='pending')
 	$result = $processor->process_next_translation('NEW');
+	
+	// SAFETY: Check if processing took too long
+	$execution_time = time() - $start_time;
+	if ($execution_time > $max_execution_time) {
+		xf_translator_log('Cron: NEW translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
+	}
 	
 	if ($result) {
 		xf_translator_log('Cron: NEW translation processed successfully', 'info');
@@ -221,13 +290,45 @@ add_action('xf_translator_process_new_cron', 'xf_translator_process_new_translat
  * @since    1.0.0
  */
 function xf_translator_process_old_translations_cron() {
-	// Check if cron is enabled
-	require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	// CRITICAL: Check if cron is enabled FIRST before any processing
+	// This prevents any execution if the option is disabled
+	$settings_file = plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	
+	// Check if settings file exists
+	if (!file_exists($settings_file)) {
+		// If settings file doesn't exist, unschedule events and exit
+		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
+		return;
+	}
+	
+	// Check if class already exists to avoid conflicts
+	if (!class_exists('Settings')) {
+		require_once $settings_file;
+	}
+	
+	// Only proceed if Settings class is available
+	if (!class_exists('Settings')) {
+		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
+		return;
+	}
+	
 	$settings = new Settings();
 	
 	if (!$settings->get('enable_old_translations_cron', true)) {
-		return; // Cron disabled, exit early
+		// Cron disabled - unschedule any remaining events and exit immediately
+		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
+		return;
 	}
+	
+	// SAFETY: Only run in proper cron context to prevent blocking page loads
+	// This prevents WordPress pseudo-cron from running during regular page requests
+	if (!wp_doing_cron() && !defined('WP_CLI')) {
+		return; // Don't run during regular page loads
+	}
+	
+	// SAFETY: Track execution time to prevent long-running processes
+	$start_time = time();
+	$max_execution_time = 240; // 4 minutes max (leaves buffer for cleanup)
 	
 	// Load required files
 	require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
@@ -237,6 +338,12 @@ function xf_translator_process_old_translations_cron() {
 	
 	// Process next OLD translation (type='OLD', status='pending')
 	$result = $processor->process_next_translation('OLD');
+	
+	// SAFETY: Check if processing took too long
+	$execution_time = time() - $start_time;
+	if ($execution_time > $max_execution_time) {
+		xf_translator_log('Cron: OLD translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
+	}
 	
 	if ($result) {
 		xf_translator_log('Cron: OLD translation processed successfully', 'info');
@@ -249,6 +356,50 @@ function xf_translator_process_old_translations_cron() {
 	}
 }
 add_action('xf_translator_process_old_cron', 'xf_translator_process_old_translations_cron');
+
+/**
+ * Clean up orphaned cron events on plugin load
+ * This ensures disabled cron jobs don't run even if events are still scheduled
+ *
+ * @since    1.0.0
+ */
+function xf_translator_cleanup_orphaned_cron_events() {
+	$settings_file = plugin_dir_path(__FILE__) . 'admin/class-settings.php';
+	
+	// Check if settings file exists before requiring it
+	if (!file_exists($settings_file)) {
+		return;
+	}
+	
+	// Check if class already exists to avoid conflicts
+	if (!class_exists('Settings')) {
+		require_once $settings_file;
+	}
+	
+	// Only proceed if Settings class is available
+	if (!class_exists('Settings')) {
+		return;
+	}
+	
+	try {
+		$settings = new Settings();
+		
+		// If NEW translations cron is disabled, remove any scheduled events
+		if (!$settings->get('enable_new_translations_cron', true)) {
+			xf_translator_unschedule_all_events('xf_translator_process_new_cron');
+		}
+		
+		// If OLD translations cron is disabled, remove any scheduled events
+		if (!$settings->get('enable_old_translations_cron', true)) {
+			xf_translator_unschedule_all_events('xf_translator_process_old_cron');
+		}
+	} catch (Exception $e) {
+		// Silently fail to prevent breaking the site
+		error_log('XF Translator: Error cleaning up cron events: ' . $e->getMessage());
+	}
+}
+// Run cleanup early, before WordPress cron system processes events
+add_action('init', 'xf_translator_cleanup_orphaned_cron_events', 1);
 
 /**
  * Begins execution of the plugin.

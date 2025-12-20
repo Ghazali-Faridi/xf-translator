@@ -303,6 +303,10 @@ class Xf_Translator_Admin {
                 $this->handle_reset_stuck_processing();
                 break;
                 
+            case 'reset_failed_queue':
+                $this->handle_reset_failed_queue();
+                break;
+                
             case 'save_meta_fields':
                 $this->handle_save_meta_fields();
                 break;
@@ -437,23 +441,57 @@ class Xf_Translator_Admin {
      */
     private function update_cron_schedules($enable_new, $enable_old) {
         // Handle NEW translations cron
-        $new_timestamp = wp_next_scheduled('xf_translator_process_new_cron');
-        if ($enable_new && !$new_timestamp) {
+        if ($enable_new) {
             // Enable: schedule if not already scheduled
-            wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_new_cron');
-        } elseif (!$enable_new && $new_timestamp) {
-            // Disable: unschedule if currently scheduled
-            wp_unschedule_event($new_timestamp, 'xf_translator_process_new_cron');
+            $new_timestamp = wp_next_scheduled('xf_translator_process_new_cron');
+            if (!$new_timestamp) {
+                wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_new_cron');
+            }
+        } else {
+            // Disable: unschedule ALL instances to prevent any from running
+            // Use compatibility function for older WordPress versions
+            if (function_exists('wp_unschedule_all_events')) {
+                wp_unschedule_all_events('xf_translator_process_new_cron');
+            } else {
+                // Fallback for older WordPress versions - loop until all events are removed
+                $max_iterations = 100;
+                $iterations = 0;
+                while ($iterations < $max_iterations) {
+                    $timestamp = wp_next_scheduled('xf_translator_process_new_cron');
+                    if ($timestamp === false) {
+                        break; // No more scheduled events
+                    }
+                    wp_unschedule_event($timestamp, 'xf_translator_process_new_cron');
+                    $iterations++;
+                }
+            }
         }
         
         // Handle OLD translations cron
-        $old_timestamp = wp_next_scheduled('xf_translator_process_old_cron');
-        if ($enable_old && !$old_timestamp) {
+        if ($enable_old) {
             // Enable: schedule if not already scheduled
-            wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_old_cron');
-        } elseif (!$enable_old && $old_timestamp) {
-            // Disable: unschedule if currently scheduled
-            wp_unschedule_event($old_timestamp, 'xf_translator_process_old_cron');
+            $old_timestamp = wp_next_scheduled('xf_translator_process_old_cron');
+            if (!$old_timestamp) {
+                wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_old_cron');
+            }
+        } else {
+            // Disable: unschedule ALL instances to prevent any from running
+            // Use compatibility function for older WordPress versions
+            if (function_exists('wp_unschedule_all_events')) {
+                wp_unschedule_all_events('xf_translator_process_old_cron');
+            } else {
+                // Fallback for older WordPress versions - loop until all events are removed
+                $max_iterations = 100;
+                $iterations = 0;
+                while ($iterations < $max_iterations) {
+                    $timestamp = wp_next_scheduled('xf_translator_process_old_cron');
+                    if ($timestamp === false) {
+                        break; // No more scheduled events
+                    }
+                    wp_unschedule_event($timestamp, 'xf_translator_process_old_cron');
+                    $iterations++;
+                }
+            }
         }
     }
     
@@ -1593,6 +1631,87 @@ class Xf_Translator_Admin {
         } else {
             $this->add_notice(
                 __('Failed to reset stuck processing jobs. Please try again.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+    
+    /**
+     * Handle reset failed queue entries
+     *
+     * @since    1.0.0
+     */
+    private function handle_reset_failed_queue() {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        
+        // Find all failed entries (only NEW and EDIT types, exclude OLD)
+        $failed_entries = $wpdb->get_results(
+            "SELECT id, parent_post_id, lng, type, created 
+             FROM $table_name 
+             WHERE status = 'failed' 
+             AND type IN ('NEW', 'EDIT')
+             ORDER BY id ASC",
+            ARRAY_A
+        );
+        
+        if (empty($failed_entries)) {
+            $this->add_notice(
+                __('No failed queue entries found.', 'xf-translator'),
+                'info'
+            );
+            return;
+        }
+        
+        $reset_count = 0;
+        $reset_ids = array();
+        
+        foreach ($failed_entries as $entry) {
+            $result = $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'pending',
+                    'error_message' => null
+                ),
+                array('id' => $entry['id']),
+                array('%s', '%s'),
+                array('%d')
+            );
+            
+            if ($result !== false) {
+                $reset_count++;
+                $reset_ids[] = $entry['id'];
+            }
+        }
+        
+        if ($reset_count > 0) {
+            // Log the reset action
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::info(
+                    sprintf(
+                        'Reset %d failed queue entries (IDs: %s)',
+                        $reset_count,
+                        implode(', ', $reset_ids)
+                    )
+                );
+            } else {
+                error_log(sprintf(
+                    'XF Translator: Reset %d failed queue entries (IDs: %s)',
+                    $reset_count,
+                    implode(', ', $reset_ids)
+                ));
+            }
+            
+            $this->add_notice(
+                sprintf(
+                    __('Successfully reset %d failed job(s) back to pending status. They will be processed by the background queue processor.', 'xf-translator'),
+                    $reset_count
+                ),
+                'success'
+            );
+        } else {
+            $this->add_notice(
+                __('Failed to reset failed queue entries. Please try again.', 'xf-translator'),
                 'error'
             );
         }
@@ -6769,15 +6888,42 @@ class Xf_Translator_Admin {
             ));
             
             if (!empty($conflicting_posts)) {
-                // Check if all conflicts are with translated posts
+                // Check if all conflicts are with translated posts - OPTIMIZED: Batch meta queries
                 $all_translated = true;
-                foreach ($conflicting_posts as $conflict_id) {
+                
+                // Batch fetch all meta values at once instead of individual queries
+                if (count($conflicting_posts) > 1) {
+                    $conflict_ids = array_map('intval', $conflicting_posts);
+                    $placeholders = implode(',', array_fill(0, count($conflict_ids), '%d'));
+                    $meta_results = $wpdb->get_results($wpdb->prepare(
+                        "SELECT post_id, meta_key, meta_value 
+                        FROM {$wpdb->postmeta} 
+                        WHERE post_id IN ($placeholders) 
+                        AND (meta_key = '_xf_translator_original_post_id' OR meta_key = '_api_translator_original_post_id')",
+                        $conflict_ids
+                    ));
+                    
+                    // Build a map of post_id => has_translation_meta
+                    $translated_posts_map = array();
+                    foreach ($meta_results as $meta) {
+                        if (!empty($meta->meta_value)) {
+                            $translated_posts_map[$meta->post_id] = true;
+                        }
+                    }
+                    
+                    // Check if all conflicting posts are translated
+                    foreach ($conflicting_posts as $conflict_id) {
+                        if (!isset($translated_posts_map[$conflict_id])) {
+                            $all_translated = false;
+                            break;
+                        }
+                    }
+                } else {
+                    // Single post - use direct query (more efficient for one item)
+                    $conflict_id = (int)$conflicting_posts[0];
                     $is_translated = get_post_meta($conflict_id, '_xf_translator_original_post_id', true) || 
                                     get_post_meta($conflict_id, '_api_translator_original_post_id', true);
-                    if (!$is_translated) {
-                        $all_translated = false;
-                        break;
-                    }
+                    $all_translated = !empty($is_translated);
                 }
                 
                 if ($all_translated) {
@@ -6840,26 +6986,41 @@ class Xf_Translator_Admin {
             return;
         }
         
-        // Check existing translations
+        // Check existing translations - OPTIMIZED: Single query instead of N+1 queries
         global $wpdb;
         $existing_translations = array();
+        
+        // Build language prefixes array for the query
+        $language_prefixes = array();
         foreach ($languages as $language) {
-            $translated_id = $wpdb->get_var($wpdb->prepare(
-                "SELECT p.ID FROM {$wpdb->posts} p
+            if (!empty($language['prefix'])) {
+                $language_prefixes[] = $language['prefix'];
+            }
+        }
+        
+        if (!empty($language_prefixes)) {
+            // Single optimized query to get all translations at once
+            $placeholders = implode(',', array_fill(0, count($language_prefixes), '%s'));
+            $query = $wpdb->prepare(
+                "SELECT p.ID, pm1.meta_value as language_prefix
+                FROM {$wpdb->posts} p
                 INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
                     AND pm1.meta_key = '_xf_translator_language' 
-                    AND pm1.meta_value = %s
+                    AND pm1.meta_value IN ($placeholders)
                 INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
                     AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
                     AND pm2.meta_value = %d
-                WHERE p.post_status != 'trash'
-                LIMIT 1",
-                $language['prefix'],
-                $post->ID
-            ));
+                WHERE p.post_status != 'trash'",
+                array_merge($language_prefixes, array($post->ID))
+            );
             
-            if ($translated_id) {
-                $existing_translations[$language['prefix']] = $translated_id;
+            $results = $wpdb->get_results($query);
+            
+            // Process results into the same array structure as before
+            foreach ($results as $result) {
+                if (!empty($result->language_prefix) && !empty($result->ID)) {
+                    $existing_translations[$result->language_prefix] = (int)$result->ID;
+                }
             }
         }
         
@@ -7284,26 +7445,57 @@ class Xf_Translator_Admin {
             }
         }
         
-        // Filter terms based on language
+        // Filter terms based on language - OPTIMIZED: Batch term meta queries
         $filtered_terms = array();
+        
+        if (empty($terms)) {
+            return $filtered_terms;
+        }
+        
+        // Collect all term IDs
+        $term_ids = array();
+        $terms_map = array();
         foreach ($terms as $term) {
             if (!is_object($term)) {
                 $filtered_terms[] = $term;
                 continue;
             }
+            $term_ids[] = (int)$term->term_id;
+            $terms_map[$term->term_id] = $term;
+        }
+        
+        // Batch fetch all term languages at once
+        if (!empty($term_ids)) {
+            global $wpdb;
+            $placeholders = implode(',', array_fill(0, count($term_ids), '%d'));
+            $term_meta_results = $wpdb->get_results($wpdb->prepare(
+                "SELECT term_id, meta_value 
+                FROM {$wpdb->termmeta} 
+                WHERE term_id IN ($placeholders) 
+                AND meta_key = '_xf_translator_language'",
+                $term_ids
+            ));
             
-            // Get category language
-            $term_language = get_term_meta($term->term_id, '_xf_translator_language', true);
+            // Build a map of term_id => language
+            $term_languages_map = array();
+            foreach ($term_meta_results as $meta) {
+                $term_languages_map[$meta->term_id] = $meta->meta_value;
+            }
             
-            // If post has no language (English/original), show only categories with no language
-            if (empty($post_language)) {
-                if (empty($term_language)) {
-                    $filtered_terms[] = $term;
-                }
-            } else {
-                // If post has a language, show only categories with the same language
-                if ($term_language === $post_language) {
-                    $filtered_terms[] = $term;
+            // Filter terms based on language
+            foreach ($terms_map as $term_id => $term) {
+                $term_language = isset($term_languages_map[$term_id]) ? $term_languages_map[$term_id] : '';
+                
+                // If post has no language (English/original), show only categories with no language
+                if (empty($post_language)) {
+                    if (empty($term_language)) {
+                        $filtered_terms[] = $term;
+                    }
+                } else {
+                    // If post has a language, show only categories with the same language
+                    if ($term_language === $post_language) {
+                        $filtered_terms[] = $term;
+                    }
                 }
             }
         }
