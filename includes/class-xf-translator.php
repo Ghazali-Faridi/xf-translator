@@ -163,6 +163,13 @@ class Xf_Translator {
         $this->loader->add_action('restrict_manage_posts', $plugin_admin, 'add_language_filter_dropdown');
         $this->loader->add_action('pre_get_posts', $plugin_admin, 'filter_posts_by_language');
         
+        // Add language filter to taxonomy/term list pages
+        // Use multiple hooks for better compatibility
+        $this->loader->add_action('restrict_manage_terms', $plugin_admin, 'add_language_filter_dropdown_terms', 10, 1);
+        $this->loader->add_action('admin_head-edit-tags.php', $plugin_admin, 'add_language_filter_dropdown_terms_fallback');
+        // Use get_terms_args filter for better compatibility across WordPress versions
+        $this->loader->add_filter('get_terms_args', $plugin_admin, 'filter_terms_by_language', 10, 2);
+        
         // Add translation meta box to post/page edit screen
         $this->loader->add_action('add_meta_boxes', $plugin_admin, 'add_translation_meta_box');
         $this->loader->add_action('wp_ajax_xf_translate_post_to_language', $plugin_admin, 'ajax_translate_post_to_language');
@@ -271,7 +278,6 @@ class Xf_Translator {
 	private function define_public_hooks() {
 
 		$plugin_public = new Xf_Translator_Public( $this->get_plugin_name(), $this->get_version() );
-
 		$this->loader->add_action( 'wp_enqueue_scripts', $plugin_public, 'enqueue_styles' );
 		$this->loader->add_action( 'wp_enqueue_scripts', $plugin_public, 'enqueue_scripts' );
 		
@@ -303,7 +309,7 @@ class Xf_Translator {
 		
 		// Floating language switcher
 		$this->loader->add_action( 'wp_footer', $plugin_public, 'render_language_switcher' );
-
+		
 	}
 
 	/**

@@ -62,6 +62,9 @@ class Xf_Translator_Processor
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
 
+        // DEBUG: Log function entry
+        error_log('XF Translator DEBUG: process_next_translation called with type: ' . ($type ?: 'empty (all types)'));
+        
         // Get processing delay setting (only applies to NEW type entries)
         $processing_delay_minutes = $this->settings->get('processing_delay_minutes', 0);
         
@@ -83,6 +86,9 @@ class Xf_Translator_Processor
 
         $query .= " ORDER BY id DESC LIMIT 1";
 
+        // DEBUG: Log the query being executed
+        error_log('XF Translator DEBUG: Executing queue query: ' . $query);
+
         // Get the latest pending entry
         $queue_entry = $wpdb->get_row($query, ARRAY_A);
 
@@ -96,8 +102,12 @@ class Xf_Translator_Processor
             } else {
                 $this->last_error = 'No pending entries found in queue';
             }
+            error_log('XF Translator DEBUG: No queue entry found. Error: ' . $this->last_error);
             return false; // No pending entries
         }
+        
+        // DEBUG: Log found queue entry
+        error_log('XF Translator DEBUG: Found queue entry. ID: ' . $queue_entry['id'] . ', Type: ' . ($queue_entry['type'] ?? 'N/A') . ', Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Status: ' . $queue_entry['status']);
 
         // SAFETY: Circuit breaker - Check if this entry has failed too many times
         // Prevent infinite retry loops that could cause site slowdowns
@@ -138,29 +148,40 @@ class Xf_Translator_Processor
         }
 
         // SAFETY: Limit concurrent processing to prevent resource exhaustion
-        // Maximum 20 items can be in "processing" status at any time
-        $max_concurrent_processing = 20;
-        $current_processing_count = $wpdb->get_var(
-            "SELECT COUNT(*) FROM $table_name WHERE status = 'processing'"
-        );
+        // Get max concurrent processing limit from settings (default: 20)
+        // NOTE: This limit only applies to OLD type posts, not NEW posts
+        $max_concurrent_processing = $this->settings->get('max_concurrent_processing', 20);
 
-        if ($current_processing_count >= $max_concurrent_processing) {
-            // Too many items already processing - skip this one for now
-            $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
-            if (class_exists('Xf_Translator_Logger')) {
-                Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
-            } else {
-                error_log("XF Translator: Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
+        // Only check concurrent limit for OLD type posts
+        if ($type === 'OLD') {
+            $current_processing_count = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM $table_name WHERE status = 'processing' AND type = %s",
+                    'OLD'
+                )
+            );
+
+            if ($current_processing_count >= $max_concurrent_processing) {
+                // Too many items already processing - skip this one for now
+                $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
+                } else {
+                    error_log("XF Translator: Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
+                }
+                return false; // Leave as pending, will be picked up later
             }
-            return false; // Leave as pending, will be picked up later
         }
 
-        // Update status to processing
+        // Update status to processing (also update 'updated' field to track when status changed)
         $wpdb->update(
             $table_name,
-            array('status' => 'processing'),
+            array(
+                'status' => 'processing',
+                'updated' => current_time('mysql')
+            ),
             array('id' => $queue_entry['id']),
-            array('%s'),
+            array('%s', '%s'),
             array('%d')
         );
 
@@ -225,7 +246,16 @@ class Xf_Translator_Processor
         $placeholders_map = $prompt_data['placeholders_map'];
 
         // Call API (use prefix for API calls) - API logging is handled inside the function
-        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id);
+        // Pass prompt_data for chunking support
+        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id, $prompt_data);
+
+        // DIAGNOSTIC: Log API call result
+        error_log('XF Translator DEBUG: API call completed. Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Result: ' . ($translation_result === false ? 'FALSE' : 'SUCCESS'));
+        if ($translation_result !== false) {
+            error_log('XF Translator DEBUG: API response length: ' . strlen($translation_result));
+            error_log('XF Translator DEBUG: API response preview (first 1000 chars): ' . substr($translation_result, 0, 1000));
+            error_log('XF Translator DEBUG: About to parse response for Queue ID: ' . $queue_entry['id']);
+        }
 
         if ($translation_result === false) {
             // Get the detailed error from the API call
@@ -281,13 +311,68 @@ class Xf_Translator_Processor
             return false;
         }
 
+        // DEBUG: Log successful translation parsing
+        error_log('XF Translator DEBUG: Translation parsed successfully for Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Language: ' . $target_language_name);
+        error_log('XF Translator DEBUG: Parsed translation contains fields: ' . implode(', ', array_keys($parsed_translation)));
+        if (isset($parsed_translation['title'])) {
+            error_log('XF Translator DEBUG: Translated title length: ' . strlen($parsed_translation['title']));
+        }
+        if (isset($parsed_translation['content'])) {
+            error_log('XF Translator DEBUG: Translated content length: ' . strlen($parsed_translation['content']));
+        }
+
+        // DIAGNOSTIC: Log parsed translation result before post creation
+        error_log('XF Translator DEBUG: Parsed translation result: ' . ($parsed_translation ? 'SUCCESS - Fields: ' . implode(', ', array_keys($parsed_translation)) : 'FAILED - parse_translation_response returned false/empty'));
+        if ($parsed_translation && !empty($parsed_translation)) {
+            error_log('XF Translator DEBUG: Parsed translation field count: ' . count($parsed_translation));
+            foreach ($parsed_translation as $field => $value) {
+                error_log('XF Translator DEBUG: Field "' . $field . '" length: ' . strlen($value) . ' chars');
+            }
+        }
+
         // Create translated post (pass language name)
+        error_log('XF Translator DEBUG: About to call create_translated_post for Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Language: ' . $target_language_name);
         $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
+        error_log('XF Translator DEBUG: create_translated_post returned. Queue ID: ' . $queue_entry['id'] . ', Returned value: ' . ($translated_post_id === false ? 'FALSE' : 'Post ID: ' . $translated_post_id));
 
         if ($translated_post_id === false) {
             $this->last_error = "Failed to create translated post. Check WordPress permissions and post data.";
             error_log('XF Translator Error: ' . $this->last_error);
+            error_log('XF Translator DEBUG: Post creation failed for Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Language: ' . $target_language_name);
+            error_log('XF Translator DEBUG: Last error from create_translated_post: ' . $this->last_error);
+            
+            // Check if post was actually created despite returning false
+            $check_existing = get_post_meta($post_id, '_xf_translator_translated_post_' . $target_language_name, true);
+            if ($check_existing) {
+                error_log('XF Translator DEBUG: WARNING - Post creation returned false BUT translated post meta exists! Post ID: ' . $check_existing);
+                $check_post = get_post($check_existing);
+                if ($check_post) {
+                    error_log('XF Translator DEBUG: WARNING - Post actually exists! Post ID: ' . $check_existing . ', Status: ' . $check_post->post_status . ', Title: ' . $check_post->post_title);
+                }
+            }
+            
             // Update status to failed with error message
+            $update_result = $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'failed',
+                    'error_message' => $this->last_error
+                ),
+                array('id' => $queue_entry['id']),
+                array('%s', '%s'),
+                array('%d')
+            );
+            error_log('XF Translator DEBUG: Updated queue status to failed. Queue ID: ' . $queue_entry['id'] . ', Update result: ' . ($update_result !== false ? 'Success (rows affected: ' . $update_result . ')' : 'FAILED - ' . $wpdb->last_error));
+            return false;
+        }
+
+        // DEBUG: Verify post was actually created
+        error_log('XF Translator DEBUG: Post creation succeeded. Queue ID: ' . $queue_entry['id'] . ', Translated Post ID: ' . $translated_post_id);
+        $verify_post = get_post($translated_post_id);
+        if (!$verify_post) {
+            error_log('XF Translator DEBUG: CRITICAL ERROR - create_translated_post returned Post ID ' . $translated_post_id . ' but get_post() returns NULL!');
+            error_log('XF Translator DEBUG: This means the post was not actually created despite returning a post ID.');
+            $this->last_error = "Post creation returned ID but post does not exist in database.";
             $wpdb->update(
                 $table_name,
                 array(
@@ -299,10 +384,13 @@ class Xf_Translator_Processor
                 array('%d')
             );
             return false;
+        } else {
+            error_log('XF Translator DEBUG: Post verification successful. Post ID: ' . $translated_post_id . ', Status: ' . $verify_post->post_status . ', Title: ' . $verify_post->post_title);
         }
 
         // Update status to completed and store translated post ID
-        $wpdb->update(
+        error_log('XF Translator DEBUG: About to update queue status to completed. Queue ID: ' . $queue_entry['id'] . ', Translated Post ID: ' . $translated_post_id);
+        $update_result = $wpdb->update(
             $table_name,
             array(
                 'status' => 'completed',
@@ -312,6 +400,30 @@ class Xf_Translator_Processor
             array('%s', '%d'),
             array('%d')
         );
+        
+        if ($update_result === false) {
+            error_log('XF Translator DEBUG: CRITICAL ERROR - Failed to update queue status to completed! Queue ID: ' . $queue_entry['id']);
+            error_log('XF Translator DEBUG: Database error: ' . $wpdb->last_error);
+            error_log('XF Translator DEBUG: Last query: ' . $wpdb->last_query);
+        } else {
+            error_log('XF Translator DEBUG: Successfully updated queue status to completed. Queue ID: ' . $queue_entry['id'] . ', Rows affected: ' . $update_result);
+            
+            // Verify the update
+            $verify_queue = $wpdb->get_row($wpdb->prepare("SELECT status, translated_post_id FROM $table_name WHERE id = %d", $queue_entry['id']), ARRAY_A);
+            if ($verify_queue) {
+                error_log('XF Translator DEBUG: Queue verification - Status: ' . $verify_queue['status'] . ', Translated Post ID: ' . $verify_queue['translated_post_id']);
+                if ($verify_queue['status'] !== 'completed') {
+                    error_log('XF Translator DEBUG: WARNING - Queue status is NOT completed after update! Current status: ' . $verify_queue['status']);
+                }
+                if ($verify_queue['translated_post_id'] != $translated_post_id) {
+                    error_log('XF Translator DEBUG: WARNING - Queue translated_post_id mismatch! Expected: ' . $translated_post_id . ', Actual: ' . $verify_queue['translated_post_id']);
+                }
+            } else {
+                error_log('XF Translator DEBUG: CRITICAL ERROR - Cannot verify queue entry after update! Queue ID: ' . $queue_entry['id']);
+            }
+        }
+
+        error_log('XF Translator DEBUG: Translation processing completed successfully. Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Translated Post ID: ' . $translated_post_id);
 
         return array(
             'queue_id' => $queue_entry['id'],
@@ -807,22 +919,565 @@ class Xf_Translator_Processor
 
         return array(
             'prompt' => $prompt,
-            'placeholders_map' => $placeholders_map
+            'placeholders_map' => $placeholders_map,
+            'content_string' => $content_string,
+            'brand_tone_template' => $brand_tone_template,
+            'language_name' => $language_name,
+            'language_description' => $language_description,
+            'glossary_list' => $glossary_list,
+            'field_labels_list' => $field_labels_list
         );
     }
 
     /**
+     * Split content string into chunks of max 5000 characters
+     * First chunk always includes Title, then Content (partial if needed)
+     * Subsequent chunks continue Content, then other fields
+     *
+     * @param string $content_string Full content string with field labels
+     * @param int $max_chunk_size Maximum chunk size (default 5000)
+     * @return array Array of content chunks
+     */
+    protected function split_content_string_into_chunks($content_string, $max_chunk_size = 5000)
+    {
+        $content_length = strlen($content_string);
+        
+        // If content is smaller than chunk size, return as single chunk
+        if ($content_length <= $max_chunk_size) {
+            return array($content_string);
+        }
+        
+        // Parse fields by splitting on "\n\n" followed by field label pattern
+        // Pattern: "\n\nFieldName: " where FieldName starts with capital letter
+        $fields = preg_split('/(\n\n)([A-Z][a-zA-Z0-9_]*):\s/', $content_string, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_OFFSET_CAPTURE);
+        
+        // Reconstruct field array with labels and values
+        $field_data = array();
+        $current_field = null;
+        
+        for ($i = 0; $i < count($fields); $i++) {
+            $part = $fields[$i][0];
+            $offset = $fields[$i][1];
+            
+            // Check if this is a field label (matches pattern [A-Z][a-zA-Z0-9_]*)
+            if (preg_match('/^([A-Z][a-zA-Z0-9_]*):\s?$/', $part, $matches)) {
+                $current_field = $matches[1];
+                $field_data[] = array(
+                    'label' => $current_field,
+                    'value' => '',
+                    'full' => $part,
+                    'offset' => $offset
+                );
+            } elseif ($current_field !== null && !empty(trim($part))) {
+                // This is the value for the current field
+                $last_index = count($field_data) - 1;
+                if ($last_index >= 0) {
+                    $field_data[$last_index]['value'] = $part;
+                    $field_data[$last_index]['full'] = $field_data[$last_index]['label'] . ': ' . $part;
+                }
+            }
+        }
+        
+        // If parsing failed, fall back to simple character-based splitting
+        if (empty($field_data)) {
+            return $this->split_by_length($content_string, $max_chunk_size);
+        }
+        
+        // Build chunks
+        $chunks = array();
+        $current_chunk = '';
+        $is_first_chunk = true;
+        $content_field_processed = false;
+        
+        foreach ($field_data as $field) {
+            $field_label = $field['label'];
+            $field_value = $field['value'];
+            $field_full = $field['full'];
+            $field_size = strlen($field_full);
+            
+            // Check if this is Title field (always include in first chunk)
+            $is_title = (strtolower($field_label) === 'title');
+            // Check if this is Content field
+            $is_content = (strtolower($field_label) === 'content');
+            
+            // If field itself exceeds max chunk size, split the field value
+            if ($field_size > $max_chunk_size) {
+                // Save current chunk if it has content
+                if (!empty($current_chunk)) {
+                    $chunks[] = trim($current_chunk);
+                    $current_chunk = '';
+                    $is_first_chunk = false;
+                }
+                
+                // Split large field value into chunks
+                $value_chunks = $this->split_field_value($field_value, $max_chunk_size - strlen($field_label) - 10); // Reserve space for label
+                
+                foreach ($value_chunks as $index => $value_chunk) {
+                    $chunk_label = ($index === 0 || $is_content) ? $field_label : $field_label; // Always use same label for Content continuation
+                    $chunk_content = "{$chunk_label}: {$value_chunk}";
+                    
+                    // Check if adding this to current chunk would exceed limit
+                    if (strlen($current_chunk) + strlen($chunk_content) + 2 > $max_chunk_size && !empty($current_chunk)) {
+                        $chunks[] = trim($current_chunk);
+                        $current_chunk = $chunk_content;
+                        $is_first_chunk = false;
+                    } else {
+                        if (!empty($current_chunk)) {
+                            $current_chunk .= "\n\n";
+                        }
+                        $current_chunk .= $chunk_content;
+                    }
+                }
+                
+                if ($is_content) {
+                    $content_field_processed = true;
+                }
+            } else {
+                // Field fits in chunk
+                $potential_chunk = empty($current_chunk) ? $field_full : $current_chunk . "\n\n" . $field_full;
+                
+                // Special handling for first chunk: always include Title
+                if ($is_first_chunk && $is_title) {
+                    $current_chunk = $field_full;
+                } elseif (strlen($potential_chunk) <= $max_chunk_size) {
+                    // Fits in current chunk
+                    $current_chunk = $potential_chunk;
+                } else {
+                    // Doesn't fit, save current chunk and start new one
+                    if (!empty($current_chunk)) {
+                        $chunks[] = trim($current_chunk);
+                    }
+                    $current_chunk = $field_full;
+                    $is_first_chunk = false;
+                }
+                
+                if ($is_content) {
+                    $content_field_processed = true;
+                }
+            }
+        }
+        
+        // Add remaining chunk
+        if (!empty($current_chunk)) {
+            $chunks[] = trim($current_chunk);
+        }
+        
+        // Filter out empty chunks
+        $chunks = array_filter($chunks, function($chunk) {
+            return !empty(trim($chunk));
+        });
+        
+        return array_values($chunks);
+    }
+    
+    /**
+     * Split a field value into chunks, trying to split at sentence boundaries
+     *
+     * @param string $value Field value to split
+     * @param int $max_size Maximum size per chunk
+     * @return array Array of value chunks
+     */
+    protected function split_field_value($value, $max_size)
+    {
+        $value_length = strlen($value);
+        
+        if ($value_length <= $max_size) {
+            return array($value);
+        }
+        
+        $chunks = array();
+        $current_pos = 0;
+        
+        while ($current_pos < $value_length) {
+            $remaining = $value_length - $current_pos;
+            
+            if ($remaining <= $max_size) {
+                // Remaining fits in one chunk
+                $chunks[] = substr($value, $current_pos);
+                break;
+            }
+            
+            // Try to find a good split point (sentence boundary)
+            $chunk_end = $current_pos + $max_size;
+            $search_start = max($current_pos, $chunk_end - 200); // Look back up to 200 chars
+            $search_end = min($value_length, $chunk_end + 200); // Look ahead up to 200 chars
+            
+            $search_text = substr($value, $search_start, $search_end - $search_start);
+            
+            // Look for sentence endings: . ! ? followed by space or newline
+            $best_split = -1;
+            $patterns = array(
+                '/[.!?]\s+/',      // Sentence ending with space
+                '/[.!?]\n+/',      // Sentence ending with newline
+                '/\.\s+/',         // Period with space
+                '/\n\n+/',         // Double newline (paragraph break)
+                '/\n+/',           // Single newline
+                '/\s+/'            // Any whitespace
+            );
+            
+            foreach ($patterns as $pattern) {
+                if (preg_match_all($pattern, $search_text, $matches, PREG_OFFSET_CAPTURE)) {
+                    foreach ($matches[0] as $match) {
+                        $split_pos = $search_start + $match[1] + strlen($match[0]);
+                        if ($split_pos > $current_pos && $split_pos <= $chunk_end && $split_pos > $best_split) {
+                            $best_split = $split_pos;
+                        }
+                    }
+                }
+            }
+            
+            // If no good split found, use max_size
+            if ($best_split <= $current_pos) {
+                $best_split = $current_pos + $max_size;
+            }
+            
+            $chunks[] = substr($value, $current_pos, $best_split - $current_pos);
+            $current_pos = $best_split;
+        }
+        
+        return $chunks;
+    }
+    
+    /**
+     * Split content by character length (fallback method)
+     *
+     * @param string $content Content to split
+     * @param int $chunk_size Chunk size
+     * @return array Array of chunks
+     */
+    protected function split_by_length($content, $chunk_size)
+    {
+        $chunks = array();
+        $content_length = strlen($content);
+        
+        for ($i = 0; $i < $content_length; $i += $chunk_size) {
+            $chunk = substr($content, $i, $chunk_size);
+            if (!empty(trim($chunk))) {
+                $chunks[] = trim($chunk);
+            }
+        }
+        
+        return $chunks;
+    }
+    
+    /**
+     * Rebuild full prompt for a content chunk
+     *
+     * @param string $chunk_content Content chunk
+     * @param string $brand_tone_template Brand tone template
+     * @param string $language_name Language name
+     * @param string $language_description Language description
+     * @param string $glossary_list Glossary list
+     * @param array $field_labels_list List of field labels
+     * @return string Full prompt with chunk content
+     */
+    protected function rebuild_prompt_for_chunk($chunk_content, $brand_tone_template, $language_name, $language_description, $glossary_list, $field_labels_list)
+    {
+        // Replace {content} with chunk content
+        $prompt = str_replace('{content}', $chunk_content, $brand_tone_template);
+        $prompt = str_replace('{lng}', $language_name, $prompt);
+        
+        // Replace {desc} placeholder
+        if (!empty($language_description)) {
+            $prompt = str_replace('{desc}', $language_description, $prompt);
+        } else {
+            $prompt = str_replace('{desc}', '', $prompt);
+        }
+        
+        // Replace {glossy} placeholder
+        if (!empty($glossary_list)) {
+            $prompt = str_replace('{glossy}', $glossary_list, $prompt);
+        } else {
+            $prompt = str_replace('{glossy}', '', $prompt);
+        }
+        
+        // Build example format
+        $example_format = '';
+        if (count($field_labels_list) === 1) {
+            $example_label = $field_labels_list[0];
+            $example_format = "\n\nIMPORTANT: You MUST respond in the following exact format:\n{$example_label}: [translated text]\n\nExample:\n{$example_label}: [your translation here]";
+        } else {
+            $example_parts = array();
+            foreach ($field_labels_list as $label) {
+                $example_parts[] = "{$label}: [translated {$label} here]";
+            }
+            $example_format = "\n\nIMPORTANT: You MUST respond in the following exact format, maintaining the same structure with field labels:\n" . implode("\n\n", $example_parts) . "\n\nEach field must be on a separate line with its label followed by a colon and space, then the translated content.";
+        }
+        
+        // Add CRITICAL INSTRUCTIONS
+        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. IMPORTANT: Do NOT translate any placeholders like {{URL_0}}, {{URL_1}}, etc. Keep them exactly as they appear.\n7. CRITICAL: Do NOT translate HTML tags. Keep all HTML tags exactly as they appear in the original content, including all attributes, opening tags, closing tags, and self-closing tags.\n8. CRITICAL: Do NOT translate images. Keep all image tags (<img>), image URLs, image attributes (src, alt, etc.), and any image references exactly as they appear in the original content.\n9. Only translate the actual text content that appears between HTML tags or outside of HTML tags. HTML tags and images must remain completely unchanged." . $example_format;
+        
+        return $prompt;
+    }
+    
+    /**
+     * Combine multiple chunk translation responses into one
+     * Merges multiple Content: fields into a single Content: field
+     *
+     * @param array $chunk_responses Array of translated chunk responses
+     * @return string Combined translation
+     */
+    protected function combine_chunk_responses($chunk_responses)
+    {
+        if (empty($chunk_responses)) {
+            return '';
+        }
+        
+        // If only one response, return it
+        if (count($chunk_responses) === 1) {
+            return trim($chunk_responses[0]);
+        }
+        
+        // Parse each response into fields
+        // Improved pattern to handle field names with slashes, underscores, and other characters
+        // Pattern matches: "FieldName: " or "FieldName/SubField: " at start of line or after newlines
+        $all_fields = array();
+        $content_parts = array(); // Special handling for Content field
+        
+        foreach ($chunk_responses as $response) {
+            if (empty(trim($response))) {
+                continue;
+            }
+            
+            // More flexible pattern: matches field names that can contain letters, numbers, underscores, slashes
+            // Pattern: (start of string or \n\n) followed by field name (can have /, _, letters, numbers) followed by ": "
+            $pattern = '/(?:^|\n\n)([A-Za-z0-9_\/]+):\s/';
+            $matches = array();
+            $offset = 0;
+            
+            // Find all field labels and their positions
+            while (preg_match($pattern, $response, $matches, PREG_OFFSET_CAPTURE, $offset)) {
+                $field_label = $matches[1][0];
+                $field_start = $matches[0][1] + strlen($matches[0][0]); // Position after ": "
+                
+                // Find the end of this field (start of next field or end of string)
+                $next_match = preg_match($pattern, $response, $next_matches, PREG_OFFSET_CAPTURE, $field_start);
+                $field_end = $next_match ? $next_matches[0][1] : strlen($response);
+                
+                // Extract field value
+                $field_value = substr($response, $field_start, $field_end - $field_start);
+                $field_value = trim($field_value);
+                
+                if (!empty($field_value)) {
+                    $field_label_lower = strtolower($field_label);
+                    
+                    if ($field_label_lower === 'content') {
+                        // Collect Content field parts for merging
+                        $content_parts[] = $field_value;
+                    } else {
+                        // Other fields - only keep first occurrence (unless it's a continuation)
+                        // For fields that might be split, check if we should append
+                        if (!isset($all_fields[$field_label])) {
+                            $all_fields[$field_label] = $field_value;
+                        } else {
+                            // If field already exists and value is different, it might be a continuation
+                            // For now, keep the first one (most fields shouldn't be split)
+                        }
+                    }
+                }
+                
+                $offset = $field_end;
+            }
+            
+            // If no fields were found with the pattern, try to extract the first field
+            // (in case it starts at the beginning without \n\n)
+            if (empty($all_fields) && empty($content_parts)) {
+                // Try to match field at the very start: "FieldName: value"
+                if (preg_match('/^([A-Za-z0-9_\/]+):\s(.+)$/s', $response, $first_match)) {
+                    $field_label = $first_match[1];
+                    $field_value = trim($first_match[2]);
+                    
+                    if (!empty($field_value)) {
+                        $field_label_lower = strtolower($field_label);
+                        if ($field_label_lower === 'content') {
+                            $content_parts[] = $field_value;
+                        } else {
+                            $all_fields[$field_label] = $field_value;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Build combined response
+        $combined_parts = array();
+        
+        // Add all non-Content fields first
+        foreach ($all_fields as $field_label => $field_value) {
+            $combined_parts[] = "{$field_label}: {$field_value}";
+        }
+        
+        // Add merged Content field
+        if (!empty($content_parts)) {
+            $merged_content = implode('', $content_parts); // Merge without separator
+            $combined_parts[] = "Content: {$merged_content}";
+        }
+        
+        $combined = implode("\n\n", $combined_parts);
+        
+        // If still empty, return the first response as fallback
+        if (empty(trim($combined)) && !empty($chunk_responses)) {
+            return trim($chunk_responses[0]);
+        }
+        
+        return $combined;
+    }
+    
+    /**
+     * Process chunked translation - splits content into chunks and processes each
+     *
+     * @param string $content_string Full content string to split
+     * @param array $chunking_info Info needed to rebuild prompts (brand_tone_template, language_name, etc.)
+     * @param string $target_language_prefix Target language prefix
+     * @param int $queue_id Queue entry ID
+     * @param int $post_id Post ID
+     * @return string|false Combined translation or false on failure
+     */
+    protected function process_chunked_translation($content_string, $chunking_info, $target_language_prefix, $queue_id = 0, $post_id = 0)
+    {
+        // Split content into chunks (max 5000 chars each)
+        $content_chunks = $this->split_content_string_into_chunks($content_string, 5000);
+        $total_chunks = count($content_chunks);
+        
+        if (empty($content_chunks)) {
+            $this->last_error = "Failed to split content into chunks.";
+            return false;
+        }
+        
+        if (class_exists('Xf_Translator_Logger')) {
+            Xf_Translator_Logger::info("Processing translation in {$total_chunks} chunks (content length: " . number_format(strlen($content_string)) . " chars)");
+        }
+        
+        $chunk_translations = array();
+        
+        // Process each chunk sequentially
+        foreach ($content_chunks as $chunk_index => $chunk_content) {
+            $chunk_num = $chunk_index + 1;
+            
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::debug("Processing chunk {$chunk_num}/{$total_chunks} (" . number_format(strlen($chunk_content)) . " chars)");
+            }
+            
+            // Rebuild full prompt for this chunk
+            $chunk_prompt = $this->rebuild_prompt_for_chunk(
+                $chunk_content,
+                $chunking_info['brand_tone_template'],
+                $chunking_info['language_name'],
+                $chunking_info['language_description'],
+                $chunking_info['glossary_list'],
+                $chunking_info['field_labels_list']
+            );
+            
+            // Call API for this chunk (use internal method to avoid recursion)
+            $chunk_translation = $this->call_translation_api_internal($chunk_prompt, $target_language_prefix, $queue_id, $post_id, $chunk_num, $total_chunks);
+            
+            if ($chunk_translation === false) {
+                // If any chunk fails, fail entire translation
+                $this->last_error = "Chunk {$chunk_num}/{$total_chunks} failed: " . $this->last_error;
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::error("Chunked translation failed at chunk {$chunk_num}/{$total_chunks}");
+                }
+                return false;
+            }
+            
+            $chunk_translations[] = $chunk_translation;
+            
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::debug("Chunk {$chunk_num}/{$total_chunks} translated successfully");
+            }
+        }
+        
+        // Combine all chunk translations
+        $combined_translation = $this->combine_chunk_responses($chunk_translations);
+        
+        if (class_exists('Xf_Translator_Logger')) {
+            Xf_Translator_Logger::info("All {$total_chunks} chunks translated successfully. Combined length: " . number_format(strlen($combined_translation)) . " chars");
+        }
+        
+        return $combined_translation;
+    }
+    
+    /**
      * Call translation API (OpenAI or DeepSeek)
+     * Handles chunking for content > 10,000 characters
      *
      * @param string $prompt Translation prompt
      * @param string $target_language_prefix Target language prefix/code
      * @param int $queue_id Queue entry ID for logging
      * @param int $post_id Post ID for logging
+     * @param array $prompt_data Optional prompt data with content_string and other info for chunking
      * @return string|false Translated content or false on failure
      */
-    protected function call_translation_api($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0)
+    protected function call_translation_api($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0, $prompt_data = null)
     {
+        // Check if we need to chunk the content
+        $should_chunk = false;
+        $content_string = '';
+        $chunking_info = null;
+        
+        if ($prompt_data !== null && isset($prompt_data['content_string'])) {
+            $content_string = $prompt_data['content_string'];
+            $content_length = strlen($content_string);
+            
+            // Chunk if content is greater than 10,000 characters
+            if ($content_length > 10000) {
+                $should_chunk = true;
+                $chunking_info = array(
+                    'brand_tone_template' => $prompt_data['brand_tone_template'],
+                    'language_name' => $prompt_data['language_name'],
+                    'language_description' => $prompt_data['language_description'],
+                    'glossary_list' => $prompt_data['glossary_list'],
+                    'field_labels_list' => $prompt_data['field_labels_list']
+                );
+                
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::info('Large content detected (' . number_format($content_length) . ' chars). Splitting into chunks for translation.');
+                }
+            }
+        }
+        
+        // If chunking is needed, process chunks
+        if ($should_chunk) {
+            return $this->process_chunked_translation($content_string, $chunking_info, $target_language_prefix, $queue_id, $post_id);
+        }
+        
+        // Continue with normal (non-chunked) translation - call internal method
+        return $this->call_translation_api_internal($prompt, $target_language_prefix, $queue_id, $post_id, 0, 0);
+    }
+    
+    /**
+     * Internal method to call translation API (extracted to avoid recursion)
+     * This is the actual API call logic without chunking checks
+     *
+     * @param string $prompt Translation prompt
+     * @param string $target_language_prefix Target language prefix/code
+     * @param int $queue_id Queue entry ID for logging
+     * @param int $post_id Post ID for logging
+     * @param int $chunk_num Current chunk number (for logging, 0 if not chunked)
+     * @param int $total_chunks Total chunks (for logging, 0 if not chunked)
+     * @return string|false Translated content or false on failure
+     */
+    protected function call_translation_api_internal($prompt, $target_language_prefix, $queue_id = 0, $post_id = 0, $chunk_num = 0, $total_chunks = 0)
+    {
+        $is_chunked = ($chunk_num > 0 && $total_chunks > 0);
+        
         $model = $this->settings->get('selected_model', 'gpt-4o');
+        
+        // Fallback for invalid DeepSeek model names
+        $invalid_models = array(
+            'deepseek-chat-32k' => 'deepseek-chat',
+            'deepseek-v2' => 'deepseek-chat',
+            'deepseek-v3' => 'deepseek-chat'
+        );
+        
+        if (isset($invalid_models[$model])) {
+            $fallback_model = $invalid_models[$model];
+            error_log('XF Translator: Invalid model "' . $model . '" detected. Falling back to "' . $fallback_model . '".');
+            $model = $fallback_model;
+            // Update the setting to prevent future errors
+            $this->settings->update('selected_model', $fallback_model);
+        }
+        
         $is_deepseek = strpos($model, 'deepseek') !== false;
 
         // Get API key
@@ -845,6 +1500,12 @@ class Xf_Translator_Processor
         if (!$is_deepseek) {
         }
 
+        // Ensure prompt is valid UTF-8 and doesn't contain encoding issues
+        // Remove or replace invalid UTF-8 characters
+        $prompt = mb_convert_encoding($prompt, 'UTF-8', 'UTF-8');
+        // Remove any null bytes or other problematic characters
+        $prompt = str_replace("\0", '', $prompt);
+        
         // Add user message with translation prompt
         $messages[] = array(
             'role' => 'user',
@@ -904,6 +1565,12 @@ class Xf_Translator_Processor
             'timeout' => $timeout,
             'request_body' => $body
         );
+        
+        // Add chunk info if chunked
+        if ($is_chunked) {
+            $request_log['chunk_num'] = $chunk_num;
+            $request_log['total_chunks'] = $total_chunks;
+        }
         // Log to plugin-specific log file
         if (class_exists('Xf_Translator_Logger')) {
             Xf_Translator_Logger::log_api('REQUEST', $request_log);
@@ -1015,11 +1682,75 @@ class Xf_Translator_Processor
                 $request_headers['Keep-Alive'] = 'timeout=120, max=1000';
                 // Disable Expect header which can cause issues
                 $request_headers['Expect'] = '';
+                
+                // CRITICAL: Add filter directly before request with MAXIMUM priority
+                // This ensures our timeout fixes are applied even if other plugins interfere
+                $filter_callback = function($handle, $r, $url) use ($retry_timeout, $post_id, $queue_id) {
+                    if (strpos($url, 'api.deepseek.com') !== false) {
+                        // Log that filter is being called (for debugging)
+                        if (class_exists('Xf_Translator_Logger')) {
+                            Xf_Translator_Logger::debug('cURL filter called for DeepSeek API - applying timeout fixes. Post: ' . $post_id . ', Queue: ' . $queue_id);
+                        }
+                        
+                        // Set connection timeout
+                        curl_setopt($handle, CURLOPT_CONNECTTIMEOUT, 30);
+                        
+                        // Set overall timeout
+                        curl_setopt($handle, CURLOPT_TIMEOUT, $retry_timeout + 10);
+                        
+                        // CRITICAL: Disable low speed timeout completely
+                        curl_setopt($handle, CURLOPT_LOW_SPEED_LIMIT, 0);
+                        curl_setopt($handle, CURLOPT_LOW_SPEED_TIME, 0);
+                        
+                        // Increase buffer size
+                        curl_setopt($handle, CURLOPT_BUFFERSIZE, 32768);
+                        
+                        // Enable TCP keep-alive
+                        curl_setopt($handle, CURLOPT_TCP_KEEPALIVE, 1);
+                        curl_setopt($handle, CURLOPT_TCP_KEEPIDLE, 60);
+                        curl_setopt($handle, CURLOPT_TCP_KEEPINTVL, 10);
+                        
+                        // Use HTTP/1.1
+                        curl_setopt($handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+                        
+                        // Disable pipelining
+                        curl_setopt($handle, CURLOPT_PIPEWAIT, 0);
+                        
+                        // Don't fail on HTTP errors
+                        curl_setopt($handle, CURLOPT_FAILONERROR, false);
+                        
+                        // Verify settings were applied (for debugging)
+                        if (class_exists('Xf_Translator_Logger')) {
+                            Xf_Translator_Logger::debug('cURL options applied - TIMEOUT: ' . ($retry_timeout + 10) . ', LOW_SPEED_TIME: 0, CONNECTTIMEOUT: 30');
+                        }
+                    }
+                    return $handle;
+                };
+                
+                // Add filter with PHP_INT_MAX priority (highest possible)
+                add_filter('http_api_curl', $filter_callback, PHP_INT_MAX, 3);
+            }
+            
+            // Encode body to JSON, with error handling
+            $body_json = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            
+            // Check if JSON encoding failed
+            if ($body_json === false) {
+                $json_error = json_last_error_msg();
+                $this->last_error = "Failed to encode request body to JSON: {$json_error}";
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::error('API Error: ' . $this->last_error);
+                    Xf_Translator_Logger::error('Request body that failed to encode: ' . print_r($body, true));
+                } else {
+                    error_log('XF Translator API Error: ' . $this->last_error);
+                    error_log('XF Translator: Request body that failed to encode: ' . print_r($body, true));
+                }
+                return false;
             }
             
             $response = wp_remote_post($endpoint, array(
                 'headers' => $request_headers,
-                'body' => json_encode($body),
+                'body' => $body_json,
                 'timeout' => $retry_timeout,
                 'httpversion' => '1.1' // Force HTTP/1.1 for DeepSeek
             ));
@@ -1622,14 +2353,19 @@ class Xf_Translator_Processor
     private function create_translated_post($original_post_id, $target_language, $translated_data, $original_data)
     {
         error_log('XF Translator: Starting create_translated_post for post ID: ' . $original_post_id . ', Language: ' . $target_language);
+        error_log('XF Translator DEBUG: create_translated_post called with - Original Post ID: ' . $original_post_id . ', Target Language: ' . $target_language);
+        error_log('XF Translator DEBUG: Translated data keys: ' . implode(', ', array_keys($translated_data)));
         $post_creation_start_time = time();
         
         $original_post = get_post($original_post_id);
 
         if (!$original_post) {
             error_log('XF Translator: Original post not found. Post ID: ' . $original_post_id);
+            error_log('XF Translator DEBUG: CRITICAL - Original post does not exist! Post ID: ' . $original_post_id);
             return false;
         }
+        
+        error_log('XF Translator DEBUG: Original post found. Post ID: ' . $original_post_id . ', Title: ' . $original_post->post_title . ', Status: ' . $original_post->post_status . ', Type: ' . $original_post->post_type);
 
         // Get language prefix for meta key (use prefix for consistency)
         $languages = $this->settings->get('languages', array());
@@ -1751,10 +2487,97 @@ class Xf_Translator_Processor
             // Preserve original post date on updates too
             $post_data['post_date'] = $original_post->post_date;
             $post_data['post_date_gmt'] = $original_post->post_date_gmt;
-            $translated_post_id = wp_update_post($post_data, true);
+            
+            // DIAGNOSTIC: Log before wp_update_post
+            error_log('XF Translator DEBUG: About to call wp_update_post for post ID: ' . $existing_translated_post_id);
+            error_log('XF Translator DEBUG: Post data keys: ' . implode(', ', array_keys($post_data)));
+            error_log('XF Translator DEBUG: Post data post_title length: ' . (isset($post_data['post_title']) ? strlen($post_data['post_title']) : 'NOT SET'));
+            error_log('XF Translator DEBUG: Post data post_content length: ' . (isset($post_data['post_content']) ? strlen($post_data['post_content']) : 'NOT SET'));
+            error_log('XF Translator DEBUG: Post data post_status: ' . (isset($post_data['post_status']) ? $post_data['post_status'] : 'NOT SET'));
+            
+            // Disable pingbacks/trackbacks to prevent HTTP requests during update
+            $post_data['ping_status'] = 'closed';
+            
+            // Temporarily disable pingbacks/trackbacks via filter to prevent Curl errors
+            $target_post_id = $existing_translated_post_id; // Capture for closure
+            $disable_pingback = function($open, $post_id) use ($target_post_id) {
+                if ($post_id == $target_post_id) {
+                    return false; // Disable pingbacks
+                }
+                return $open;
+            };
+            add_filter('pre_ping', $disable_pingback, 10, 2);
+            
+            // Temporarily disable trackbacks
+            $disable_trackback = function($open, $post_id) use ($target_post_id) {
+                if ($post_id == $target_post_id) {
+                    return false; // Disable trackbacks
+                }
+                return $open;
+            };
+            add_filter('pre_trackback', $disable_trackback, 10, 2);
+            
+            // Completely block HTTP requests during update to prevent Curl errors
+            // Translated posts don't need pingbacks/trackbacks/webhooks
+            $block_http_requests = function($preempt, $parsed_args, $url) use ($target_post_id) {
+                // Block all HTTP requests during translated post update
+                error_log('XF Translator DEBUG: Blocking HTTP request during post update: ' . $url);
+                // Return a successful empty response to prevent errors
+                return array(
+                    'response' => array(
+                        'code' => 200,
+                        'message' => 'OK'
+                    ),
+                    'body' => '',
+                    'headers' => array(),
+                    'cookies' => array()
+                );
+            };
+            add_filter('pre_http_request', $block_http_requests, 999, 3); // High priority to block all requests
+            
+            $start_time = microtime(true);
+            
+            // Wrap in try-catch to catch any fatal errors
+            try {
+                error_log('XF Translator DEBUG: Calling wp_update_post NOW... (pingbacks/trackbacks disabled)');
+                
+                // Use wp_update_post with wp_slash to prevent issues
+                $translated_post_id = wp_update_post(wp_slash($post_data), true);
+                
+                error_log('XF Translator DEBUG: wp_update_post CALL COMPLETED - reached immediately after call');
+            } catch (Exception $e) {
+                error_log('XF Translator DEBUG: Exception caught in wp_update_post: ' . $e->getMessage());
+                $translated_post_id = new WP_Error('exception', $e->getMessage());
+            } catch (Error $e) {
+                error_log('XF Translator DEBUG: Fatal Error caught in wp_update_post: ' . $e->getMessage());
+                $translated_post_id = new WP_Error('fatal_error', $e->getMessage());
+            } finally {
+                // Remove filters
+                remove_filter('pre_ping', $disable_pingback, 10);
+                remove_filter('pre_trackback', $disable_trackback, 10);
+                remove_filter('pre_http_request', $block_http_requests, 999);
+            }
+            
+            $elapsed_time = microtime(true) - $start_time;
+            
+            // DIAGNOSTIC: Log after wp_update_post - these MUST execute
+            error_log('XF Translator DEBUG: wp_update_post completed in ' . round($elapsed_time, 3) . ' seconds');
+            error_log('XF Translator DEBUG: wp_update_post returned. Result type: ' . gettype($translated_post_id) . ', Value: ' . var_export($translated_post_id, true));
             
             if (is_wp_error($translated_post_id)) {
                 error_log('XF Translator: Error updating post. Error: ' . $translated_post_id->get_error_message());
+                error_log('XF Translator DEBUG: wp_update_post WP_Error - Code: ' . $translated_post_id->get_error_code() . ', Message: ' . $translated_post_id->get_error_message());
+                
+                // Check if post was actually updated despite the error (common with HTTP request errors)
+                $updated_post = get_post($existing_translated_post_id);
+                if ($updated_post && isset($post_data['post_title']) && $updated_post->post_title === $post_data['post_title']) {
+                    error_log('XF Translator DEBUG: Post was actually updated successfully despite WP_Error! Treating as success.');
+                    $translated_post_id = $existing_translated_post_id; // Override error with success
+                }
+            } elseif ($translated_post_id === 0) {
+                error_log('XF Translator DEBUG: wp_update_post returned 0 (update failed silently)');
+            } elseif (!is_numeric($translated_post_id)) {
+                error_log('XF Translator DEBUG: wp_update_post returned non-numeric value!');
             } else {
                 error_log('XF Translator: Successfully updated post ID: ' . $translated_post_id);
             }
@@ -1772,13 +2595,28 @@ class Xf_Translator_Processor
 
         if (is_wp_error($translated_post_id)) {
             error_log('XF Translator: Post creation/update failed. Returning false.');
+            error_log('XF Translator DEBUG: CRITICAL - wp_insert_post/wp_update_post returned WP_Error');
+            error_log('XF Translator DEBUG: WP_Error code: ' . $translated_post_id->get_error_code());
+            error_log('XF Translator DEBUG: WP_Error message: ' . $translated_post_id->get_error_message());
+            error_log('XF Translator DEBUG: WP_Error data: ' . print_r($translated_post_id->get_error_data(), true));
             self::$creating_translated_post = false; // Clear flag on error
             return false;
         }
         
+        // DEBUG: Verify post ID is valid
+        if (!is_numeric($translated_post_id) || $translated_post_id <= 0) {
+            error_log('XF Translator DEBUG: CRITICAL - Invalid post ID returned! Value: ' . var_export($translated_post_id, true));
+            self::$creating_translated_post = false;
+            return false;
+        }
+        
+        error_log('XF Translator DEBUG: Post creation/update returned Post ID: ' . $translated_post_id . ' (type: ' . gettype($translated_post_id) . ')');
+        
         // Store meta immediately so filter can check it even if flag is cleared
-        update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
-        update_post_meta($translated_post_id, '_xf_translator_desired_slug', $original_slug);
+        error_log('XF Translator DEBUG: Storing post meta for translated post ID: ' . $translated_post_id);
+        $meta1_result = update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
+        $meta2_result = update_post_meta($translated_post_id, '_xf_translator_desired_slug', $original_slug);
+        error_log('XF Translator DEBUG: Meta storage results - original_post_id: ' . ($meta1_result ? 'success' : 'failed') . ', desired_slug: ' . ($meta2_result ? 'success' : 'failed'));
         
         // CRITICAL: ALWAYS ensure the slug is correct (WordPress might have changed it despite our filter)
         // We need to do this immediately after post creation
@@ -1872,9 +2710,11 @@ class Xf_Translator_Processor
         }
 
         // Link translated post to original (use prefix for meta keys)
-        update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
-        update_post_meta($translated_post_id, '_xf_translator_language', $language_prefix);
-        update_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, $translated_post_id);
+        error_log('XF Translator DEBUG: Storing relationship meta links. Original Post ID: ' . $original_post_id . ', Translated Post ID: ' . $translated_post_id . ', Language Prefix: ' . $language_prefix);
+        $link1_result = update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
+        $link2_result = update_post_meta($translated_post_id, '_xf_translator_language', $language_prefix);
+        $link3_result = update_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, $translated_post_id);
+        error_log('XF Translator DEBUG: Relationship meta storage results - original_post_id link: ' . ($link1_result ? 'success' : 'failed') . ', language link: ' . ($link2_result ? 'success' : 'failed') . ', translated_post link: ' . ($link3_result ? 'success' : 'failed'));
 
         // Copy featured image from original post
         $thumbnail_id = get_post_thumbnail_id($original_post_id);
@@ -2028,6 +2868,15 @@ class Xf_Translator_Processor
         $total_time = time() - $post_creation_start_time;
         error_log('XF Translator: Completed create_translated_post for post ID: ' . $original_post_id . '. Translated post ID: ' . $translated_post_id . '. Total time: ' . $total_time . ' seconds');
         
+        // DEBUG: Final verification before returning
+        $final_verify = get_post($translated_post_id);
+        if ($final_verify) {
+            error_log('XF Translator DEBUG: Final verification - Post exists. ID: ' . $translated_post_id . ', Status: ' . $final_verify->post_status . ', Title: ' . $final_verify->post_title);
+        } else {
+            error_log('XF Translator DEBUG: CRITICAL ERROR - Final verification FAILED! Post ID ' . $translated_post_id . ' does not exist!');
+        }
+        
+        error_log('XF Translator DEBUG: Returning from create_translated_post with Post ID: ' . $translated_post_id);
         return $translated_post_id;
     }
 
@@ -2294,29 +3143,40 @@ class Xf_Translator_Processor
         }
 
         // SAFETY: Limit concurrent processing to prevent resource exhaustion
-        // Maximum 20 items can be in "processing" status at any time
-        $max_concurrent_processing = 20;
-        $current_processing_count = $wpdb->get_var(
-            "SELECT COUNT(*) FROM $table_name WHERE status = 'processing'"
-        );
+        // Get max concurrent processing limit from settings (default: 20)
+        // NOTE: This limit only applies to OLD type posts, not NEW posts
+        $max_concurrent_processing = $this->settings->get('max_concurrent_processing', 20);
 
-        if ($current_processing_count >= $max_concurrent_processing) {
-            // Too many items already processing - skip this one for now
-            $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
-            if (class_exists('Xf_Translator_Logger')) {
-                Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry_id} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
-            } else {
-                error_log("XF Translator: Skipping queue entry #{$queue_entry_id} - {$current_processing_count} items already processing (max: {$max_concurrent_processing})");
+        // Only check concurrent limit for OLD type posts
+        if (isset($queue_entry['type']) && $queue_entry['type'] === 'OLD') {
+            $current_processing_count = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM $table_name WHERE status = 'processing' AND type = %s",
+                    'OLD'
+                )
+            );
+
+            if ($current_processing_count >= $max_concurrent_processing) {
+                // Too many items already processing - skip this one for now
+                $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
+                if (class_exists('Xf_Translator_Logger')) {
+                    Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry_id} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
+                } else {
+                    error_log("XF Translator: Skipping queue entry #{$queue_entry_id} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
+                }
+                return false; // Leave as pending, will be picked up later
             }
-            return false; // Leave as pending, will be picked up later
         }
 
-        // Update status to processing
+        // Update status to processing (also update 'updated' field to track when status changed)
         $wpdb->update(
             $table_name,
-            array('status' => 'processing'),
+            array(
+                'status' => 'processing',
+                'updated' => current_time('mysql')
+            ),
             array('id' => $queue_entry_id),
-            array('%s'),
+            array('%s', '%s'),
             array('%d')
         );
 
@@ -2379,7 +3239,8 @@ class Xf_Translator_Processor
         $placeholders_map = $prompt_data['placeholders_map'];
 
         // Call API (use prefix for API calls) - API logging is handled inside the function
-        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry_id, $post_id);
+        // Pass prompt_data for chunking support
+        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry_id, $post_id, $prompt_data);
 
         if ($translation_result === false) {
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
@@ -2593,7 +3454,8 @@ class Xf_Translator_Processor
         $placeholders_map = $prompt_data['placeholders_map'];
 
         // Call API
-        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id);
+        // Pass prompt_data for chunking support
+        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id, $prompt_data);
 
         if ($translation_result === false) {
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
@@ -2828,7 +3690,8 @@ class Xf_Translator_Processor
         $this->settings->update('selected_model', $model);
 
         // Call API with test mode (no post creation, no queue)
-        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, 0, $post_id);
+        // Pass prompt_data for chunking support if available
+        $translation_result = $this->call_translation_api($prompt, $target_language_prefix, 0, $post_id, isset($prompt_data) ? $prompt_data : null);
 
         // Restore original model
         $this->settings->update('selected_model', $original_model);
@@ -3023,9 +3886,9 @@ class Xf_Translator_Processor
             'gpt-3.5-turbo-16k' => 16384, // GPT-3.5 Turbo 16k supports up to 16k output tokens
 
             // DeepSeek models
-            'deepseek-chat' => 8192,     // DeepSeek Chat supports up to 8k output tokens
-            'deepseek-coder' => 8192,    // DeepSeek Coder supports up to 8k output tokens
-            'deepseek-chat-32k' => 32768, // DeepSeek Chat 32k supports up to 32k output tokens
+            'deepseek-chat' => 8192,        // DeepSeek Chat supports up to 8k output tokens
+            'deepseek-coder' => 8192,       // DeepSeek Coder supports up to 8k output tokens
+            'deepseek-reasoner' => 16384,   // DeepSeek Reasoner (R1) supports up to 16k output tokens
         );
 
         // Return model-specific limit or default to 4000 for safety

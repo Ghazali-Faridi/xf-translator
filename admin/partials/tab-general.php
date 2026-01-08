@@ -69,7 +69,7 @@ if (!defined('ABSPATH')) {
                         <optgroup label="<?php esc_attr_e('DeepSeek Models', 'api-translator'); ?>">
                             <option value="deepseek-chat" <?php selected($selected_model, 'deepseek-chat'); ?>>DeepSeek Chat</option>
                             <option value="deepseek-coder" <?php selected($selected_model, 'deepseek-coder'); ?>>DeepSeek Coder</option>
-                            <option value="deepseek-chat-32k" <?php selected($selected_model, 'deepseek-chat-32k'); ?>>DeepSeek Chat 32k</option>
+                            <option value="deepseek-reasoner" <?php selected($selected_model, 'deepseek-reasoner'); ?>>DeepSeek Reasoner (R1)</option>
                         </optgroup>
                     </select>
                     <p class="description">
@@ -97,6 +97,24 @@ if (!defined('ABSPATH')) {
             </tr>
             <tr>
                 <th scope="row">
+                    <label for="max_concurrent_processing"><?php _e('Max Concurrent Processing', 'api-translator'); ?></label>
+                </th>
+                <td>
+                    <input type="number" 
+                           id="max_concurrent_processing" 
+                           name="max_concurrent_processing" 
+                           value="<?php echo esc_attr($max_concurrent_processing); ?>" 
+                           class="small-text"
+                           min="1"
+                           step="1"
+                           placeholder="20">
+                    <p class="description">
+                        <?php _e('Maximum number of translation items that can be in "processing" status at the same time.', 'api-translator'); ?>
+                    </p>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">
                     <?php _e('Background Processing', 'api-translator'); ?>
                 </th>
                 <td>
@@ -106,10 +124,10 @@ if (!defined('ABSPATH')) {
                                    name="enable_new_translations_cron" 
                                    value="1" 
                                    <?php checked($enable_new_cron, true); ?>>
-                            <?php _e('Enable automatic processing of NEW translations (runs every 1 minute)', 'api-translator'); ?>
+                            <?php _e('Enable automatic processing of NEW translations', 'api-translator'); ?>
                         </label>
                         <p class="description" style="margin-left: 25px; margin-top: 5px;">
-                            <?php _e('When enabled, the system will automatically process NEW translation queue entries every minute via wp-cron.', 'api-translator'); ?>
+                            <?php _e('When enabled, the system will automatically process NEW translation queue entries via wp-cron.', 'api-translator'); ?>
                         </p>
                     </fieldset>
                     <fieldset style="margin-top: 15px;">
@@ -118,10 +136,10 @@ if (!defined('ABSPATH')) {
                                    name="enable_old_translations_cron" 
                                    value="1" 
                                    <?php checked($enable_old_cron, true); ?>>
-                            <?php _e('Enable automatic processing of OLD translations (runs every 1 minute)', 'api-translator'); ?>
+                            <?php _e('Enable automatic processing of OLD translations', 'api-translator'); ?>
                         </label>
                         <p class="description" style="margin-left: 25px; margin-top: 5px;">
-                            <?php _e('When enabled, the system will automatically process OLD translation queue entries every minute via wp-cron.', 'api-translator'); ?>
+                            <?php _e('When enabled, the system will automatically process OLD translation queue entries via wp-cron.', 'api-translator'); ?>
                         </p>
                     </fieldset>
                 </td>

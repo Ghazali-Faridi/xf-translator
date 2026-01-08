@@ -42,7 +42,7 @@ $openai_models = array(
 $deepseek_models = array(
     'deepseek-chat' => 'DeepSeek Chat',
     'deepseek-coder' => 'DeepSeek Coder',
-    'deepseek-chat-32k' => 'DeepSeek Chat 32k'
+    'deepseek-reasoner' => 'DeepSeek Reasoner (R1)'
 );
 ?>
 
@@ -377,7 +377,7 @@ jQuery(document).ready(function($) {
             'gpt-3.5-turbo-16k': 'GPT-3.5 Turbo 16k',
             'deepseek-chat': 'DeepSeek Chat',
             'deepseek-coder': 'DeepSeek Coder',
-            'deepseek-chat-32k': 'DeepSeek Chat 32k'
+            'deepseek-reasoner': 'DeepSeek Reasoner (R1)'
         };
         return labels[model] || model;
     }

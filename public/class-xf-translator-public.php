@@ -135,9 +135,110 @@ class Xf_Translator_Public {
 		// Filter query_posts() results (query_posts bypasses pre_get_posts)
 		add_filter('the_posts', array($this, 'filter_query_posts_results'), 10, 2);
 		
+		// Add custom WHERE clause to exclude translated posts (more efficient than post__not_in)
+		add_filter('posts_where', array($this, 'exclude_translated_posts_where'), 10, 2);
+		
 		// Filter HTML lang attribute to match current language
 		add_filter('language_attributes', array($this, 'filter_language_attributes'), 10, 2);
 
+	}
+
+	/**
+	 * Get all translated post IDs (cached per request)
+	 * This prevents the same query from running multiple times
+	 * 
+	 * @return array Array of translated post IDs
+	 */
+	private function get_all_translated_post_ids() {
+		static $cached_translated_ids = null;
+		
+		if ($cached_translated_ids !== null) {
+			return $cached_translated_ids;
+		}
+		
+		global $wpdb;
+		$cached_translated_ids = $wpdb->get_col(
+			"SELECT DISTINCT p.ID 
+			FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
+				AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
+			WHERE p.post_status = 'publish'
+			AND p.post_type IN ('post', 'page')
+			AND p.post_type != 'revision'"
+		);
+		
+		return $cached_translated_ids ?: array();
+	}
+
+	/**
+	 * Get translated post IDs for a specific language (cached per request)
+	 * 
+	 * @param string $lang_prefix Language prefix
+	 * @return array Array of translated post IDs
+	 */
+	private function get_translated_post_ids_for_language($lang_prefix) {
+		static $cached_by_language = array();
+		
+		if (isset($cached_by_language[$lang_prefix])) {
+			return $cached_by_language[$lang_prefix];
+		}
+		
+		global $wpdb;
+		$cached_by_language[$lang_prefix] = $wpdb->get_col($wpdb->prepare(
+			"SELECT DISTINCT p.ID 
+			FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+				AND pm1.meta_key = '_xf_translator_language' 
+				AND pm1.meta_value = %s
+			INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+				AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+			WHERE p.post_status = 'publish'
+			AND p.post_type IN ('post', 'page')
+			AND p.post_type != 'revision'
+			ORDER BY p.post_date DESC",
+			$lang_prefix
+		));
+		
+		return $cached_by_language[$lang_prefix] ?: array();
+	}
+
+	/**
+	 * Get translation map (original_id => translated_id) for a specific language (cached per request)
+	 * 
+	 * @param string $lang_prefix Language prefix
+	 * @return array Mapping array: original_id => translated_id
+	 */
+	private function get_translation_map_for_language($lang_prefix) {
+		static $cached_maps = array();
+		
+		if (isset($cached_maps[$lang_prefix])) {
+			return $cached_maps[$lang_prefix];
+		}
+		
+		global $wpdb;
+		$original_to_translated = $wpdb->get_results($wpdb->prepare(
+			"SELECT pm2.meta_value as original_id, p.ID as translated_id
+			FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+				AND pm1.meta_key = '_xf_translator_language' 
+				AND pm1.meta_value = %s
+			INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+				AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
+			WHERE p.post_status = 'publish'
+			AND p.post_type IN ('post', 'page')
+			AND p.post_type != 'revision'
+			ORDER BY p.post_date DESC",
+			$lang_prefix
+		), OBJECT_K);
+		
+		// Build mapping array: original_id => translated_id
+		$translation_map = array();
+		foreach ($original_to_translated as $row) {
+			$translation_map[intval($row->original_id)] = intval($row->translated_id);
+		}
+		
+		$cached_maps[$lang_prefix] = $translation_map;
+		return $translation_map;
 	}
 
 	/**
@@ -548,13 +649,14 @@ class Xf_Translator_Public {
 	 * Example:
 	 * - Stored path "fr" → URL prefix "fr".
 	 * - Stored path "Ar" → URL prefix "Ar".
-	 * - If path not set, uses prefix: "fr-CA" → URL prefix "frCA" (hyphen removed).
+	 * - If path not set, uses prefix: "fr-CA" → URL prefix "fr-CA" (hyphen preserved).
+	 * - If path not set, uses prefix: "zh-cn" → URL prefix "zh-cn" (hyphen preserved).
 	 *
 	 * This lets site owners store human-friendly prefixes (used in meta / hreflang),
-	 * while URLs use a simple segment that avoids server/host restrictions.
+	 * while URLs preserve hyphens for better readability and SEO.
 	 *
 	 * @param array|string $language Language settings array or raw prefix string.
-	 * @return string URL-safe prefix (no slashes, no spaces), or empty string on failure.
+	 * @return string URL-safe prefix (no slashes, no spaces, hyphens preserved), or empty string on failure.
 	 */
 	private function get_url_prefix_for_language( $language ) {
 		if ( is_array( $language ) ) {
@@ -578,9 +680,9 @@ class Xf_Translator_Public {
 			return '';
 		}
 
-		// Build URL-safe prefix: remove all non-alphanumeric characters.
-		// e.g. "fr-CA" => "frCA", "pt-BR" => "ptBR", "fr" => "fr", "Ar" => "Ar".
-		$url_prefix = preg_replace( '/[^A-Za-z0-9]/', '', $prefix );
+		// Build URL-safe prefix: remove problematic characters but keep hyphens.
+		// e.g. "fr-CA" => "fr-CA", "pt-BR" => "pt-BR", "zh-cn" => "zh-cn", "fr" => "fr", "Ar" => "Ar".
+		$url_prefix = preg_replace( '/[^A-Za-z0-9-]/', '', $prefix );
 
 		return $url_prefix ?: '';
 	}
@@ -767,14 +869,14 @@ class Xf_Translator_Public {
 		$taxonomies = get_taxonomies( array( 'public' => true, 'publicly_queryable' => true ), 'objects' );
 
 		// Add per-language rewrite rules so we can map clean URL prefixes
-		// (e.g. "frCA") back to stored prefixes (e.g. "fr-CA") in xf_lang_prefix.
+		// (e.g. "fr-CA" or "zh-cn") back to stored prefixes (e.g. "fr-CA") in xf_lang_prefix.
 		foreach ( $languages as $language ) {
 			if ( empty( $language['prefix'] ) ) {
 				continue;
 			}
 
 			$stored_prefix = $language['prefix']; // e.g. "fr-CA".
-			$url_prefix    = $this->get_url_prefix_for_language( $language ); // e.g. "frCA".
+			$url_prefix    = $this->get_url_prefix_for_language( $language ); // e.g. "fr-CA" or "zh-cn".
 
 			if ( ! $url_prefix ) {
 				continue;
@@ -1168,23 +1270,18 @@ class Xf_Translator_Public {
 			
 			// If this is a singular query (post/page), ensure we exclude translated posts
 			if ($query->is_singular || !empty($post_name) || !empty($query->get('pagename')) || !empty($query->get('p'))) {
-				global $wpdb;
-				
-				// Get all translated post IDs to exclude
-				$translated_post_ids = $wpdb->get_col(
-					"SELECT DISTINCT p.ID 
-					FROM {$wpdb->posts} p
-					INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
-						AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
-					WHERE p.post_status = 'publish'
-					AND p.post_type IN ('post', 'page')
-					AND p.post_type != 'revision'"
-				);
+				// Get all translated post IDs to exclude (cached)
+				$translated_post_ids = $this->get_all_translated_post_ids();
 				
 				if (!empty($translated_post_ids)) {
-					$existing_not_in = $query->get('post__not_in') ?: array();
-					$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
-					error_log('XF Translator: Excluding ' . count($translated_post_ids) . ' translated posts from English singular query');
+					// Only use post__not_in if array is reasonably sized (< 1000)
+					if (count($translated_post_ids) < 1000) {
+						$existing_not_in = $query->get('post__not_in') ?: array();
+						$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+					} else {
+						// For large arrays, set a flag to use WHERE clause filter
+						$query->set('xf_exclude_translated', true);
+					}
 				}
 			}
 			
@@ -1732,7 +1829,7 @@ class Xf_Translator_Public {
 
 			if ( $path ) {
 				// Try to match any configured language by its URL-safe prefix
-				// (e.g. "fr-CA" uses "frCA" in the URL).
+				// (e.g. "fr-CA" uses "fr-CA" in the URL, "zh-cn" uses "zh-cn").
 				$languages = $this->settings->get( 'languages', array() );
 				foreach ( $languages as $language ) {
 					if ( empty( $language['prefix'] ) ) {
@@ -2325,22 +2422,8 @@ class Xf_Translator_Public {
 			return;
 		}
 		
-		// Get all post IDs that have translations for this language, ordered by date DESC (latest first)
-		global $wpdb;
-		
-		$translated_post_ids = $wpdb->get_col($wpdb->prepare(
-			"SELECT DISTINCT p.ID 
-			FROM {$wpdb->posts} p
-			INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-				AND pm1.meta_key = '_xf_translator_language' 
-				AND pm1.meta_value = %s
-			INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-				AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
-			WHERE p.post_status = 'publish'
-			AND p.post_type != 'revision'
-			ORDER BY p.post_date DESC",
-			$lang_prefix
-		));
+		// Get all post IDs that have translations for this language, ordered by date DESC (latest first) (cached)
+		$translated_post_ids = $this->get_translated_post_ids_for_language($lang_prefix);
 		
 		if (empty($translated_post_ids)) {
 			// No translated posts found, set to show nothing (or show empty result)
@@ -2537,20 +2620,18 @@ class Xf_Translator_Public {
 		
 		// If no language prefix, show only original posts (exclude translations)
 		if (empty($lang_prefix)) {
-			global $wpdb;
-			$translated_post_ids = $wpdb->get_col(
-				"SELECT DISTINCT p.ID 
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
-					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'"
-			);
+			// Get all translated post IDs to exclude (cached)
+			$translated_post_ids = $this->get_all_translated_post_ids();
 			
 			if (!empty($translated_post_ids)) {
-				$existing_not_in = $query->get('post__not_in') ?: array();
-				$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+				// Only use post__not_in if array is reasonably sized (< 1000)
+				if (count($translated_post_ids) < 1000) {
+					$existing_not_in = $query->get('post__not_in') ?: array();
+					$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+				} else {
+					// For large arrays, set a flag to use WHERE clause filter
+					$query->set('xf_exclude_translated', true);
+				}
 			}
 			return;
 		}
@@ -2573,23 +2654,24 @@ class Xf_Translator_Public {
 		}
 		
 		// Get all translated post IDs for this language by this author
-		global $wpdb;
-		$translated_post_ids = $wpdb->get_col($wpdb->prepare(
-			"SELECT DISTINCT p.ID 
-			FROM {$wpdb->posts} p
-			INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-				AND pm1.meta_key = '_xf_translator_language' 
-				AND pm1.meta_value = %s
-			INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-				AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
-			WHERE p.post_status = 'publish'
-			AND p.post_type IN ('post', 'page')
-			AND p.post_type != 'revision'
-			AND p.post_author = %d
-			ORDER BY p.post_date DESC",
-			$lang_prefix,
-			$author_id
-		));
+		// Note: Author-specific queries can't use cached method directly, but we can filter cached results
+		$translated_post_ids_for_lang = $this->get_translated_post_ids_for_language($lang_prefix);
+		
+		// Filter by author from cached results
+		if (!empty($translated_post_ids_for_lang)) {
+			global $wpdb;
+			$placeholders = implode(',', array_fill(0, count($translated_post_ids_for_lang), '%d'));
+			$translated_post_ids = $wpdb->get_col($wpdb->prepare(
+				"SELECT DISTINCT p.ID 
+				FROM {$wpdb->posts} p
+				WHERE p.ID IN ($placeholders)
+				AND p.post_author = %d
+				ORDER BY p.post_date DESC",
+				array_merge($translated_post_ids_for_lang, array($author_id))
+			));
+		} else {
+			$translated_post_ids = array();
+		}
 		
 		if (!empty($translated_post_ids)) {
 			$query->set('post__in', $translated_post_ids);
@@ -2660,44 +2742,26 @@ class Xf_Translator_Public {
 		// Get current language prefix from URL
 		$lang_prefix = get_query_var('xf_lang_prefix');
 		
-		global $wpdb;
-		
 		if (empty($lang_prefix)) {
-			// On English/default: Exclude all translated posts
-			// Get all translated post IDs to exclude
-			$translated_post_ids = $wpdb->get_col(
-				"SELECT DISTINCT p.ID 
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
-					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'"
-			);
+			// On English/default: Exclude all translated posts (cached)
+			// Use post__not_in but limit to reasonable size to avoid performance issues
+			$translated_post_ids = $this->get_all_translated_post_ids();
 			
 			if (!empty($translated_post_ids)) {
-				$existing_not_in = $query->get('post__not_in') ?: array();
-				$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+				// Only use post__not_in if array is small (< 100)
+				// For larger arrays, use WHERE clause filter for better performance
+				if (count($translated_post_ids) < 100) {
+					$existing_not_in = $query->get('post__not_in') ?: array();
+					$query->set('post__not_in', array_merge($existing_not_in, $translated_post_ids));
+				} else {
+					// For large arrays, set a flag to use WHERE clause filter
+					$query->set('xf_exclude_translated', true);
+				}
 			}
 		} else {
 			// On language-prefixed URL: Show only translated posts for this language
-			// Exclude original posts and other language translations
-			
-			// Get translated post IDs for this language, ordered by date DESC (latest first)
-			$translated_post_ids = $wpdb->get_col($wpdb->prepare(
-				"SELECT DISTINCT p.ID 
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-					AND pm1.meta_key = '_xf_translator_language' 
-					AND pm1.meta_value = %s
-				INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-					AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'
-				ORDER BY p.post_date DESC",
-				$lang_prefix
-			));
+			// Exclude original posts and other language translations (cached)
+			$translated_post_ids = $this->get_translated_post_ids_for_language($lang_prefix);
 			
 			if (!empty($translated_post_ids)) {
 				// Respect post__not_in if it was set (e.g., to exclude posts already shown in widgets)
@@ -2720,6 +2784,53 @@ class Xf_Translator_Public {
 				$query->set('post__in', array(0));
 			}
 		}
+	}
+
+	/**
+	 * Add WHERE clause to exclude translated posts for large arrays
+	 * This is more efficient than post__not_in with 800+ IDs
+	 *
+	 * @param string $where WHERE clause
+	 * @param WP_Query $query Query object
+	 * @return string Modified WHERE clause
+	 */
+	public function exclude_translated_posts_where($where, $query) {
+		// Only on frontend
+		if (is_admin()) {
+			return $where;
+		}
+		
+		// Only apply if flag is set
+		if (!$query->get('xf_exclude_translated')) {
+			return $where;
+		}
+		
+		// Only for main query or specific query types
+		if (!$query->is_main_query() && !$query->is_home && !$query->is_front_page() && !$query->is_archive && !$query->is_singular) {
+			return $where;
+		}
+		
+		// Check if we're on English (no language prefix)
+		$lang_prefix = get_query_var('xf_lang_prefix');
+		if (!empty($lang_prefix)) {
+			return $where;
+		}
+		
+		global $wpdb;
+		
+		// Add WHERE clause to exclude posts that have translation meta keys
+		// This uses a subquery which is more efficient than large IN clauses
+		$where .= $wpdb->prepare(
+			" AND {$wpdb->posts}.ID NOT IN (
+				SELECT DISTINCT post_id 
+				FROM {$wpdb->postmeta} 
+				WHERE meta_key IN (%s, %s)
+			)",
+			'_xf_translator_original_post_id',
+			'_api_translator_original_post_id'
+		);
+		
+		return $where;
 	}
 
 	/**
@@ -2747,17 +2858,8 @@ class Xf_Translator_Public {
 		// For singular queries on English pages, filter out translated posts even from main query
 		// This prevents translated posts from appearing on English post pages
 		if (empty($lang_prefix) && $query->is_singular) {
-			// On English pages, filter out all translated posts
-			global $wpdb;
-			$translated_post_ids = $wpdb->get_col(
-				"SELECT DISTINCT p.ID 
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
-					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'"
-			);
+			// On English pages, filter out all translated posts (cached)
+			$translated_post_ids = $this->get_all_translated_post_ids();
 			
 			if (!empty($translated_post_ids)) {
 				$filtered_posts = array();
@@ -2844,17 +2946,8 @@ class Xf_Translator_Public {
 		global $wpdb;
 		
 		if (empty($lang_prefix)) {
-			// On English/default: Exclude all translated posts
-			// Get all translated post IDs to exclude
-			$translated_post_ids = $wpdb->get_col(
-				"SELECT DISTINCT p.ID 
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id 
-					AND (pm.meta_key = '_xf_translator_original_post_id' OR pm.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'"
-			);
+			// On English/default: Exclude all translated posts (cached)
+			$translated_post_ids = $this->get_all_translated_post_ids();
 			
 			if (!empty($translated_post_ids)) {
 				$filtered_posts = array();
@@ -2880,27 +2973,13 @@ class Xf_Translator_Public {
 			// Check for large post__not_in first (even if post__in is set) - handle this before normal logic
 			if (!empty($post_not_in) && is_array($post_not_in) && count($post_not_in) > 20) {
 				// Too many posts in exclusion list, likely accumulated incorrectly
-				// Query all translated posts directly (ignore the exclusion list since it's wrong)
-				// Add LIMIT to respect posts_per_page
-				$limit_clause = '';
+				// Get all translated posts for this language (cached) and filter/limit in PHP
+				$translated_post_ids = $this->get_translated_post_ids_for_language($lang_prefix);
+				
+				// Apply limit if needed (already ordered by date DESC from cached method)
 				if (!empty($posts_per_page) && $posts_per_page > 0) {
-					// Add buffer for excluded posts - we'll limit after filtering
-					$limit_clause = ' LIMIT ' . intval($posts_per_page * 2);
+					$translated_post_ids = array_slice($translated_post_ids, 0, intval($posts_per_page * 2));
 				}
-				$translated_post_ids = $wpdb->get_col($wpdb->prepare(
-					"SELECT DISTINCT p.ID 
-					FROM {$wpdb->posts} p
-					INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-						AND pm1.meta_key = '_xf_translator_language' 
-						AND pm1.meta_value = %s
-					INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-						AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
-					WHERE p.post_status = 'publish'
-					AND p.post_type IN ('post', 'page')
-					AND p.post_type != 'revision'
-					ORDER BY p.post_date DESC" . $limit_clause,
-					$lang_prefix
-				));
 				
 				if (!empty($translated_post_ids)) {
 					// Get the first 6 posts from widgets to exclude (limit to reasonable number)
@@ -2980,28 +3059,16 @@ class Xf_Translator_Public {
 				if ($query->is_home || $query->is_front_page()) {
 					error_log('XF Translator: Converting post__not_in. Original count: ' . count($post_not_in) . ', Translated count: ' . count($post_not_in_clean) . ', IDs: ' . implode(', ', array_slice($post_not_in_clean, 0, 10)));
 				}
-				$placeholders = implode(',', array_fill(0, count($post_not_in_clean), '%d'));
-				// Add LIMIT to respect posts_per_page
-				$limit_clause = '';
+				// Get all translated posts for this language (cached) and filter/limit in PHP
+				$translated_post_ids_all = $this->get_translated_post_ids_for_language($lang_prefix);
+				
+				// Filter out excluded posts
+				$translated_post_ids = array_diff($translated_post_ids_all, $post_not_in_clean);
+				
+				// Apply limit if needed (already ordered by date DESC from cached method)
 				if (!empty($posts_per_page) && $posts_per_page > 0) {
-					$limit_clause = ' LIMIT ' . intval($posts_per_page);
+					$translated_post_ids = array_slice($translated_post_ids, 0, intval($posts_per_page));
 				}
-				$sql = $wpdb->prepare(
-					"SELECT DISTINCT p.ID 
-					FROM {$wpdb->posts} p
-					INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-						AND pm1.meta_key = '_xf_translator_language' 
-						AND pm1.meta_value = %s
-					INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-						AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
-					WHERE p.post_status = 'publish'
-					AND p.post_type IN ('post', 'page')
-					AND p.post_type != 'revision'
-					AND p.ID NOT IN ($placeholders)
-					ORDER BY p.post_date DESC" . $limit_clause,
-					array_merge(array($lang_prefix), $post_not_in_clean)
-				);
-				$translated_post_ids = $wpdb->get_col($sql);
 				
 				if (!empty($translated_post_ids)) {
 					$translated_posts = array();
@@ -3027,27 +3094,8 @@ class Xf_Translator_Public {
 				}
 			}
 			
-			// First, get a mapping of original post IDs to translated post IDs, ordered by date DESC
-			$original_to_translated = $wpdb->get_results($wpdb->prepare(
-				"SELECT pm2.meta_value as original_id, p.ID as translated_id
-				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-					AND pm1.meta_key = '_xf_translator_language' 
-					AND pm1.meta_value = %s
-				INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-					AND (pm2.meta_key = '_xf_translator_original_post_id' OR pm2.meta_key = '_api_translator_original_post_id')
-				WHERE p.post_status = 'publish'
-				AND p.post_type IN ('post', 'page')
-				AND p.post_type != 'revision'
-				ORDER BY p.post_date DESC",
-				$lang_prefix
-			), OBJECT_K);
-			
-			// Build mapping array: original_id => translated_id
-			$translation_map = array();
-			foreach ($original_to_translated as $row) {
-				$translation_map[intval($row->original_id)] = intval($row->translated_id);
-			}
+			// First, get a mapping of original post IDs to translated post IDs, ordered by date DESC (cached)
+			$translation_map = $this->get_translation_map_for_language($lang_prefix);
 			
 			// Debug: Log translation map with details
 			if ($query->is_home || $query->is_front_page() || $query->is_singular) {

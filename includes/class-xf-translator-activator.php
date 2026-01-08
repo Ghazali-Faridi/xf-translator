@@ -39,11 +39,11 @@ class Xf_Translator_Activator {
 		
 		// Schedule cron events only if enabled
 		if ($enable_new && !wp_next_scheduled('xf_translator_process_new_cron')) {
-			wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_new_cron');
+			wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_new_cron');
 		}
 		
 		if ($enable_old && !wp_next_scheduled('xf_translator_process_old_cron')) {
-			wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_old_cron');
+			wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_old_cron');
 		}
 		
 		// Flush rewrite rules to register new author archive rules

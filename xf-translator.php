@@ -16,7 +16,7 @@
  * Plugin Name:       Unite.AI Translations
  * Plugin URI:        https://xfinitive.co
  * Description:       Serverside translation multilingual plugin 
- * Version:           1.0.1
+ * Version:           1.0.5
  * Author:            ghazali
  * Author URI:        https://xfinitive.co/
  * License:           GPL-2.0+
@@ -112,44 +112,37 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 		$is_deepseek = strpos($url, 'api.deepseek.com') !== false;
 		
 		// Set connection timeout - time to establish connection
-		// Use a longer connection timeout to allow time for initial connection
-		curl_setopt($handle, CURLOPT_CONNECTTIMEOUT, max($request_timeout, 120));
+		// Use a reasonable connection timeout (30 seconds) instead of max()
+		curl_setopt($handle, CURLOPT_CONNECTTIMEOUT, 30);
 		
 		// Keep the overall timeout as specified in the request
 		// WordPress will also set this, but we ensure it's set correctly
 		// Add a small buffer (10 seconds) to the timeout to account for network delays
 		curl_setopt($handle, CURLOPT_TIMEOUT, $request_timeout + 10);
 		
+		// CRITICAL: Disable low speed limit completely to prevent transfer timeout
+		// This is the key fix - prevents cURL from aborting on slow transfers
+		curl_setopt($handle, CURLOPT_LOW_SPEED_LIMIT, 0);
+		curl_setopt($handle, CURLOPT_LOW_SPEED_TIME, 0); // Disable completely
+		
+		// Increase buffer size for reading response (match test plugin)
+		curl_setopt($handle, CURLOPT_BUFFERSIZE, 32768); // 32KB buffer (increased from 16KB)
+		
+		// Don't fail on HTTP errors immediately - let us handle them
+		curl_setopt($handle, CURLOPT_FAILONERROR, false);
+		
 		// For DeepSeek, add additional options to handle long-running connections
 		if ($is_deepseek) {
 			// Enable TCP keep-alive to prevent connection drops
 			curl_setopt($handle, CURLOPT_TCP_KEEPALIVE, 1);
-			curl_setopt($handle, CURLOPT_TCP_KEEPIDLE, 100);
-			curl_setopt($handle, CURLOPT_TCP_KEEPINTVL, 5);
+			curl_setopt($handle, CURLOPT_TCP_KEEPIDLE, 60); // Changed from 100 to 60
+			curl_setopt($handle, CURLOPT_TCP_KEEPINTVL, 10); // Changed from 5 to 10
 			
 			// Use HTTP/1.1 (not HTTP/2) for better compatibility with long connections
 			curl_setopt($handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 			
 			// Disable pipelining which can cause issues with long responses
 			curl_setopt($handle, CURLOPT_PIPEWAIT, 0);
-			
-			// Set buffer size for reading response (larger buffer for long responses)
-			curl_setopt($handle, CURLOPT_BUFFERSIZE, 16384); // 16KB buffer
-			
-			// Don't fail on HTTP errors immediately - let us handle them
-			curl_setopt($handle, CURLOPT_FAILONERROR, false);
-			
-			// Set low speed limit and time to prevent premature connection closure
-			// For DeepSeek, use a very low threshold (10 bytes/sec) since it can stream slowly
-			// but still be working correctly. Only abort if truly stalled (no data for 120 seconds)
-			curl_setopt($handle, CURLOPT_LOW_SPEED_LIMIT, value: 0);
-			curl_setopt($handle, CURLOPT_LOW_SPEED_TIME, 180);
-			
-			// Disable Expect: 100-continue header which can cause issues with some servers
-			// We need to modify existing headers, so get them first
-			$existing_headers = curl_getinfo($handle, CURLINFO_HEADER_OUT);
-			// Note: We can't easily modify headers here, but we can try to prevent the issue
-			// by ensuring proper connection handling
 			
 			// Enable verbose output for debugging (only if WP_DEBUG is on)
 			if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
@@ -162,20 +155,20 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 			}
 		}
 		
-		// xf_translator_log('cURL options set - CONNECTTIMEOUT: 120, TIMEOUT: ' . $request_timeout . ($is_deepseek ? ' (DeepSeek: TCP keep-alive enabled)' : ''), 'debug');
+		// xf_translator_log('cURL options set - CONNECTTIMEOUT: 30, TIMEOUT: ' . $request_timeout . ', LOW_SPEED_TIME: 0' . ($is_deepseek ? ' (DeepSeek: TCP keep-alive enabled)' : ''), 'debug');
 	}
 	return $handle;
-}, 10, 3);
+}, PHP_INT_MAX, 3); // Highest possible priority - runs after ALL plugins
 
 /**
- * Add custom cron schedule for every 1 minute
+ * Add custom cron schedule for every 3 minutes
  *
  * @since    1.0.0
  */
 add_filter('cron_schedules', function($schedules) {
-	$schedules['every_1_minute'] = array(
-		'interval' => 60, // 60 seconds = 1 minute
-		'display' => __('Every 1 Minute', 'xf-translator')
+	$schedules['every_3_minutes'] = array(
+		'interval' => 180, // 180 seconds = 3 minutes
+		'display' => __('Every 3 Minutes', 'xf-translator')
 	);
 	return $schedules;
 });

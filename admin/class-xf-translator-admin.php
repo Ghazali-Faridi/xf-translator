@@ -420,6 +420,13 @@ class Xf_Translator_Admin {
             }
         }
         
+        if (isset($_POST['max_concurrent_processing'])) {
+            $max_concurrent = intval($_POST['max_concurrent_processing']);
+            if ($max_concurrent >= 1) {
+                $this->settings->update('max_concurrent_processing', $max_concurrent);
+            }
+        }
+        
         // Save cron enable/disable settings
         $enable_new_cron = isset($_POST['enable_new_translations_cron']) ? true : false;
         $enable_old_cron = isset($_POST['enable_old_translations_cron']) ? true : false;
@@ -445,7 +452,7 @@ class Xf_Translator_Admin {
             // Enable: schedule if not already scheduled
             $new_timestamp = wp_next_scheduled('xf_translator_process_new_cron');
             if (!$new_timestamp) {
-                wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_new_cron');
+                wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_new_cron');
             }
         } else {
             // Disable: unschedule ALL instances to prevent any from running
@@ -472,7 +479,7 @@ class Xf_Translator_Admin {
             // Enable: schedule if not already scheduled
             $old_timestamp = wp_next_scheduled('xf_translator_process_old_cron');
             if (!$old_timestamp) {
-                wp_schedule_event(time(), 'every_1_minute', 'xf_translator_process_old_cron');
+                wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_old_cron');
             }
         } else {
             // Disable: unschedule ALL instances to prevent any from running
@@ -3126,6 +3133,246 @@ class Xf_Translator_Admin {
         }
         
         $query->set('meta_query', $meta_query);
+    }
+
+    /**
+     * Add language filter dropdown to taxonomy/term list pages
+     * 
+     * @param string $taxonomy The taxonomy name (optional, may not be passed in all WordPress versions)
+     */
+    public function add_language_filter_dropdown_terms($taxonomy = '') {
+        // Only show on taxonomy term list pages
+        global $pagenow;
+        if ($pagenow !== 'edit-tags.php') {
+            return;
+        }
+        
+        // Safety check for settings
+        if (!isset($this->settings) || !is_object($this->settings)) {
+            return;
+        }
+        
+        // Get taxonomy from GET parameter if not provided
+        if (empty($taxonomy) && isset($_GET['taxonomy'])) {
+            $taxonomy = sanitize_text_field($_GET['taxonomy']);
+        }
+        
+        // Only show for category and other taxonomies (not tags by default, but can be enabled)
+        // You can modify this condition to include/exclude specific taxonomies
+        if (empty($taxonomy)) {
+            return;
+        }
+        
+        $languages = $this->settings->get('languages', array());
+        if (empty($languages)) {
+            return;
+        }
+        
+        $selected = isset($_GET['xf_language_filter']) ? sanitize_text_field($_GET['xf_language_filter']) : '';
+        
+        echo '<label for="xf-language-filter-terms" class="screen-reader-text">' . esc_html__('Filter by language', 'xf-translator') . '</label>';
+        echo '<select name="xf_language_filter" id="xf-language-filter-terms" class="postform">';
+        echo '<option value="">' . esc_html__('All Languages', 'xf-translator') . '</option>';
+        echo '<option value="original"' . selected($selected, 'original', false) . '>' . esc_html__('Original (No Translation)', 'xf-translator') . '</option>';
+        
+        foreach ($languages as $language) {
+            if (empty($language['prefix'])) {
+                continue;
+            }
+            $label = isset($language['name']) ? $language['name'] : $language['prefix'];
+            echo '<option value="' . esc_attr($language['prefix']) . '"' . selected($selected, $language['prefix'], false) . '>' . esc_html($label) . '</option>';
+        }
+        
+        echo '</select>';
+    }
+    
+    /**
+     * Fallback method to add language filter dropdown using JavaScript
+     * This ensures the filter appears even if restrict_manage_terms hook doesn't fire
+     */
+    public function add_language_filter_dropdown_terms_fallback() {
+        // Safety check for settings
+        if (!isset($this->settings) || !is_object($this->settings)) {
+            return;
+        }
+        
+        $languages = $this->settings->get('languages', array());
+        if (empty($languages)) {
+            return;
+        }
+        
+        $selected = isset($_GET['xf_language_filter']) ? sanitize_text_field($_GET['xf_language_filter']) : '';
+        
+        // Output JavaScript to inject the filter dropdown after page load
+        ?>
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            // Check if filter doesn't already exist (in case restrict_manage_terms worked)
+            if ($('#xf-language-filter-terms').length === 0) {
+                // Build options HTML
+                var optionsHtml = '<option value=""><?php echo esc_js(__('All Languages', 'xf-translator')); ?></option>';
+                optionsHtml += '<option value="original"<?php echo ($selected === 'original') ? ' selected' : ''; ?>><?php echo esc_js(__('Original (No Translation)', 'xf-translator')); ?></option>';
+                <?php foreach ($languages as $language): ?>
+                    <?php if (!empty($language['prefix'])): ?>
+                        var isSelected<?php echo esc_js($language['prefix']); ?> = '<?php echo ($selected === $language['prefix']) ? 'selected' : ''; ?>';
+                        optionsHtml += '<option value="<?php echo esc_js($language['prefix']); ?>" ' + isSelected<?php echo esc_js($language['prefix']); ?> + '><?php echo esc_js(isset($language['name']) ? $language['name'] : $language['prefix']); ?></option>';
+                    <?php endif; ?>
+                <?php endforeach; ?>
+                
+                // Find the filter area (usually after the search box or before the table)
+                var $filterArea = $('.tablenav.top .alignleft.actions, .tablenav.top .alignleft');
+                
+                // If no filter area found, try to find the search box area
+                if ($filterArea.length === 0) {
+                    $filterArea = $('.tablenav.top .alignleft').first();
+                }
+                
+                // Create and insert the filter dropdown
+                var $filter = $('<label for="xf-language-filter-terms" class="screen-reader-text"><?php echo esc_js(__('Filter by language', 'xf-translator')); ?></label>' +
+                    '<select name="xf_language_filter" id="xf-language-filter-terms" class="postform" style="margin-left: 10px;">' + optionsHtml + '</select>');
+                
+                // Add to filter area
+                if ($filterArea.length > 0) {
+                    $filterArea.append($filter);
+                } else {
+                    // Fallback: add before the table
+                    $('.wp-list-table').before($filter);
+                }
+            }
+        });
+        </script>
+        <?php
+    }
+    
+    /**
+     * Filter terms by language in taxonomy/term list pages
+     * Uses get_terms_args filter for better compatibility
+     * 
+     * @param array $args Query arguments
+     * @param array $taxonomies Array of taxonomies
+     * @return array Modified query arguments
+     */
+    public function filter_terms_by_language($args, $taxonomies = array()) {
+        // Only filter in admin area
+        if (!is_admin()) {
+            return $args;
+        }
+        
+        // Check if filter is set first - if not, return early
+        // This prevents unnecessary processing when filter isn't being used
+        if (!isset($_GET['xf_language_filter']) || empty($_GET['xf_language_filter'])) {
+            return $args;
+        }
+        
+        global $pagenow;
+        // Only filter on taxonomy term list pages, not when editing posts
+        // Also check if we're actually on the edit-tags page
+        if (!isset($pagenow) || $pagenow !== 'edit-tags.php') {
+            return $args;
+        }
+        
+        // Don't filter if this is being called from post edit screen (category checklist)
+        // Check screen only if function is available (after admin_init)
+        if (function_exists('get_current_screen')) {
+            $screen = get_current_screen();
+            if ($screen) {
+                // If we're on post edit screen, don't filter (let the existing filter handle it)
+                if (in_array($screen->base, array('post', 'post-new'))) {
+                    return $args;
+                }
+                // Only proceed if we're on edit-tags screen
+                if ($screen->base !== 'edit-tags') {
+                    return $args;
+                }
+            }
+        }
+        
+        // Additional check: make sure we're not in an AJAX request for category checklist
+        if (defined('DOING_AJAX') && DOING_AJAX) {
+            // Check if this is a category checklist AJAX request
+            if (isset($_POST['action']) && strpos($_POST['action'], 'category') !== false) {
+                return $args;
+            }
+        }
+        
+        // Early return if called during init hook (before admin screen is set up)
+        // This prevents errors when get_terms is called during plugin initialization
+        // Only filter if we're actually on the edit-tags page (check GET parameter)
+        if (!function_exists('get_current_screen') && !isset($_GET['taxonomy'])) {
+            return $args;
+        }
+        
+        $filter = sanitize_text_field($_GET['xf_language_filter']);
+        if ($filter === '') {
+            return $args;
+        }
+        
+        // Get term IDs based on language filter
+        global $wpdb;
+        $term_ids = array();
+        
+        try {
+            if ($filter === 'original') {
+                // Get all term IDs that don't have language meta
+                $all_term_ids = $wpdb->get_col(
+                    "SELECT term_id FROM {$wpdb->terms}"
+                );
+                
+                if (!empty($all_term_ids)) {
+                    $terms_with_language = $wpdb->get_col(
+                        "SELECT DISTINCT term_id FROM {$wpdb->termmeta} WHERE meta_key = '_xf_translator_language'"
+                    );
+                    
+                    if (!empty($terms_with_language)) {
+                        $term_ids = array_diff($all_term_ids, $terms_with_language);
+                    } else {
+                        // If no terms have language meta, all terms are "original"
+                        $term_ids = $all_term_ids;
+                    }
+                }
+            } else {
+                // Get term IDs with specific language
+                $term_ids = $wpdb->get_col($wpdb->prepare(
+                    "SELECT term_id FROM {$wpdb->termmeta} WHERE meta_key = '_xf_translator_language' AND meta_value = %s",
+                    $filter
+                ));
+            }
+            
+            // If no terms found, set to array with -1 to show no results
+            if (empty($term_ids)) {
+                $term_ids = array(-1);
+            } else {
+                // Convert to integers
+                $term_ids = array_map('intval', $term_ids);
+            }
+            
+            // Add include parameter to filter terms
+            if (!isset($args['include']) || empty($args['include'])) {
+                $args['include'] = $term_ids;
+            } else {
+                // Merge with existing include if both are arrays
+                if (is_array($args['include']) && is_array($term_ids)) {
+                    $args['include'] = array_intersect($args['include'], $term_ids);
+                    if (empty($args['include'])) {
+                        $args['include'] = array(-1);
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            // If there's an error, return args unchanged to prevent fatal error
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: Error filtering terms by language: ' . $e->getMessage());
+            }
+            return $args;
+        } catch (Error $e) {
+            // Catch fatal errors too
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: Fatal error filtering terms by language: ' . $e->getMessage());
+            }
+            return $args;
+        }
+        
+        return $args;
     }
 
     /**
