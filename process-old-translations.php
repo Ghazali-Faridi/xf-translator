@@ -32,6 +32,31 @@ if (!defined('ABSPATH')) {
 require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
 require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
 
+// Bounded parallelism: exit immediately if at capacity (no new workers)
+$settings = new Settings();
+$max_concurrent = (int) $settings->get('max_concurrent_processing', 20);
+global $wpdb;
+$queue_table = $wpdb->prefix . 'xf_translate_queue';
+$processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$queue_table} WHERE status = 'processing'");
+if ($processing_count >= $max_concurrent) {
+    header('Content-Type: application/json');
+    echo json_encode(array('success' => false, 'message' => 'At capacity', 'at_capacity' => true, 'type' => 'OLD'));
+    exit;
+}
+
+// Start output buffering to prevent 502 Bad Gateway errors during long operations
+// This keeps the HTTP connection alive by sending periodic data
+if (!ob_get_level()) {
+    ob_start();
+}
+
+// Send initial keep-alive data to prevent connection timeout
+if (ob_get_level()) {
+    echo str_repeat(' ', 1024); // Send 1KB of whitespace
+    ob_flush();
+    flush();
+}
+
 // Initialize processor
 $processor = new Xf_Translator_Processor();
 

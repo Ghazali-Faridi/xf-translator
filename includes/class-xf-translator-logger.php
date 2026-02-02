@@ -93,6 +93,16 @@ class Xf_Translator_Logger {
             return;
         }
         
+        // By default, only log warnings and errors to reduce log volume
+        // Allow debug/info logging only if explicitly enabled via constant
+        $level_lower = strtolower($level);
+        $log_debug = defined('XF_TRANSLATOR_LOG_DEBUG') && XF_TRANSLATOR_LOG_DEBUG;
+        
+        // Skip debug and info messages unless explicitly enabled
+        if (in_array($level_lower, array('debug', 'info')) && !$log_debug) {
+            return;
+        }
+        
         $log_file = self::get_log_file();
         
         // Rotate log if needed
@@ -166,6 +176,82 @@ class Xf_Translator_Logger {
             json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
         );
         self::log($message, 'info');
+    }
+    
+    /**
+     * Log minimized API request/response data (without bodies)
+     * Only saves essential information to reduce log size
+     *
+     * @param string $type Request or Response
+     * @param array $data Data to log
+     * @return void
+     */
+    public static function log_api_minimal($type, $data) {
+        // Create minimized log with only essential info (no request/response bodies)
+        $minimal_data = array(
+            'type' => $type,
+            'timestamp' => isset($data['timestamp']) ? $data['timestamp'] : current_time('mysql'),
+            'post_id' => isset($data['post_id']) ? (int)$data['post_id'] : 0,
+            'queue_id' => isset($data['queue_id']) ? (int)$data['queue_id'] : 0,
+            'endpoint' => isset($data['endpoint']) ? $data['endpoint'] : '',
+            'model' => isset($data['model']) ? $data['model'] : '',
+            'api_type' => isset($data['api_type']) ? $data['api_type'] : '',
+            'target_language' => isset($data['target_language']) ? $data['target_language'] : '',
+            'response_code' => isset($data['response_code']) ? (int)$data['response_code'] : 0,
+            'is_error' => isset($data['is_error']) ? (bool)$data['is_error'] : false,
+        );
+        
+        // Only add size information (not the actual content)
+        if (isset($data['request'])) {
+            $request_size = is_string($data['request']) ? strlen($data['request']) : strlen(json_encode($data['request']));
+            $minimal_data['request_size'] = $request_size;
+        }
+        
+        if (isset($data['response_body'])) {
+            $minimal_data['response_size'] = strlen($data['response_body']);
+        }
+        
+        // Only include error message if there's an error
+        if (!empty($data['error'])) {
+            $minimal_data['error'] = $data['error'];
+        }
+        
+        // For requests, also include if API key is configured
+        if (isset($data['api_key_configured'])) {
+            $minimal_data['api_key_configured'] = (bool)$data['api_key_configured'];
+        }
+        
+        // For chunked requests, include chunk info
+        if (isset($data['chunk_num'])) {
+            $minimal_data['chunk_num'] = (int)$data['chunk_num'];
+        }
+        if (isset($data['total_chunks'])) {
+            $minimal_data['total_chunks'] = (int)$data['total_chunks'];
+        }
+        
+        $message = sprintf(
+            'XF Translator API %s: %s',
+            $type,
+            json_encode($minimal_data, JSON_UNESCAPED_UNICODE)
+        );
+        
+        // Always log API calls with appropriate level
+        $level = ($minimal_data['is_error'] || !empty($minimal_data['error'])) ? 'error' : 'info';
+        
+        // Log directly to file (bypass WP_DEBUG check for API logs)
+        $log_file = self::get_log_file();
+        self::rotate_log_if_needed();
+        
+        $timestamp = current_time('mysql');
+        $level_upper = strtoupper($level);
+        $log_entry = sprintf(
+            "[%s] [%s] %s\n",
+            $timestamp,
+            $level_upper,
+            $message
+        );
+        
+        @file_put_contents($log_file, $log_entry, FILE_APPEND | LOCK_EX);
     }
     
     /**

@@ -119,7 +119,9 @@ class Xf_Translator_Public {
 		
 		// Intercept when user data is loaded and modify the description in the data object
 		// Use 'template_redirect' which fires early but after query is set up
-		add_action('template_redirect', array($this, 'modify_user_data_on_page_load'), 1);
+		// CRITICAL: Only register on frontend to prevent admin redirect loops
+		// Use 'init' hook to conditionally register template_redirect only for frontend
+		add_action('init', array($this, 'register_template_redirect_hook'), 1);
 		
 		// Also hook into get_userdata to modify the object immediately after creation
 		add_filter('get_user_metadata', array($this, 'modify_user_data_in_metadata'), 999, 4);
@@ -141,6 +143,77 @@ class Xf_Translator_Public {
 		// Filter HTML lang attribute to match current language
 		add_filter('language_attributes', array($this, 'filter_language_attributes'), 10, 2);
 
+	}
+
+	/**
+	 * Check if current request should be excluded from plugin processing
+	 * 
+	 * @return bool True if request should be excluded, false otherwise
+	 */
+	private function should_exclude_request() {
+		// Exclude admin area (except AJAX which we handle separately)
+		if (is_admin() && !wp_doing_ajax()) {
+			return true;
+		}
+		
+		// Exclude REST API requests
+		if (defined('REST_REQUEST') && REST_REQUEST) {
+			return true;
+		}
+		
+		// Exclude cron requests
+		if (wp_doing_cron()) {
+			return true;
+		}
+		
+		// Exclude CLI requests
+		if (defined('WP_CLI') && WP_CLI) {
+			return true;
+		}
+		
+		$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+		$request_path = parse_url($request_uri, PHP_URL_PATH) ?: $request_uri;
+		
+		// Exclude WordPress core paths
+		$excluded_paths = array(
+			'/wp-login.php',
+			'/wp-cron.php',
+			'/wp-admin/',
+			'/wp-content/',
+			'/wp-includes/',
+			'/wp-json/',
+			'/xmlrpc.php',
+			'/robots.txt',
+			'/sitemap',
+			'/feed',
+			'/rdf',
+			'/rss',
+			'/rss2',
+			'/atom',
+		);
+		
+		foreach ($excluded_paths as $path) {
+			if (strpos($request_path, $path) !== false) {
+				return true;
+			}
+		}
+		
+		// Exclude asset file extensions
+		$asset_extensions = array('.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico', 
+			'.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip', '.map', '.xml');
+		
+		foreach ($asset_extensions as $ext) {
+			if (substr($request_path, -strlen($ext)) === $ext) {
+				return true;
+			}
+		}
+		
+		// Exclude requests with ?ver= (versioned assets)
+		if (strpos($request_uri, '?ver=') !== false) {
+			return true;
+		}
+		
+		return false;
 	}
 
 	/**
@@ -348,23 +421,18 @@ class Xf_Translator_Public {
 	 * It only hides in the WordPress admin area.
 	 */
 	public function render_language_switcher() {
-		// Debug logging
-		$is_logged_in = is_user_logged_in();
-		$is_admin_area = is_admin();
-		$current_url = home_url( add_query_arg( null, null ) );
-		$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : 'unknown';
-		error_log( '[XF-Translator] render_language_switcher() called - User logged in: ' . ( $is_logged_in ? 'YES' : 'NO' ) . ', is_admin: ' . ( $is_admin_area ? 'YES' : 'NO' ) . ', URL: ' . $request_uri );
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
 		
 		// Only hide in admin area - show for all users on frontend (logged in or not)
 		if ( is_admin() ) {
-			error_log( '[XF-Translator] Blocked: is_admin() returned true' );
 			return;
 		}
 
 		$languages = $this->settings->get( 'languages', array() );
-		error_log( '[XF-Translator] Languages count: ' . count( $languages ) );
 		if ( empty( $languages ) ) {
-			error_log( '[XF-Translator] Blocked: Languages array is empty' );
 			return;
 		}
 
@@ -453,13 +521,9 @@ class Xf_Translator_Public {
 		}
 
 		// Show switcher if we have at least one language option
-		error_log( '[XF-Translator] Items count: ' . count( $items ) );
 		if ( empty( $items ) ) {
-			error_log( '[XF-Translator] Blocked: Items array is empty' );
 			return;
 		}
-		
-		error_log( '[XF-Translator] Proceeding to render switcher HTML' );
 
 		static $assets_printed = false;
 		if ( ! $assets_printed ) {
@@ -608,8 +672,6 @@ class Xf_Translator_Public {
 			</div>
 		</div>
 		<?php
-		error_log( '[XF-Translator] Switcher HTML rendered successfully. Current label: ' . $current_label . ', Items: ' . count( $items ) . ', User logged in: ' . ( is_user_logged_in() ? 'YES' : 'NO' ) );
-		error_log( '[XF-Translator] HTML output complete. Check page source for .xf-lang-switcher element.' );
 	}
 
 	/**
@@ -849,6 +911,18 @@ class Xf_Translator_Public {
 	 * Add rewrite rules for language-prefixed URLs
 	 */
 	public function add_rewrite_rules() {
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
+		// Use static flag to prevent multiple executions per request
+		static $rules_added = false;
+		if ($rules_added) {
+			return;
+		}
+		$rules_added = true;
+		
 		// Get all language prefixes from settings
 		require_once plugin_dir_path(dirname(__FILE__)) . 'admin/class-settings.php';
 		$settings = new Settings();
@@ -905,11 +979,6 @@ class Xf_Translator_Public {
 			}
 			
 			$author_base = ! empty( $wp_rewrite->author_base ) ? $wp_rewrite->author_base : 'author';
-			
-			// Debug: Log the rewrite rules being added
-			if (defined('WP_DEBUG') && WP_DEBUG) {
-				error_log('XF Translator: Adding author archive rewrite rule - URL prefix: ' . $url_prefix . ', Author base: ' . $author_base . ', Pattern: ^' . $escaped_url_prefix . '/' . preg_quote( $author_base, '/' ) . '/([^/]+)/?$');
-			}
 			
 			// Author archive: /fr/author/author-slug/
 			// Use 'top' priority to ensure it's checked before default WordPress rules
@@ -1021,6 +1090,11 @@ class Xf_Translator_Public {
 	 * @return array Modified query variables
 	 */
 	public function handle_author_archive_request($query_vars) {
+		// CRITICAL: Exclude admin, REST API, AJAX, cron, and CLI requests
+		if ($this->should_exclude_request()) {
+			return $query_vars;
+		}
+		
 		// Only on frontend
 		if (is_admin()) {
 			return $query_vars;
@@ -1077,10 +1151,6 @@ class Xf_Translator_Public {
 				unset($query_vars['p']);
 				unset($query_vars['attachment']);
 				
-				if (defined('WP_DEBUG') && WP_DEBUG) {
-					error_log('XF Translator: Handled author archive via request filter - author: ' . $author_slug . ', lang: ' . $language['prefix'] . ', paged: ' . $paged);
-				}
-				
 				return $query_vars;
 			}
 		}
@@ -1095,6 +1165,11 @@ class Xf_Translator_Public {
 	 * @param WP $wp WordPress environment instance
 	 */
 	public function parse_author_archive_request($wp) {
+		// CRITICAL: Exclude admin, REST API, AJAX, cron, and CLI requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
 		// Only on frontend
 		if (is_admin()) {
 			return;
@@ -1150,10 +1225,6 @@ class Xf_Translator_Public {
 				unset($wp->query_vars['page_id']);
 				unset($wp->query_vars['p']);
 				
-				if (defined('WP_DEBUG') && WP_DEBUG) {
-					error_log('XF Translator: Manually parsed author archive request - author: ' . $author_slug . ', lang: ' . $language['prefix'] . ', paged: ' . $paged);
-				}
-				
 				return;
 			}
 		}
@@ -1164,6 +1235,11 @@ class Xf_Translator_Public {
 	 * This ensures author archive rewrite rules are registered
 	 */
 	public function maybe_flush_rewrite_rules() {
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
 		// Only flush once - check option to avoid performance issues
 		$flush_flag = get_option('xf_translator_flush_rewrite_rules');
 		if ($flush_flag === '1') {
@@ -1173,24 +1249,19 @@ class Xf_Translator_Public {
 		// Flush rewrite rules to register author archive rules
 		flush_rewrite_rules(false);
 		update_option('xf_translator_flush_rewrite_rules', '1');
-		
-		if (defined('WP_DEBUG') && WP_DEBUG) {
-			error_log('XF Translator: Flushed rewrite rules to register author archive rules');
-		}
 	}
 	
 	/**
 	 * Filter query to find translated post by language prefix
 	 */
 	public function filter_translated_post_query($query) {
-		if (is_admin() || !$query->is_main_query()) {
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
 			return;
 		}
 		
-		// Debug: Log when this function is called
-			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
-		if (defined('WP_DEBUG') && WP_DEBUG) {
-			error_log('XF Translator: filter_translated_post_query called for: ' . $request_uri);
+		if (is_admin() || !$query->is_main_query()) {
+			return;
 		}
 		
 		// Skip for asset requests (CSS, JS, images, etc.) - more thorough check
@@ -1217,16 +1288,7 @@ class Xf_Translator_Public {
 		
 		// Skip if this is an author archive - let WordPress handle it normally
 		if (!empty($author_name) || !empty($author) || $is_author_path || $query->is_author) {
-			if (defined('WP_DEBUG') && WP_DEBUG) {
-				error_log('XF Translator: Skipping filter_translated_post_query for author archive - author_name=' . ($author_name ?: 'empty') . ', author=' . ($author ?: 'empty') . ', is_author_path=' . ($is_author_path ? 'true' : 'false') . ', is_author=' . ($query->is_author ? 'true' : 'false'));
-			}
 			return;
-		}
-		
-		// Debug: Log language detection
-		if (defined('WP_DEBUG') && WP_DEBUG) {
-			$query_var = get_query_var('xf_lang_prefix');
-			error_log('XF Translator DEBUG: request_uri=' . $request_uri . ', lang_prefix=' . ($lang_prefix ?: 'empty') . ', query_var=' . ($query_var ?: 'empty') . ', request_path=' . ($request_path ?: 'empty'));
 		}
 		
 		// Check if the requested file actually exists (this handles all asset files)
@@ -1321,35 +1383,10 @@ class Xf_Translator_Public {
 		}
 		
 		// Debug: Log what we're looking for
-		if (defined('WP_DEBUG') && WP_DEBUG) {
-			error_log('XF Translator DEBUG homepage check:');
-			error_log('  - lang_prefix=' . ($lang_prefix ?: 'empty'));
-			error_log('  - post_name=' . ($post_name ?: 'empty'));
-			error_log('  - pagename=' . ($pagename ?: 'empty'));
-			error_log('  - page_id=' . ($page_id ?: 'empty'));
-			error_log('  - p=' . ($p ?: 'empty'));
-			error_log('  - request_path=' . ($request_path ?: 'empty'));
-			error_log('  - request_path_clean=' . ($request_path_clean ?: 'empty'));
-			error_log('  - is_lang_homepage=' . ($is_lang_homepage ? 'true' : 'false'));
-			error_log('  - matched_url_prefix=' . ($matched_url_prefix ?: 'empty'));
-			error_log('  - query->is_home=' . ($query->is_home ? 'true' : 'false'));
-			error_log('  - query->is_front_page=' . ($query->is_front_page() ? 'true' : 'false'));
-			error_log('  - query->is_page=' . ($query->is_page ? 'true' : 'false'));
-			error_log('  - query->is_singular=' . ($query->is_singular ? 'true' : 'false'));
-			if ($query->is_page) {
-				$queried_obj = $query->get_queried_object();
-				error_log('  - queried_object=' . ($queried_obj ? (isset($queried_obj->post_name) ? $queried_obj->post_name : 'object without post_name') : 'null'));
-			}
-		}
-		
 		// If no post name OR we're on the language homepage (e.g., /fr/ or /es/), 
 		// this is the home/blog archive page with language prefix
 		// Filter the query to show only translated posts for this language
 		if (empty($post_name) || $is_lang_homepage) {
-			if (defined('WP_DEBUG') && WP_DEBUG) {
-				error_log('XF Translator DEBUG: Entering homepage logic block');
-			}
-			
 			// Clear query vars that might interfere
 			$query->set('name', '');
 			$query->set('pagename', '');
@@ -1361,9 +1398,6 @@ class Xf_Translator_Public {
 			if ($query->is_page) {
 				$queried_object = $query->get_queried_object();
 				if ($queried_object && isset($queried_object->post_name)) {
-					if (defined('WP_DEBUG') && WP_DEBUG) {
-						error_log('XF Translator DEBUG: Found queried_object with post_name=' . $queried_object->post_name);
-					}
 					// Check if the page slug matches any language URL prefix
 					foreach ($languages as $language) {
 						if (empty($language['prefix'])) {
@@ -1372,9 +1406,6 @@ class Xf_Translator_Public {
 						$url_prefix = $this->get_url_prefix_for_language($language);
 						if ($url_prefix && $queried_object->post_name === $url_prefix) {
 							// This is a page with the same slug as a language prefix, override it
-							if (defined('WP_DEBUG') && WP_DEBUG) {
-								error_log('XF Translator DEBUG: Overriding page match for slug=' . $url_prefix);
-							}
 							$query->queried_object = null;
 							$query->queried_object_id = null;
 							break;
@@ -1392,22 +1423,9 @@ class Xf_Translator_Public {
 			$query->is_page = false;
 			$query->is_archive = false;
 			
-			if (defined('WP_DEBUG') && WP_DEBUG) {
-				error_log('XF Translator DEBUG: After setting query flags:');
-				error_log('  - is_home=' . ($query->is_home ? 'true' : 'false'));
-				error_log('  - is_front_page=' . ($query->is_front_page() ? 'true' : 'false'));
-				error_log('  - is_page=' . ($query->is_page ? 'true' : 'false'));
-				error_log('  - is_singular=' . ($query->is_singular ? 'true' : 'false'));
-				error_log('XF Translator DEBUG: Calling filter_home_query_by_language with lang_prefix=' . $lang_prefix);
-			}
-			
 			// Filter posts to show only translated posts for this language
 			$this->filter_home_query_by_language($query, $lang_prefix);
 			return;
-		} else {
-			if (defined('WP_DEBUG') && WP_DEBUG) {
-				error_log('XF Translator DEBUG: NOT entering homepage logic - post_name=' . ($post_name ?: 'empty') . ', is_lang_homepage=' . ($is_lang_homepage ? 'true' : 'false'));
-			}
 		}
 		
 		// Additional check: skip if post_name looks like an asset file
@@ -1436,10 +1454,6 @@ class Xf_Translator_Public {
 			$lang_prefix,
 			$post_name
 		));
-		
-		if (defined('WP_DEBUG') && WP_DEBUG) {
-			error_log('XF Translator: After exact slug match, translated_post_id=' . ($translated_post_id ?: 'NOT FOUND') . ' for slug "' . $post_name . '" and language "' . $lang_prefix . '"');
-		}
 		
 		// If not found by exact match, try to find by slug that starts with the post_name
 		// This handles cases where WordPress added a suffix like -2, -3, -4, etc.
@@ -1502,10 +1516,6 @@ class Xf_Translator_Public {
 					$lang_prefix,
 					$original_post_id
 				));
-				
-				if ($translated_post_id) {
-					error_log('XF Translator: Found Spanish translation by original post ID. Original: ' . $original_post_id . ', Translated: ' . $translated_post_id . ', Language: ' . $lang_prefix);
-				}
 			}
 		}
 		
@@ -1525,14 +1535,7 @@ class Xf_Translator_Public {
 					$query->is_single = true;
 					$query->is_page = false;
 				}
-				
-				error_log('XF Translator: Successfully found translated post ID ' . $translated_post_id . ' for language ' . $lang_prefix . ' (original slug: ' . $post_name . ')');
-			} else {
-				error_log('XF Translator: Found translated post ID ' . $translated_post_id . ' but get_post() returned null for language ' . $lang_prefix);
 			}
-		} else {
-			// Log when we can't find a translation
-			error_log('XF Translator: Could not find translated post for slug "' . $post_name . '" and language "' . $lang_prefix . '". The page may show English content or 404.');
 		}
 	}
 	
@@ -1841,7 +1844,9 @@ class Xf_Translator_Public {
 						continue;
 					}
 
-					if ( preg_match( '#^/' . preg_quote( $url_prefix, '#' ) . '(/|$)#i', $path ) ) {
+					// Use case-sensitive, exact match only (no 'i' flag) to strictly match configured prefix
+					// This ensures /zh-cn/ matches but /zh-CN/ or /zhcn/ do not
+					if ( preg_match( '#^/' . preg_quote( $url_prefix, '#' ) . '(/|$)#', $path ) ) {
 						// Store the original configured prefix (e.g. "fr-CA").
 						$lang_prefix = $language['prefix'];
 						break;
@@ -1850,21 +1855,29 @@ class Xf_Translator_Public {
 			}
 		}
 		
-		// Debug logging for language detection (only log once per request to avoid spam)
-		static $logged = false;
-		if (defined('WP_DEBUG') && WP_DEBUG && !$logged) {
-			$request_uri = $_SERVER['REQUEST_URI'] ?? '';
-			$path = parse_url($request_uri, PHP_URL_PATH);
+		// Only log warning if rewrite rules might need flushing
+		// Skip warning in admin/REST/AJAX contexts to avoid false positives
+		if (defined('WP_DEBUG') && WP_DEBUG && !$this->should_exclude_request()) {
 			$query_var = get_query_var('xf_lang_prefix');
-			
-			// If we detected a prefix but query var is empty, try to set it manually
+			// Only warn if we detected prefix from URL path (not from post meta) and query_var is empty
+			// This indicates rewrite rules may need flushing
 			if (!empty($lang_prefix) && empty($query_var)) {
-				// This might happen if rewrite rules haven't been flushed
-				error_log('XF Translator Language Detection WARNING: Detected prefix "' . $lang_prefix . '" from URL but query_var is empty. Rewrite rules may need flushing.');
+				// Check if prefix was detected from URL path (not post meta)
+				// If we have a post, check if the prefix matches post meta
+				global $post;
+				$from_post_meta = false;
+				if ($post) {
+					$post_meta_prefix = get_post_meta($post->ID, '_xf_translator_language', true);
+					if ($post_meta_prefix === $lang_prefix) {
+						$from_post_meta = true;
+					}
+				}
+				
+				// Only warn if prefix was detected from URL path, not post meta
+				if (!$from_post_meta) {
+					// error_log('XF Translator WARNING: Detected prefix "' . $lang_prefix . '" from URL but query_var is empty. Rewrite rules may need flushing.');
+				}
 			}
-			
-			error_log('XF Translator Language Detection: REQUEST_URI=' . $request_uri . ', path=' . $path . ', detected_prefix=' . ($lang_prefix ?: 'empty') . ', query_var=' . ($query_var ?: 'empty'));
-			$logged = true;
 		}
 		
 		return $lang_prefix ?: '';
@@ -2200,6 +2213,11 @@ class Xf_Translator_Public {
 	 * @param WP_Query $query Query object
 	 */
 	public function filter_taxonomy_archive_query($query) {
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
 		// Only filter on frontend, main query, and taxonomy archives
 		if (is_admin() || !$query->is_main_query() || !$query->is_tax()) {
 			return;
@@ -2605,6 +2623,11 @@ class Xf_Translator_Public {
 	 * @param WP_Query $query Query object
 	 */
 	public function filter_author_archive_query($query) {
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
 		// Only filter on frontend
 		if (is_admin()) {
 			return;
@@ -2691,6 +2714,11 @@ class Xf_Translator_Public {
 	 * @param WP_Query $query Query object
 	 */
 	public function filter_content_by_language($query) {
+		// CRITICAL: Bail early for excluded requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
 		// Only filter on frontend
 		if (is_admin()) {
 			return;
@@ -2869,9 +2897,7 @@ class Xf_Translator_Public {
 					}
 				}
 				$removed_count = count($posts) - count($filtered_posts);
-				if ($removed_count > 0) {
-					error_log('XF Translator: Filtered singular query on English page. Removed ' . $removed_count . ' translated post(s). Original count: ' . count($posts) . ', Filtered count: ' . count($filtered_posts));
-				}
+				// Removed excessive debug logging
 				return $filtered_posts;
 			}
 		}
@@ -2920,7 +2946,7 @@ class Xf_Translator_Public {
 		
 		// Debug: Log if we're filtering (only on home page to avoid spam)
 		if ($query->is_home || $query->is_front_page()) {
-			error_log('XF Translator: Filtering query_posts results. Lang prefix: ' . ($lang_prefix ?: 'empty') . ', Posts count: ' . count($posts) . ', Post IDs: ' . implode(', ', array_map(function($p) { return $p->ID; }, $posts)) . ', post__in: ' . ($post_in_set ? 'set(' . count($post_in_set) . ')' : 'not set') . ', post__not_in: ' . ($post_not_in ? 'set(' . count($post_not_in) . ')' : 'not set'));
+			// error_log('XF Translator: Filtering query_posts results. Lang prefix: ' . ($lang_prefix ?: 'empty') . ', Posts count: ' . count($posts) . ', Post IDs: ' . implode(', ', array_map(function($p) { return $p->ID; }, $posts)) . ', post__in: ' . ($post_in_set ? 'set(' . count($post_in_set) . ')' : 'not set') . ', post__not_in: ' . ($post_not_in ? 'set(' . count($post_not_in) . ')' : 'not set'));
 		}
 		
 		// If post__in is set and we have post__not_in, filter out excluded posts
@@ -2937,9 +2963,7 @@ class Xf_Translator_Public {
 					return strtotime($b->post_date) - strtotime($a->post_date);
 				});
 			}
-			if ($query->is_home || $query->is_front_page()) {
-				error_log('XF Translator: After filtering post__not_in, posts count: ' . count($filtered_posts));
-			}
+			// Removed excessive debug logging
 			return $filtered_posts;
 		}
 		
@@ -3020,16 +3044,12 @@ class Xf_Translator_Public {
 						if (!empty($posts_per_page) && $posts_per_page > 0 && count($translated_posts) > $posts_per_page) {
 							$translated_posts = array_slice($translated_posts, 0, $posts_per_page);
 						}
-						if ($query->is_home || $query->is_front_page()) {
-							error_log('XF Translator: Querying all translated posts (ignoring large exclusion list of ' . count($post_not_in) . '). Found ' . count($translated_posts) . ' posts after excluding ' . count($widget_post_ids) . ' widget posts and limiting to ' . $posts_per_page . '.');
-						}
+					// Removed excessive debug logging
 						return $translated_posts;
 					}
 				}
 				
-				if ($query->is_home || $query->is_front_page()) {
-					error_log('XF Translator: post__not_in has too many posts (' . count($post_not_in) . '), queried all translated posts directly but got none.');
-				}
+				// Removed excessive debug logging
 				// Return empty array if we couldn't get posts (fall through would cause issues)
 				return array();
 			} else if (!empty($post_not_in) && is_array($post_not_in) && count($post_not_in) <= 20 && empty($post_in_set)) {
@@ -3056,9 +3076,7 @@ class Xf_Translator_Public {
 				}
 				$post_not_in_clean = array_unique(array_map('intval', $post_not_in_translated));
 				
-				if ($query->is_home || $query->is_front_page()) {
-					error_log('XF Translator: Converting post__not_in. Original count: ' . count($post_not_in) . ', Translated count: ' . count($post_not_in_clean) . ', IDs: ' . implode(', ', array_slice($post_not_in_clean, 0, 10)));
-				}
+				// Removed excessive debug logging
 				// Get all translated posts for this language (cached) and filter/limit in PHP
 				$translated_post_ids_all = $this->get_translated_post_ids_for_language($lang_prefix);
 				
@@ -3082,14 +3100,10 @@ class Xf_Translator_Public {
 					if (!empty($posts_per_page) && $posts_per_page > 0 && count($translated_posts) > $posts_per_page) {
 						$translated_posts = array_slice($translated_posts, 0, $posts_per_page);
 					}
-					if ($query->is_home || $query->is_front_page()) {
-						error_log('XF Translator: Querying translated posts directly. Found ' . count($translated_posts) . ' posts after excluding ' . count($post_not_in) . ' posts and limiting to ' . $posts_per_page . '.');
-					}
+					// Removed excessive debug logging
 					return $translated_posts;
 				} else {
-					if ($query->is_home || $query->is_front_page()) {
-						error_log('XF Translator: No translated posts found after excluding ' . count($post_not_in_clean) . ' posts. Falling back to normal query.');
-					}
+					// Removed excessive debug logging
 					// Fall through to normal translation mapping logic
 				}
 			}
@@ -3097,17 +3111,7 @@ class Xf_Translator_Public {
 			// First, get a mapping of original post IDs to translated post IDs, ordered by date DESC (cached)
 			$translation_map = $this->get_translation_map_for_language($lang_prefix);
 			
-			// Debug: Log translation map with details
-			if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-				error_log('XF Translator: Found ' . count($translation_map) . ' translated posts for language: ' . $lang_prefix);
-				if (!empty($translation_map)) {
-					$map_details = array();
-					foreach ($translation_map as $orig_id => $trans_id) {
-						$map_details[] = "orig:$orig_id=>trans:$trans_id";
-					}
-					error_log('XF Translator: Translation map details: ' . implode(', ', $map_details));
-				}
-			}
+			// Removed excessive debug logging
 			
 			if (!empty($translation_map)) {
 				// Create reverse map: translated_id => original_id for quick lookup
@@ -3122,9 +3126,7 @@ class Xf_Translator_Public {
 					// If $do_not_duplicate has more, it's likely accumulated incorrectly
 					if (count($do_not_duplicate) > 10) {
 						$post_not_in = array_slice($do_not_duplicate, 0, 10);
-						if ($query->is_home || $query->is_front_page()) {
-							error_log('XF Translator: Limiting $do_not_duplicate from ' . count($do_not_duplicate) . ' to ' . count($post_not_in) . ' posts.');
-						}
+						// Removed excessive debug logging
 					} else {
 						$post_not_in = $do_not_duplicate;
 					}
@@ -3146,9 +3148,7 @@ class Xf_Translator_Public {
 						// This is already a translated post for this language, keep it only if not excluded
 						if (!in_array($post->ID, $post_not_in)) {
 						$filtered_posts[] = $post;
-						if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-							error_log('XF Translator: Kept post ' . $post->ID . ' - already translated for language ' . $lang_prefix);
-							}
+						// Removed excessive debug logging
 						}
 					} elseif (isset($translation_map[$post->ID])) {
 						// This is an original post, get its translated version
@@ -3158,14 +3158,8 @@ class Xf_Translator_Public {
 						$translated_post = get_post($translated_id);
 						if ($translated_post && $translated_post->post_status === 'publish') {
 							$filtered_posts[] = $translated_post;
-							if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-								error_log('XF Translator: Replaced original post ' . $post->ID . ' with translated post ' . $translated_id . ' for language ' . $lang_prefix);
-							}
-						} else {
-							if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-								error_log('XF Translator: Translation ' . $translated_id . ' for original post ' . $post->ID . ' not found or not published');
-								}
-							}
+							// Removed excessive debug logging
+						}
 						}
 					} elseif ($original_post_id && isset($translation_map[$original_post_id])) {
 						// This post is a translation for a different language, but we found the original
@@ -3176,17 +3170,12 @@ class Xf_Translator_Public {
 						$translated_post = get_post($translated_id);
 						if ($translated_post && $translated_post->post_status === 'publish') {
 							$filtered_posts[] = $translated_post;
-							if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-								error_log('XF Translator: Replaced post ' . $post->ID . ' (original: ' . $original_post_id . ') with translated post ' . $translated_id . ' for language ' . $lang_prefix);
-								}
-							}
+							// Removed excessive debug logging
+						}
 						}
 					} else {
 						// Post is neither translated nor has a translation
-						if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-							$map_keys = array_keys($translation_map);
-							error_log('XF Translator: Skipping post ' . $post->ID . ' - no translation found for language ' . $lang_prefix . ' (post_lang: ' . ($post_lang ?: 'none') . ', original_post_id: ' . ($original_post_id ?: 'none') . ', in_map: ' . (isset($translation_map[$post->ID]) ? 'yes' : 'no') . ', map_has_original: ' . ($original_post_id && isset($translation_map[$original_post_id]) ? 'yes' : 'no') . ', map_keys: ' . implode(',', array_slice($map_keys, 0, 5)) . ')');
-						}
+						// Removed excessive debug logging
 					}
 				}
 				
@@ -3200,17 +3189,12 @@ class Xf_Translator_Public {
 					$filtered_posts = array_slice($filtered_posts, 0, $posts_per_page);
 				}
 				
-				// Debug: Log how many posts matched
-				if ($query->is_home || $query->is_front_page() || $query->is_singular) {
-					error_log('XF Translator: Filtered to ' . count($filtered_posts) . ' posts out of ' . count($posts) . ' original posts. Translation map has ' . count($translation_map) . ' entries. Limited to ' . $posts_per_page . ' posts.');
-				}
+				// Removed excessive debug logging
 				return $filtered_posts;
 			} else {
 				// No translated posts found in database for this language
 				// Return empty to avoid showing English posts on French page
-				if ($query->is_home || $query->is_front_page()) {
-					error_log('XF Translator: No translated posts found for language: ' . $lang_prefix . '. Returning empty array.');
-				}
+				// Removed excessive debug logging
 				return array();
 			}
 		}
@@ -3228,8 +3212,18 @@ class Xf_Translator_Public {
 	 * @return string|false Modified redirect URL or false to disable redirect.
 	 */
 	public function filter_redirect_canonical( $redirect_url, $requested_url ) {
+		// CRITICAL: Exclude admin, REST API, AJAX, cron, and CLI requests
+		if ( $this->should_exclude_request() ) {
+			return $redirect_url;
+		}
+		
 		// Only affect frontend.
 		if ( is_admin() ) {
+			return $redirect_url;
+		}
+		
+		// Exclude REST API requests (additional check)
+		if ( defined('REST_REQUEST') && REST_REQUEST ) {
 			return $redirect_url;
 		}
 
@@ -3335,19 +3329,9 @@ class Xf_Translator_Public {
 			return $value;
 		}
 		
-		// Debug logging for description field
-		static $logged_meta_keys = array();
-		if (($meta_key === 'description' || $meta_key === 'user_description') && !isset($logged_meta_keys[$user_id . '_' . $meta_key])) {
-			error_log('XF Translator User Meta: filter_get_user_meta called - meta_key: "' . $meta_key . '", user_id: ' . $user_id);
-			$logged_meta_keys[$user_id . '_' . $meta_key] = true;
-		}
-		
 		// Get current language prefix
 		$lang_prefix = $this->get_current_language_prefix();
 		if (empty($lang_prefix)) {
-			if (($meta_key === 'description' || $meta_key === 'user_description') && isset($logged_meta_keys[$user_id . '_' . $meta_key])) {
-				error_log('XF Translator User Meta: No language prefix in filter_get_user_meta');
-			}
 			return $value;
 		}
 		
@@ -3461,21 +3445,21 @@ class Xf_Translator_Public {
 				}
 			}
 			if (!$is_valid_prefix) {
-				error_log('XF Translator ACF: Invalid language prefix detected: ' . $lang_prefix . ' - not in configured languages. Falling back to English.');
+				// Removed excessive debug logging - invalid language prefix handled silently
 				$lang_prefix = ''; // Reset to English/default
 			}
 		}
 		
 		// Debug logging for sbposts__content to see if filter is called
 		if ($field_name === 'sbposts__content') {
-			error_log('XF Translator ACF: filter_acf_load_value called for sbposts__content - post_id: ' . $post_id . ', value empty: ' . (empty($value) ? 'YES' : 'NO') . ', value type: ' . gettype($value) . ', lang_prefix: ' . ($lang_prefix ?: 'empty'));
+			// error_log('XF Translator ACF: filter_acf_load_value called for sbposts__content - post_id: ' . $post_id . ', value empty: ' . (empty($value) ? 'YES' : 'NO') . ', value type: ' . gettype($value) . ', lang_prefix: ' . ($lang_prefix ?: 'empty'));
 		}
 		
 		// If no language prefix, we're on English/default - no conversion needed
 		// But still return early if value is empty to avoid unnecessary processing
 		if (empty($lang_prefix)) {
 			if ($field_name === 'sbposts__content') {
-				error_log('XF Translator ACF: sbposts__content - no language prefix, returning original value');
+				// error_log('XF Translator ACF: sbposts__content - no language prefix, returning original value');
 			}
 			return $value;
 		}
@@ -3512,7 +3496,7 @@ class Xf_Translator_Public {
 					add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
 					
 					if ($translated_value !== null && $translated_value !== false && (!empty($translated_value) || is_numeric($translated_value))) {
-						error_log('XF Translator ACF: Loaded field "' . $field_name . '" from translated post ' . $translated_post_id . ' (was called with original post ' . $current_post_id . ')');
+						// Removed excessive debug logging
 						return $translated_value;
 					}
 				}
@@ -3524,7 +3508,7 @@ class Xf_Translator_Public {
 		// If value is empty and it's not a field we need to process, return early
 		if (empty($value) && !in_array($field_name, $strict_filter_fields, true)) {
 			if ($field_name === 'sbposts__content') {
-				error_log('XF Translator ACF: sbposts__content value is empty and not in strict filter fields, returning early');
+				// Removed excessive debug logging
 			}
 			return $value;
 		}
@@ -3543,7 +3527,7 @@ class Xf_Translator_Public {
 			}
 			
 			// Debug logging
-			error_log('XF Translator ACF Options: Filter called - post_id: ' . $post_id . ', field_key: ' . $field_key . ', lang_prefix: ' . $lang_prefix . ', field array keys: ' . (is_array($field) ? implode(', ', array_keys($field)) : 'not array'));
+			// Removed excessive debug logging
 			
 			if (!empty($field_key)) {
 				// Normalize option name
@@ -3568,17 +3552,17 @@ class Xf_Translator_Public {
 				foreach ($possible_keys as $key_to_try) {
 					$translated_value = get_option($key_to_try, '');
 					if (!empty($translated_value)) {
-						error_log('XF Translator ACF Options: Found translation with key: ' . $key_to_try);
+						// Removed excessive debug logging
 						break;
 					}
 				}
 				
 				if (empty($translated_value)) {
-					error_log('XF Translator ACF Options: Looking for translation with keys: ' . implode(', ', $possible_keys));
+					// Removed excessive debug logging
 				}
 				
 				if (!empty($translated_value)) {
-					error_log('XF Translator ACF Options: Found translation in options table, length: ' . strlen($translated_value));
+					// Removed excessive debug logging
 					return $translated_value;
 				}
 				
@@ -3586,18 +3570,18 @@ class Xf_Translator_Public {
 				if (empty($translated_value) && function_exists('get_field')) {
 					// Try with the normalized key
 					$acf_lookup_key = $acf_option_key . '_' . $lang_prefix;
-					error_log('XF Translator ACF Options: Trying ACF direct lookup with key: ' . $acf_lookup_key);
+					// Removed excessive debug logging
 					$translated_value = get_field($field_key, $acf_lookup_key);
 					
 					// Also try with 'option' instead of 'options'
 					if (empty($translated_value) && $acf_option_key === 'options') {
 						$acf_lookup_key_alt = 'option_' . $lang_prefix;
-						error_log('XF Translator ACF Options: Trying ACF direct lookup with alternative key: ' . $acf_lookup_key_alt);
+						// error_log('XF Translator ACF Options: Trying ACF direct lookup with alternative key: ' . $acf_lookup_key_alt);
 						$translated_value = get_field($field_key, $acf_lookup_key_alt);
 					}
 					
 					if (!empty($translated_value)) {
-						error_log('XF Translator ACF Options: Found translation in ACF, length: ' . strlen($translated_value));
+						// Removed excessive debug logging
 						return $translated_value;
 					}
 				}
@@ -3612,9 +3596,9 @@ class Xf_Translator_Public {
 				));
 				if (!empty($lang_specific_options)) {
 					$lang_option_names = array_map(function($o) { return $o->option_name; }, $lang_specific_options);
-					error_log('XF Translator ACF Options: Found ' . count($lang_specific_options) . ' options for field "' . $field_key . '" and language "' . $lang_prefix . '": ' . implode(', ', $lang_option_names));
+					// Removed excessive debug logging
 				} else {
-					error_log('XF Translator ACF Options: No options found for field "' . $field_key . '" and language "' . $lang_prefix . '"');
+					// Removed excessive debug logging
 					// Check what languages DO have translations for this field (for debugging)
 					$all_field_options = $wpdb->get_results($wpdb->prepare(
 						"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
@@ -3622,7 +3606,7 @@ class Xf_Translator_Public {
 					));
 					if (!empty($all_field_options)) {
 						$all_option_names = array_map(function($o) { return $o->option_name; }, $all_field_options);
-						error_log('XF Translator ACF Options: Found options for field "' . $field_key . '" in other languages: ' . implode(', ', $all_option_names));
+						// Removed excessive debug logging
 						// Extract language codes from option names to show what languages are available
 						$available_langs = array();
 						foreach ($all_option_names as $opt_name) {
@@ -3632,15 +3616,14 @@ class Xf_Translator_Public {
 						}
 						if (!empty($available_langs)) {
 							$available_langs = array_unique($available_langs);
-							error_log('XF Translator ACF Options: Available languages for field "' . $field_key . '": ' . implode(', ', $available_langs) . ' (requested: ' . $lang_prefix . ')');
+							// Removed excessive debug logging
 						}
 					}
 				}
 				
-				error_log('XF Translator ACF Options: No translation found for field: ' . $field_key . ' (options page: ' . $acf_option_key . ', lang: ' . $lang_prefix . ')');
-				error_log('XF Translator ACF Options: Expected key format: _xf_translator_acf_options_' . $acf_option_key . '_' . $field_key . '_' . $lang_prefix);
+				// Removed excessive debug logging
 			} else {
-				error_log('XF Translator ACF Options: Field key is empty, field array: ' . print_r($field, true));
+				// Removed excessive debug logging
 			}
 			
 			// If no translation found for options page, return original value
@@ -3668,7 +3651,7 @@ class Xf_Translator_Public {
 				$current_post_id = $GLOBALS['post']->ID;
 			}
 			
-			error_log('XF Translator ACF: sbposts__content special handling - post_id: ' . $current_post_id . ', value type: ' . gettype($value) . ', is_array: ' . (is_array($value) ? 'YES' : 'NO'));
+			// Removed excessive debug logging
 			
 			// Check if value is just a count (ACF repeater format issue)
 			// Value can come as string, number, or array with count
@@ -3685,10 +3668,10 @@ class Xf_Translator_Public {
 				$needs_reload = true;
 			}
 			
-			error_log('XF Translator ACF: sbposts__content - is_count_only: ' . ($is_count_only ? 'YES' : 'NO') . ', needs_reload: ' . ($needs_reload ? 'YES' : 'NO') . ', empty(value): ' . (empty($value) ? 'YES' : 'NO'));
+			// Removed excessive debug logging
 			
 			if ($needs_reload || $is_count_only) {
-				error_log('XF Translator ACF: sbposts__content - Need to load from post meta or original post');
+				// Removed excessive debug logging
 				// Try to load from original post if this is a translated post
 				$original_post_id = $this->get_original_post_id($current_post_id);
 				
@@ -3711,9 +3694,7 @@ class Xf_Translator_Public {
 							
 							if ($has_proper_structure) {
 								$value = $original_value;
-								error_log('XF Translator ACF: Loaded original sbposts__content from post ' . $original_post_id . ' (current: ' . $current_post_id . ') - rows: ' . count($value));
-							} else {
-								error_log('XF Translator ACF: Original value loaded but doesn\'t have proper repeater structure');
+								// Removed excessive debug logging
 							}
 						}
 					}
@@ -3723,7 +3704,7 @@ class Xf_Translator_Public {
 			// If still empty or just a count, try loading directly from post meta
 			$is_count_only = (is_array($value) && count($value) === 1 && isset($value[0]) && is_numeric($value[0]) && !is_array($value[0]));
 			if (empty($value) || $is_count_only) {
-				error_log('XF Translator ACF: sbposts__content - Attempting to load from post meta directly');
+				// Removed excessive debug logging
 				
 				// Get the field key - ACF stores repeater sub-fields using field KEY, not name
 				$field_key = isset($field['key']) ? $field['key'] : '';
@@ -3734,7 +3715,7 @@ class Xf_Translator_Public {
 					}
 				}
 				
-				error_log('XF Translator ACF: sbposts__content - field_key: ' . ($field_key ?: 'NOT FOUND'));
+				// Removed excessive debug logging
 				
 				// Try both field name and field key for the repeater count
 				$repeater_count = get_post_meta($current_post_id, $field_name, true);
@@ -3753,7 +3734,7 @@ class Xf_Translator_Public {
 					}
 				}
 				
-				error_log('XF Translator ACF: sbposts__content - repeater_count: ' . ($repeater_count ?: 'NOT FOUND'));
+				// Removed excessive debug logging
 				
 				if ($repeater_count && is_numeric($repeater_count) && $repeater_count > 0) {
 					$repeater_rows = array();
@@ -3769,7 +3750,7 @@ class Xf_Translator_Public {
 						$original_post_id = $this->get_original_post_id($current_post_id);
 						if ($original_post_id && $original_post_id !== $current_post_id) {
 							$source_post_id = $original_post_id;
-							error_log('XF Translator ACF: sbposts__content - Using original post ' . $original_post_id . ' as source');
+							// Removed excessive debug logging
 						}
 					}
 					
@@ -3791,7 +3772,7 @@ class Xf_Translator_Public {
 						}
 					}
 					
-					error_log('XF Translator ACF: sbposts__content - select_posts_field_key: ' . ($select_posts_field_key ?: 'NOT FOUND') . ', button_label_field_key: ' . ($button_label_field_key ?: 'NOT FOUND'));
+					// Removed excessive debug logging
 					
 					for ($i = 0; $i < $repeater_count; $i++) {
 						// Try multiple meta key patterns for select_posts
@@ -3849,20 +3830,14 @@ class Xf_Translator_Public {
 						
 						if (!empty($row_data)) {
 							$repeater_rows[] = $row_data;
-							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . (isset($row_data['select_posts']) ? count($row_data['select_posts']) : 0) . ' posts' . (isset($row_data['button_label']) ? ', button_label: "' . $row_data['button_label'] . '"' : '') . (isset($row_data['select_posts']) ? ' - IDs: ' . implode(', ', $row_data['select_posts']) : ''));
-						} else {
-							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' - No data found (tried select_posts: ' . $meta_key1 . ($field_key ? ', ' . $meta_key3 : '') . ' and button_label: ' . $button_meta_key1 . ($field_key ? ', ' . $button_meta_key3 : '') . ')');
+							// Removed excessive debug logging
 						}
 					}
 					
 					if (!empty($repeater_rows)) {
 						$value = $repeater_rows;
-						error_log('XF Translator ACF: Loaded sbposts__content from post meta - source_post_id: ' . $source_post_id . ', rows: ' . count($repeater_rows));
-					} else {
-						error_log('XF Translator ACF: sbposts__content - No repeater rows loaded from post meta');
+						// Removed excessive debug logging
 					}
-				} else {
-					error_log('XF Translator ACF: sbposts__content - Invalid repeater_count: ' . ($repeater_count ?: 'empty'));
 				}
 			}
 		} elseif (in_array($field_name, $strict_filter_fields, true) && empty($value)) {
@@ -3881,7 +3856,7 @@ class Xf_Translator_Public {
 					add_filter('acf/load_value', array($this, 'filter_acf_load_value'), 10, 3);
 					if (!empty($original_value)) {
 						$value = $original_value;
-						error_log('XF Translator ACF: Loaded original value for field "' . $field_name . '" from post ' . $original_post_id);
+						// Removed excessive debug logging
 					}
 				}
 			}
@@ -3900,7 +3875,7 @@ class Xf_Translator_Public {
 				$is_count_format = (is_array($temp_value) && count($temp_value) === 1 && isset($temp_value[0]) && is_numeric($temp_value[0]) && !is_array($temp_value[0]));
 				
 				if ($is_count_format) {
-					error_log('XF Translator ACF: sbposts__content detected as count format AFTER ACF processing - loading from post meta');
+					// Removed excessive debug logging
 					
 					// Get the current post ID
 					$current_post_id = is_numeric($post_id) ? (int) $post_id : get_queried_object_id();
@@ -3932,7 +3907,7 @@ class Xf_Translator_Public {
 					
 					if (empty($test_meta) && $original_post_id && $original_post_id !== $current_post_id) {
 						$source_post_id = $original_post_id;
-						error_log('XF Translator ACF: sbposts__content - Using original post ' . $original_post_id . ' as source');
+						// Removed excessive debug logging
 					}
 					
 					// Get the sub-field keys for select_posts and button_label
@@ -4003,15 +3978,13 @@ class Xf_Translator_Public {
 						
 						if (!empty($row_data)) {
 							$repeater_rows[] = $row_data;
-							error_log('XF Translator ACF: sbposts__content - Row ' . $i . ' loaded with ' . (isset($row_data['select_posts']) ? count($row_data['select_posts']) : 0) . ' posts' . (isset($row_data['button_label']) ? ', button_label: "' . $row_data['button_label'] . '"' : '') . (isset($row_data['select_posts']) ? ' - IDs: ' . implode(', ', $row_data['select_posts']) : ''));
+							// Removed excessive debug logging
 						}
 					}
 					
 					if (!empty($repeater_rows)) {
 						$value = $repeater_rows;
-						error_log('XF Translator ACF: sbposts__content - Successfully loaded ' . count($repeater_rows) . ' rows from post meta');
-					} else {
-						error_log('XF Translator ACF: sbposts__content - Failed to load rows from post meta (count: ' . $repeater_count . ', source_post_id: ' . $source_post_id . ')');
+						// Removed excessive debug logging
 					}
 				}
 			}
@@ -4021,99 +3994,19 @@ class Xf_Translator_Public {
 				$value = empty($value) ? array() : (array) $value;
 			}
 
-			// Enhanced debug logging for sidebar posts
-			if ($field_name === 'sbposts__content') {
-				error_log('XF Translator ACF: Filtering sbposts__content - post_id: ' . $post_id . ', lang: ' . $lang_prefix);
-				error_log('XF Translator ACF: sbposts__content original structure - count: ' . count($value) . ', type: ' . gettype($value));
-				if (is_array($value) && !empty($value)) {
-					error_log('XF Translator ACF: sbposts__content - Full value structure: ' . print_r($value, true));
-					foreach ($value as $idx => $row) {
-						error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - row type: ' . gettype($row) . ', is_array: ' . (is_array($row) ? 'YES' : 'NO'));
-						if (is_array($row)) {
-							error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - keys: ' . implode(', ', array_keys($row)));
-							if (isset($row['select_posts'])) {
-								$select_posts = $row['select_posts'];
-								// Extract IDs for logging
-								$ids_for_log = array();
-								if (is_array($select_posts)) {
-									foreach ($select_posts as $sp_item) {
-										if (is_object($sp_item) && isset($sp_item->ID)) {
-											$ids_for_log[] = $sp_item->ID;
-										} elseif (is_numeric($sp_item)) {
-											$ids_for_log[] = $sp_item;
-										}
-									}
-								}
-								error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - select_posts: ' . (is_array($select_posts) ? 'array(' . count($select_posts) . ')' : gettype($select_posts)) . ' - IDs: ' . (is_array($select_posts) ? implode(', ', $ids_for_log) : 'N/A'));
-							} else {
-								error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - NO select_posts key, full row: ' . print_r($row, true));
-							}
-						} else {
-							error_log('XF Translator ACF: sbposts__content row ' . $idx . ' - NOT an array, value: ' . print_r($row, true));
-						}
-					}
-				}
-			}
-
-			// Use strict filtering - exclude untranslated posts
-			// But first, log what we're about to convert
-			if ($field_name === 'sbposts__content') {
-				$value_before_conversion = $value;
-				error_log('XF Translator ACF: About to convert sbposts__content - value type: ' . gettype($value) . ', is_array: ' . (is_array($value) ? 'YES (count: ' . count($value) . ')' : 'NO'));
-			}
+			// Removed excessive debug logging
 			
 			$converted_value = $this->convert_post_ids_to_translated($value, $lang_prefix, 0, true);
 			
-			// If conversion resulted in empty array but we had data, log a warning
-			if ($field_name === 'sbposts__content' && empty($converted_value) && !empty($value)) {
-				error_log('XF Translator ACF: WARNING - sbposts__content conversion resulted in empty array! Original had ' . count($value) . ' rows.');
-				// Try to see if any of the original posts have translations
-				if (is_array($value)) {
-					foreach ($value as $row_idx => $row) {
-						if (is_array($row) && isset($row['select_posts'])) {
-							$select_posts = is_array($row['select_posts']) ? $row['select_posts'] : array($row['select_posts']);
-							error_log('XF Translator ACF: Checking translations for row ' . $row_idx . ' with ' . count($select_posts) . ' posts');
-							foreach ($select_posts as $post_id_or_obj) {
-								$check_id = is_object($post_id_or_obj) && isset($post_id_or_obj->ID) ? $post_id_or_obj->ID : (is_numeric($post_id_or_obj) ? $post_id_or_obj : 0);
-								if ($check_id) {
-									$trans_id = $this->get_translated_post_id($check_id, $lang_prefix);
-									$post_status = get_post_status($check_id);
-									$trans_status = $trans_id ? get_post_status($trans_id) : 'N/A';
-									error_log('XF Translator ACF: Row ' . $row_idx . ' - Post ' . $check_id . ' (status: ' . $post_status . ') translation: ' . ($trans_id ? $trans_id . ' (status: ' . $trans_status . ')' : 'NONE'));
-								}
-							}
-						} else {
-							error_log('XF Translator ACF: Row ' . $row_idx . ' - NOT an array or missing select_posts key. Row type: ' . gettype($row));
-						}
-					}
-				}
-			}
-			
-			// Also check if converted_value has rows but they're empty
-			if ($field_name === 'sbposts__content' && !empty($converted_value) && is_array($converted_value)) {
-				$empty_rows = 0;
-				foreach ($converted_value as $row_idx => $row) {
-					if (is_array($row) && isset($row['select_posts'])) {
-						if (empty($row['select_posts']) || (is_array($row['select_posts']) && count($row['select_posts']) === 0)) {
-							$empty_rows++;
-						}
-					}
-				}
-				if ($empty_rows > 0) {
-					error_log('XF Translator ACF: WARNING - sbposts__content has ' . count($converted_value) . ' rows but ' . $empty_rows . ' rows have empty select_posts arrays!');
-				}
-			}
+			// Removed excessive debug logging
 			
 			// For sbposts__content (repeater field), ensure select_posts arrays contain IDs, not objects
 			// This is important because the shortcode expects IDs and casts them to int
 			if ($field_name === 'sbposts__content' && is_array($converted_value)) {
-				error_log('XF Translator ACF: Normalizing sbposts__content - converted_value count: ' . count($converted_value));
+				// Removed excessive debug logging
 				foreach ($converted_value as $idx => $row) {
-					error_log('XF Translator ACF: Processing row ' . $idx . ' - is_array: ' . (is_array($row) ? 'YES' : 'NO') . ', has select_posts: ' . (is_array($row) && isset($row['select_posts']) ? 'YES' : 'NO'));
-					
 					if (is_array($row) && isset($row['select_posts'])) {
 						$select_posts = $row['select_posts'];
-						error_log('XF Translator ACF: Row ' . $idx . ' select_posts before normalization - type: ' . gettype($select_posts) . ', is_array: ' . (is_array($select_posts) ? 'YES (count: ' . count($select_posts) . ')' : 'NO'));
 						
 						if (is_array($select_posts)) {
 							// Convert post objects to IDs if needed
@@ -4128,13 +4021,6 @@ class Xf_Translator_Public {
 								}
 							}
 							$converted_value[$idx]['select_posts'] = $normalized_select_posts;
-							
-							error_log('XF Translator ACF: Row ' . $idx . ' select_posts after normalization - count: ' . count($normalized_select_posts) . ', IDs: ' . implode(', ', $normalized_select_posts));
-							
-							// Debug: Log if select_posts became empty after normalization
-							if (empty($normalized_select_posts) && !empty($select_posts)) {
-								error_log('XF Translator ACF: WARNING - select_posts became empty after normalization in row ' . $idx . '. Original had ' . count($select_posts) . ' items.');
-							}
 						} elseif (!is_array($select_posts) && !empty($select_posts)) {
 							// Handle case where select_posts is not an array (single value)
 							if (is_object($select_posts) && isset($select_posts->ID)) {
@@ -4145,54 +4031,15 @@ class Xf_Translator_Public {
 						} elseif (empty($select_posts)) {
 							// Ensure select_posts exists as empty array even if it was removed
 							$converted_value[$idx]['select_posts'] = array();
-							error_log('XF Translator ACF: Row ' . $idx . ' - select_posts was empty, set to empty array');
 						}
 					} elseif (is_array($row) && !isset($row['select_posts'])) {
 						// Row exists but select_posts key is missing - this shouldn't happen but handle it
-						error_log('XF Translator ACF: WARNING - Row ' . $idx . ' exists but select_posts key is missing! Row keys: ' . implode(', ', array_keys($row)));
 						$converted_value[$idx]['select_posts'] = array();
 					}
 				}
-				
-				// Final check: Log the final structure
-				if ($field_name === 'sbposts__content') {
-					$total_rows = count($converted_value);
-					$rows_with_posts = 0;
-					$all_post_ids = array();
-					foreach ($converted_value as $idx => $row) {
-						if (is_array($row) && isset($row['select_posts']) && !empty($row['select_posts']) && is_array($row['select_posts'])) {
-							$rows_with_posts++;
-							$all_post_ids = array_merge($all_post_ids, $row['select_posts']);
-						}
-					}
-					error_log('XF Translator ACF: sbposts__content FINAL - Total rows: ' . $total_rows . ', Rows with posts: ' . $rows_with_posts . ', All post IDs: ' . implode(', ', $all_post_ids));
-				}
 			}
 			
-			// Debug logging for sidebar posts
-			if ($field_name === 'sbposts__content' || $field_name === 'select_posts') {
-				error_log('XF Translator ACF: Filtering field "' . $field_name . '" - Original count: ' . (is_array($value) ? count($value) : 'not array') . ', Converted count: ' . (is_array($converted_value) ? count($converted_value) : 'not array'));
-				
-				if ($field_name === 'sbposts__content' && is_array($converted_value) && !empty($converted_value)) {
-					foreach ($converted_value as $idx => $row) {
-						if (is_array($row) && isset($row['select_posts'])) {
-							$select_posts = $row['select_posts'];
-							// Extract IDs for logging
-							$ids_for_log = array();
-							if (is_array($select_posts)) {
-								foreach ($select_posts as $sp_item) {
-									if (is_object($sp_item) && isset($sp_item->ID)) {
-										$ids_for_log[] = $sp_item->ID;
-									} elseif (is_numeric($sp_item)) {
-										$ids_for_log[] = $sp_item;
-									}
-								}
-							}
-							error_log('XF Translator ACF: sbposts__content CONVERTED row ' . $idx . ' - select_posts: ' . (is_array($select_posts) ? 'array(' . count($select_posts) . ')' : gettype($select_posts)) . ' - IDs: ' . (is_array($select_posts) ? implode(', ', $ids_for_log) : 'N/A'));
-						}
-					}
-				}
-			}
+			// Removed excessive debug logging
 			
 			return $converted_value;
 		}
@@ -4244,7 +4091,7 @@ class Xf_Translator_Public {
 								}
 							}
 						}
-						error_log('XF Translator: Processing nested array (repeater row) at depth ' . $depth . ', key: ' . $key . ', select_posts before: ' . (is_array($select_posts_before) ? 'array(' . count($select_posts_before) . ') - IDs: ' . implode(', ', $ids_before) : gettype($select_posts_before)));
+						// Removed excessive debug logging
 					}
 					
 					$nested_result = $this->convert_post_ids_to_translated($item, $language_prefix, $depth + 1, $filter_untranslated);
@@ -4285,7 +4132,7 @@ class Xf_Translator_Public {
 								}
 								
 								$nested_result['select_posts'] = $converted_select_posts;
-								error_log('XF Translator: Fixed select_posts conversion - was ' . gettype($nested_result['select_posts'] ?? 'missing') . ', now array with ' . count($converted_select_posts) . ' items');
+								// Removed excessive debug logging
 							}
 						}
 					}
@@ -4304,7 +4151,7 @@ class Xf_Translator_Public {
 								}
 							}
 						}
-						error_log('XF Translator: Processing nested array (repeater row) at depth ' . $depth . ', key: ' . $key . ', select_posts after: ' . (is_array($select_posts_after) ? 'array(' . count($select_posts_after) . ') - IDs: ' . implode(', ', $ids_after) : gettype($select_posts_after)));
+						// Removed excessive debug logging
 					}
 					
 					// For nested arrays (like repeater rows), always preserve the structure
@@ -4318,12 +4165,12 @@ class Xf_Translator_Public {
 							if (!isset($nested_result['select_posts'])) {
 								// select_posts was removed during conversion, restore it as empty array
 								$nested_result['select_posts'] = array();
-								error_log('XF Translator: Restored empty select_posts key in repeater row at depth ' . $depth . ', key: ' . $key);
+								// Removed excessive debug logging
 							} elseif (!is_array($nested_result['select_posts'])) {
 								// select_posts was converted to a string/number instead of array - fix it
 								$converted_id = $nested_result['select_posts'];
 								$nested_result['select_posts'] = is_numeric($converted_id) ? array((int) $converted_id) : array();
-								error_log('XF Translator: Fixed select_posts - was ' . gettype($converted_id) . ' (' . $converted_id . '), converted to array with ' . count($nested_result['select_posts']) . ' items');
+								// Removed excessive debug logging
 							}
 						}
 						$converted[$key] = $nested_result;
@@ -4451,13 +4298,13 @@ class Xf_Translator_Public {
 			if ($original_count > 0) {
 				$converted_count = count($converted);
 				if ($converted_count === 0) {
-					error_log('XF Translator: Related posts filtered - Original count: ' . $original_count . ', Filtered count: 0, Language: ' . $language_prefix);
+					// Removed excessive debug logging
 					$original_ids = array_map(function($item) {
 						if (is_object($item) && isset($item->ID)) return $item->ID;
 						if (is_numeric($item)) return $item;
 						return 'unknown';
 					}, $value);
-					error_log('XF Translator: Original post IDs: ' . implode(', ', $original_ids));
+					// Removed excessive debug logging
 					
 					// Check if any of the original posts have translations
 					$has_any_translations = false;
@@ -4466,9 +4313,9 @@ class Xf_Translator_Public {
 							$trans_id = $this->get_translated_post_id($orig_id, $language_prefix);
 							if ($trans_id) {
 								$has_any_translations = true;
-								error_log('XF Translator: Post ' . $orig_id . ' HAS translation: ' . $trans_id);
+								// Removed excessive debug logging
 							} else {
-								error_log('XF Translator: Post ' . $orig_id . ' has NO translation for language: ' . $language_prefix);
+								// Removed excessive debug logging
 							}
 						}
 					}
@@ -4476,10 +4323,10 @@ class Xf_Translator_Public {
 					// If no translations found at all, return empty array (correct behavior)
 					// If translations exist but weren't found, there might be a bug
 					if (!$has_any_translations) {
-						error_log('XF Translator: None of the related posts have translations. Returning empty array.');
+						// Removed excessive debug logging
 					}
 				} else {
-					error_log('XF Translator: Related posts filtered - Original count: ' . $original_count . ', Filtered count: ' . $converted_count . ', Language: ' . $language_prefix);
+					// Removed excessive debug logging
 				}
 			}
 			
@@ -4589,7 +4436,7 @@ class Xf_Translator_Public {
 				
 				// Debug logging for description field
 				if ($normalized_key === 'description' || in_array('description', $keys_to_try) || in_array('user_description', $keys_to_try)) {
-					error_log('XF Translator User Meta: Trying key "' . $key . '" with prefix "' . $prefix . '" (meta_key: "' . $translated_meta_key . '") - found: ' . ($translated_value !== false && !empty($translated_value) ? 'YES' : 'NO'));
+					// Removed excessive debug logging
 				}
 				
 				// Check if we got a valid translated value
@@ -4633,7 +4480,7 @@ class Xf_Translator_Public {
 		// Debug logging for ALL fields to see what's being called
 		static $logged_fields = array();
 		if (!isset($logged_fields[$field])) {
-			error_log('XF Translator User Meta: filter_get_the_author_meta called - field: "' . $field . '", user_id: ' . $user_id);
+			// Removed excessive debug logging
 			$logged_fields[$field] = true;
 		}
 		
@@ -4642,12 +4489,12 @@ class Xf_Translator_Public {
 		
 		// Debug logging for user meta translation
 		if ($field === 'description' || $field === 'user_description') {
-			error_log('XF Translator User Meta: Processing description field - user_id: ' . $user_id . ', lang_prefix: ' . ($lang_prefix ?: 'empty') . ', value length: ' . strlen((string)$value));
+			// Removed excessive debug logging
 		}
 		
 		if (empty($lang_prefix)) {
 			if ($field === 'description' || $field === 'user_description') {
-				error_log('XF Translator User Meta: No language prefix detected, returning original value');
+				// Removed excessive debug logging
 			}
 			return $value;
 		}
@@ -4656,7 +4503,7 @@ class Xf_Translator_Public {
 		$translatable_fields = $this->settings->get_translatable_user_meta_fields();
 		if (empty($translatable_fields)) {
 			if ($field === 'description' || $field === 'user_description') {
-				error_log('XF Translator User Meta: No translatable fields configured');
+				// Removed excessive debug logging
 			}
 			return $value;
 		}
@@ -4664,7 +4511,7 @@ class Xf_Translator_Public {
 		// Check if this field is in the translatable fields list
 		if (!$this->is_field_translatable($field, $translatable_fields)) {
 			if ($field === 'description' || $field === 'user_description') {
-				error_log('XF Translator User Meta: Field "' . $field . '" is not in translatable fields list: ' . print_r($translatable_fields, true));
+				// Removed excessive debug logging
 			}
 			return $value;
 		}
@@ -4678,7 +4525,7 @@ class Xf_Translator_Public {
 		add_filter('get_user_meta', array($this, 'filter_get_user_meta'), 10, 4);
 		
 		if ($field === 'description' || $field === 'user_description') {
-			error_log('XF Translator User Meta: Translated value found: ' . (!empty($translated_value) ? 'YES (length: ' . strlen((string)$translated_value) . ')' : 'NO'));
+			// Removed excessive debug logging
 		}
 		
 		// Return translated value if available, otherwise original
@@ -4758,12 +4605,46 @@ class Xf_Translator_Public {
 	}
 	
 	/**
+	 * Conditionally register template_redirect hook only on frontend
+	 * This prevents the hook from interfering with admin redirects
+	 * 
+	 * @since 1.1.0
+	 */
+	public function register_template_redirect_hook() {
+		// Only register on frontend - never in admin to prevent redirect loops
+		if (is_admin()) {
+			return;
+		}
+		
+		// Exclude REST API, AJAX, cron, and CLI requests
+		if (defined('REST_REQUEST') && REST_REQUEST) {
+			return;
+		}
+		
+		if (wp_doing_ajax() || wp_doing_cron()) {
+			return;
+		}
+		
+		if (defined('WP_CLI') && WP_CLI) {
+			return;
+		}
+		
+		// Only register on frontend requests
+		add_action('template_redirect', array($this, 'modify_user_data_on_page_load'), 1);
+	}
+	
+	/**
 	 * Modify user data on page load to update description property
 	 * This handles cases where themes use $userdata->description directly
 	 */
 	public function modify_user_data_on_page_load()
 	{
-		// Only on frontend
+		// CRITICAL: Exclude admin, REST API, AJAX, cron, and CLI requests
+		if ($this->should_exclude_request()) {
+			return;
+		}
+		
+		// Only on frontend (additional safety check)
 		if (is_admin()) {
 			return;
 		}
@@ -4813,7 +4694,7 @@ class Xf_Translator_Public {
 				}
 				// Also set it as a direct property for immediate access
 				$user->description = $translated_value;
-				error_log('XF Translator: Modified user ' . $user_id . ' description to translated version (length: ' . strlen($translated_value) . ')');
+				// Removed excessive debug logging
 			}
 		}
 	}
@@ -4996,7 +4877,7 @@ class Xf_Translator_Public {
 		$home_template = locate_template(array('page-home.php'));
 		if ($home_template) {
 			if (defined('WP_DEBUG') && WP_DEBUG) {
-				error_log('XF Translator DEBUG: Forcing homepage template: ' . $home_template);
+				// Removed excessive debug logging
 			}
 			return $home_template;
 		}
@@ -5027,7 +4908,7 @@ class Xf_Translator_Public {
 					$template_path = locate_template(array($page_template));
 					if ($template_path) {
 						if (defined('WP_DEBUG') && WP_DEBUG) {
-							error_log('XF Translator DEBUG: Using translated front page template: ' . $template_path);
+							// Removed excessive debug logging
 						}
 						return $template_path;
 					}

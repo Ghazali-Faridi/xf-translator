@@ -1568,22 +1568,22 @@ class Xf_Translator_Admin {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
         
-        // Calculate the cutoff time (5 minutes ago)
+        // Calculate the cutoff time (5 minutes in processing = updated more than 5 minutes ago)
         $cutoff_time = date('Y-m-d H:i:s', strtotime('-5 minutes'));
         
-        // Find all processing entries older than 5 minutes
+        // Find all processing entries that have been in processing for more than 5 minutes (by updated time)
         $stuck_entries = $wpdb->get_results($wpdb->prepare(
-            "SELECT id, parent_post_id, lng, type, created 
+            "SELECT id, parent_post_id, lng, type, updated 
              FROM $table_name 
              WHERE status = 'processing' 
-             AND created <= %s
+             AND updated <= %s
              ORDER BY id ASC",
             $cutoff_time
         ), ARRAY_A);
         
         if (empty($stuck_entries)) {
             $this->add_notice(
-                __('No stuck processing jobs found. All processing jobs are less than 5 minutes old.', 'xf-translator'),
+                __('No stuck processing jobs found. All processing jobs have been in progress for less than 5 minutes.', 'xf-translator'),
                 'info'
             );
             return;
@@ -3744,19 +3744,23 @@ class Xf_Translator_Admin {
         }
         
         try {
-            error_log('XF Translator: Creating translation processor instance');
             $translation_processor = new Xf_Translator_Processor();
-            error_log('XF Translator: Translation processor created successfully');
         } catch (Exception $e) {
-            error_log('XF Translator: Exception creating processor: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('Exception creating translation processor: ' . $e->getMessage());
+            }
             wp_send_json_error(array('message' => 'Failed to initialize translation processor: ' . $e->getMessage()));
             return;
         } catch (Error $e) {
-            error_log('XF Translator: Error creating processor: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('Error creating translation processor: ' . $e->getMessage());
+            }
             wp_send_json_error(array('message' => 'Failed to initialize translation processor: ' . $e->getMessage()));
             return;
         } catch (Throwable $e) {
-            error_log('XF Translator: Throwable creating processor: ' . $e->getMessage() . ' | ' . $e->getTraceAsString());
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error('Throwable creating translation processor: ' . $e->getMessage());
+            }
             wp_send_json_error(array('message' => 'Failed to initialize translation processor: ' . $e->getMessage()));
             return;
         }
@@ -3788,7 +3792,9 @@ class Xf_Translator_Admin {
                         );
                     } else {
                         $error_msg = isset($translation_result['error']) ? $translation_result['error'] : 'Translation failed';
-                        error_log("XF Translator: Translation failed for field {$meta_key}, user {$user->ID}: {$error_msg}");
+                        if (class_exists('Xf_Translator_Logger')) {
+                            Xf_Translator_Logger::error("Translation failed for field {$meta_key}, user {$user->ID}: {$error_msg}");
+                        }
                         $user_results[] = array(
                             'field' => $meta_key,
                             'field_label' => $this->get_meta_field_label($meta_key, 'user'),
@@ -3799,7 +3805,9 @@ class Xf_Translator_Admin {
                         );
                     }
                 } catch (Exception $e) {
-                    error_log("XF Translator: Exception translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    if (class_exists('Xf_Translator_Logger')) {
+                        Xf_Translator_Logger::error("Exception translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    }
                     $user_results[] = array(
                         'field' => $meta_key,
                         'field_label' => $this->get_meta_field_label($meta_key, 'user'),
@@ -3809,7 +3817,9 @@ class Xf_Translator_Admin {
                         'error' => 'Exception: ' . $e->getMessage()
                     );
                 } catch (Error $e) {
-                    error_log("XF Translator: Error translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    if (class_exists('Xf_Translator_Logger')) {
+                        Xf_Translator_Logger::error("Error translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    }
                     $user_results[] = array(
                         'field' => $meta_key,
                         'field_label' => $this->get_meta_field_label($meta_key, 'user'),
@@ -3819,7 +3829,9 @@ class Xf_Translator_Admin {
                         'error' => 'Error: ' . $e->getMessage()
                     );
                 } catch (Throwable $e) {
-                    error_log("XF Translator: Throwable translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    if (class_exists('Xf_Translator_Logger')) {
+                        Xf_Translator_Logger::error("Throwable translating field {$meta_key}, user {$user->ID}: " . $e->getMessage());
+                    }
                     $user_results[] = array(
                         'field' => $meta_key,
                         'field_label' => $this->get_meta_field_label($meta_key, 'user'),
@@ -5571,7 +5583,7 @@ class Xf_Translator_Admin {
             
             if ($original_post_id) {
                 // This is a translated post, get the desired slug from meta
-                $desired_slug = get_post_meta($post_ID, '_xf_translator_desired_slug', true);
+                $desired_slug = get_post_meta($post_id, '_xf_translator_desired_slug', true);
                 if (empty($desired_slug)) {
                     // Fallback: get slug from original post
                     $original_post = get_post($original_post_id);
@@ -6051,7 +6063,7 @@ class Xf_Translator_Admin {
         $parent_value = get_field($parent_field, $post_id);
         
         if ($parent_value === null || $parent_value === false) {
-            error_log('XF Translator: Parent field "' . $parent_field . '" not found for nested field "' . $field_path . '" in post ID: ' . $post_id);
+            // error_log('XF Translator: Parent field "' . $parent_field . '" not found for nested field "' . $field_path . '" in post ID: ' . $post_id);
             return null;
         }
         
@@ -6123,7 +6135,7 @@ class Xf_Translator_Admin {
         $parent_field_key = ($parent_field_obj && isset($parent_field_obj['key'])) ? $parent_field_obj['key'] : $parent_field;
         
         if ($parent_value === null || $parent_value === false) {
-            error_log('XF Translator: Cannot update nested field "' . $field_path . '" - parent field not found in post ID: ' . $post_id);
+            // error_log('XF Translator: Cannot update nested field "' . $field_path . '" - parent field not found in post ID: ' . $post_id);
             return false;
         }
         
@@ -7655,20 +7667,35 @@ class Xf_Translator_Admin {
             }
         } else {
             // For regular page loads, check screen and GET parameter
-            $screen = get_current_screen();
-            if ($screen && in_array($screen->base, array('post', 'post-new'))) {
+            // Check if get_current_screen() is available (not available during init hook)
+            if (function_exists('get_current_screen')) {
+                $screen = get_current_screen();
+                if ($screen && in_array($screen->base, array('post', 'post-new'))) {
+                    if (isset($_GET['post'])) {
+                        $post_id = intval($_GET['post']);
+                    } elseif ($screen->base === 'post' && isset($GLOBALS['post'])) {
+                        $post_id = $GLOBALS['post']->ID;
+                    }
+                }
+            } else {
+                // get_current_screen() not available yet (e.g., during init hook)
+                // Try to get post ID from GET parameter
                 if (isset($_GET['post'])) {
                     $post_id = intval($_GET['post']);
-                } elseif ($screen->base === 'post' && isset($GLOBALS['post'])) {
-                    $post_id = $GLOBALS['post']->ID;
                 }
             }
         }
         
         // If no post ID found and not a new post screen, don't filter
         if (!$post_id) {
-            $screen = get_current_screen();
-            if (!$screen || $screen->base !== 'post-new') {
+            // Check if get_current_screen() is available before using it
+            if (function_exists('get_current_screen')) {
+                $screen = get_current_screen();
+                if (!$screen || $screen->base !== 'post-new') {
+                    return $terms;
+                }
+            } else {
+                // If get_current_screen() not available, don't filter (safer default)
                 return $terms;
             }
             // For new posts, default to showing only English categories (no language)

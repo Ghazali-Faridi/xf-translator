@@ -62,71 +62,122 @@ class Xf_Translator_Processor
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
 
-        // DEBUG: Log function entry
-        error_log('XF Translator DEBUG: process_next_translation called with type: ' . ($type ?: 'empty (all types)'));
+        // Start output buffering to prevent 502 Bad Gateway errors during long operations
+        // This keeps the HTTP connection alive by sending periodic data
+        if (!ob_get_level()) {
+            ob_start();
+        }
         
+        // Send initial keep-alive data to prevent connection timeout
+        if (ob_get_level()) {
+            echo str_repeat(' ', 1024); // Send 1KB of whitespace
+            ob_flush();
+            flush();
+        }
+
+        // Ensure DB connection is valid at the start (may have been idle for a while)
+        $this->db_reconnect_if_needed();
+
+        // Execution window: reclaim jobs stuck in 'processing' beyond max_runtime (abandoned/crashed)
+        $max_runtime_minutes = (int) $this->settings->get('translation_job_max_runtime_minutes', 15);
+        if ($max_runtime_minutes > 0) {
+            $reclaim_before = date('Y-m-d H:i:s', strtotime("-{$max_runtime_minutes} minutes"));
+            $wpdb->query($wpdb->prepare(
+                "UPDATE $table_name SET status = 'pending', error_message = NULL WHERE status = 'processing' AND updated < %s",
+                $reclaim_before
+            ));
+        }
+
+        // Bounded parallelism: enforce global limit for ALL types (NEW, OLD, EDIT)
+        $max_concurrent_processing = (int) $this->settings->get('max_concurrent_processing', 20);
+        $current_processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'processing'");
+        if ($current_processing_count >= $max_concurrent_processing) {
+            $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
+            return false;
+        }
+
         // Get processing delay setting (only applies to NEW type entries)
         $processing_delay_minutes = $this->settings->get('processing_delay_minutes', 0);
-        
-        // Build query with optional type filter
-        $query = "SELECT * FROM $table_name 
-                  WHERE status = 'pending'";
 
-        if (!empty($type)) {
-            $query .= $wpdb->prepare(" AND type = %s", $type);
+        // Atomic job claiming: select and mark in progress in one transaction
+        $claimed_id = null;
+        $wpdb->query('START TRANSACTION');
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        try {
+            $select_where = "status = 'pending'";
+            $select_params = array();
+            if (!empty($type)) {
+                $select_where .= " AND type = %s";
+                $select_params[] = $type;
+            }
+            if (($type === 'NEW' || empty($type)) && $processing_delay_minutes > 0) {
+                $min_created_time = date('Y-m-d H:i:s', strtotime("-{$processing_delay_minutes} minutes"));
+                $select_where .= " AND created <= %s";
+                $select_params[] = $min_created_time;
+            }
+            $select_sql = "SELECT id FROM $table_name WHERE $select_where ORDER BY id DESC LIMIT 1 FOR UPDATE";
+            $ids = $select_params ? $wpdb->get_col($wpdb->prepare($select_sql, $select_params)) : $wpdb->get_col($select_sql);
+            if (!empty($ids)) {
+                $claimed_id = (int) $ids[0];
+                $rows_updated = $wpdb->update(
+                    $table_name,
+                    array('status' => 'processing', 'updated' => current_time('mysql')),
+                    array('id' => $claimed_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                if ($rows_updated !== 1) {
+                    $claimed_id = null;
+                }
+            }
+            $wpdb->query('COMMIT');
+        } catch (Exception $e) {
+            $wpdb->query('ROLLBACK');
+            $claimed_id = null;
+        } finally {
+            error_reporting($old_error_reporting);
         }
-        
-        // Apply delay check for NEW type entries only
-        // Only process entries that are at least X minutes old
-        if (($type === 'NEW' || empty($type)) && $processing_delay_minutes > 0) {
-            // Calculate the minimum created time (current time minus delay minutes)
-            $min_created_time = date('Y-m-d H:i:s', strtotime("-{$processing_delay_minutes} minutes"));
-            $query .= $wpdb->prepare(" AND created <= %s", $min_created_time);
-        }
 
-        $query .= " ORDER BY id DESC LIMIT 1";
-
-        // DEBUG: Log the query being executed
-        error_log('XF Translator DEBUG: Executing queue query: ' . $query);
-
-        // Get the latest pending entry
-        $queue_entry = $wpdb->get_row($query, ARRAY_A);
-
-        if (!$queue_entry) {
+        if ($claimed_id === null) {
             if (!empty($type)) {
                 $this->last_error = "No pending entries found in queue with type '{$type}'";
-                // If delay is set and we're looking for NEW entries, mention it might be due to delay
                 if (($type === 'NEW' || empty($type)) && $processing_delay_minutes > 0) {
                     $this->last_error .= " (or entries are not yet {$processing_delay_minutes} minutes old)";
                 }
             } else {
                 $this->last_error = 'No pending entries found in queue';
             }
-            error_log('XF Translator DEBUG: No queue entry found. Error: ' . $this->last_error);
-            return false; // No pending entries
+            return false;
         }
-        
-        // DEBUG: Log found queue entry
-        error_log('XF Translator DEBUG: Found queue entry. ID: ' . $queue_entry['id'] . ', Type: ' . ($queue_entry['type'] ?? 'N/A') . ', Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Status: ' . $queue_entry['status']);
+
+        $queue_entry = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE id = %d", $claimed_id), ARRAY_A);
+        if (!$queue_entry) {
+            $this->last_error = 'Claimed queue entry not found.';
+            return false;
+        }
 
         // SAFETY: Circuit breaker - Check if this entry has failed too many times
-        // Prevent infinite retry loops that could cause site slowdowns
-        $max_failures = 5; // Maximum number of failures before giving up
-        $failure_check_time = date('Y-m-d H:i:s', strtotime('-1 hour')); // Check failures in last hour
-        
-        $failure_count = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->prefix}xf_translate_queue 
-            WHERE parent_post_id = %d 
-            AND lng = %s 
-            AND status = 'failed' 
-            AND updated >= %s",
-            $queue_entry['parent_post_id'],
-            $queue_entry['lng'],
-            $failure_check_time
-        ));
-        
+        $max_failures = 5;
+        $failure_check_time = date('Y-m-d H:i:s', strtotime('-1 hour'));
+        $this->db_reconnect_if_needed();
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        try {
+            $failure_count = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->prefix}xf_translate_queue 
+                WHERE parent_post_id = %d 
+                AND lng = %s 
+                AND status = 'failed' 
+                AND updated >= %s",
+                $queue_entry['parent_post_id'],
+                $queue_entry['lng'],
+                $failure_check_time
+            ));
+        } finally {
+            error_reporting($old_error_reporting);
+        }
         if ($failure_count >= $max_failures) {
-            // Too many failures - mark as permanently failed and skip
             $wpdb->update(
                 $table_name,
                 array(
@@ -137,53 +188,9 @@ class Xf_Translator_Processor
                 array('%s', '%s'),
                 array('%d')
             );
-            
             $this->last_error = "Circuit breaker: Entry #{$queue_entry['id']} has failed {$failure_count} times. Skipping to prevent site slowdown.";
-            if (class_exists('Xf_Translator_Logger')) {
-                Xf_Translator_Logger::warning($this->last_error);
-            } else {
-                error_log('XF Translator: ' . $this->last_error);
-            }
             return false;
         }
-
-        // SAFETY: Limit concurrent processing to prevent resource exhaustion
-        // Get max concurrent processing limit from settings (default: 20)
-        // NOTE: This limit only applies to OLD type posts, not NEW posts
-        $max_concurrent_processing = $this->settings->get('max_concurrent_processing', 20);
-
-        // Only check concurrent limit for OLD type posts
-        if ($type === 'OLD') {
-            $current_processing_count = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT COUNT(*) FROM $table_name WHERE status = 'processing' AND type = %s",
-                    'OLD'
-                )
-            );
-
-            if ($current_processing_count >= $max_concurrent_processing) {
-                // Too many items already processing - skip this one for now
-                $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
-                if (class_exists('Xf_Translator_Logger')) {
-                    Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
-                } else {
-                    error_log("XF Translator: Skipping queue entry #{$queue_entry['id']} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
-                }
-                return false; // Leave as pending, will be picked up later
-            }
-        }
-
-        // Update status to processing (also update 'updated' field to track when status changed)
-        $wpdb->update(
-            $table_name,
-            array(
-                'status' => 'processing',
-                'updated' => current_time('mysql')
-            ),
-            array('id' => $queue_entry['id']),
-            array('%s', '%s'),
-            array('%d')
-        );
 
         $post_id = intval($queue_entry['parent_post_id']);
         $target_language_name = $queue_entry['lng']; // This is now the language name
@@ -201,17 +208,22 @@ class Xf_Translator_Processor
         if (empty($target_language_prefix)) {
             $this->last_error = "Language prefix not found for language name: {$target_language_name}";
             error_log('XF Translator Error: ' . $this->last_error);
-            // Update status to failed with error message
-            $wpdb->update(
-                $table_name,
-                array(
-                    'status' => 'failed',
-                    'error_message' => $this->last_error
-                ),
-                array('id' => $queue_entry['id']),
-                array('%s', '%s'),
-                array('%d')
-            );
+            $old_error_reporting = error_reporting();
+            error_reporting(0);
+            try {
+                $wpdb->update(
+                    $table_name,
+                    array(
+                        'status' => 'failed',
+                        'error_message' => $this->last_error
+                    ),
+                    array('id' => $queue_entry['id'], 'status' => 'processing'),
+                    array('%s', '%s'),
+                    array('%d', '%s')
+                );
+            } finally {
+                error_reporting($old_error_reporting);
+            }
             return false;
         }
 
@@ -220,22 +232,28 @@ class Xf_Translator_Processor
             return $this->process_edit_translation($queue_entry);
         }
 
+        // Ensure DB connection is valid before getting post data (ACF field extraction can take time)
+        $this->db_reconnect_if_needed();
+
         // Get post data
         $post_data = $this->get_post_data($post_id);
+
+        // Ensure DB connection is valid after getting post data (ACF processing may have taken time)
+        $this->db_reconnect_if_needed();
 
         if (!$post_data) {
             $this->last_error = "Post data not found for post ID: {$post_id}";
             error_log('XF Translator Error: ' . $this->last_error);
-            // Update status to failed with error message
+            // Update status to failed with error message (only if still in progress)
             $wpdb->update(
                 $table_name,
                 array(
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -249,29 +267,38 @@ class Xf_Translator_Processor
         // Pass prompt_data for chunking support
         $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id, $prompt_data);
 
-        // DIAGNOSTIC: Log API call result
-        error_log('XF Translator DEBUG: API call completed. Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Result: ' . ($translation_result === false ? 'FALSE' : 'SUCCESS'));
-        if ($translation_result !== false) {
-            error_log('XF Translator DEBUG: API response length: ' . strlen($translation_result));
-            error_log('XF Translator DEBUG: API response preview (first 1000 chars): ' . substr($translation_result, 0, 1000));
-            error_log('XF Translator DEBUG: About to parse response for Queue ID: ' . $queue_entry['id']);
+        // Flush output buffer after long API call to keep connection alive
+        if (ob_get_level()) {
+            echo str_repeat(' ', 512); // Send 512 bytes of whitespace
+            ob_flush();
+            flush();
         }
+
+        // Ensure DB connection is valid after long API call
+        $this->db_reconnect_if_needed();
 
         if ($translation_result === false) {
             // Get the detailed error from the API call
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
             error_log('XF Translator Error: ' . $detailed_error);
             // Update status to failed with error message
-            $wpdb->update(
-                $table_name,
-                array(
-                    'status' => 'failed',
-                    'error_message' => $detailed_error
-                ),
-                array('id' => $queue_entry['id']),
-                array('%s', '%s'),
-                array('%d')
-            );
+            // Suppress "Packets out of order" warnings during $wpdb->update() call
+            $old_error_reporting = error_reporting();
+            error_reporting(0);
+            try {
+                $wpdb->update(
+                    $table_name,
+                    array(
+                        'status' => 'failed',
+                        'error_message' => $detailed_error
+                    ),
+                    array('id' => $queue_entry['id'], 'status' => 'processing'),
+                    array('%s', '%s'),
+                    array('%d', '%s')
+                );
+            } finally {
+                error_reporting($old_error_reporting);
+            }
             return false;
         }
 
@@ -290,88 +317,66 @@ class Xf_Translator_Processor
         if (!$parsed_translation) {
             $this->last_error = "Failed to parse translation response. Response format may be incorrect.";
             error_log('XF Translator Error: ' . $this->last_error);
-            error_log('XF Translator: Full translation response length: ' . strlen($translation_result));
-            error_log('XF Translator: Translation response (first 1000 chars): ' . substr($translation_result, 0, 1000));
-            error_log('XF Translator: Original post data fields: ' . implode(', ', array_keys($post_data)));
-
-            // Save the raw response for manual inspection
-            update_post_meta($post_id, '_xf_translator_raw_response_' . $queue_entry['id'], $translation_result);
+            
+            // Log parsing failure to file (minimal)
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error(sprintf(
+                    'Translation parsing failed - Post ID: %d, Queue ID: %d, Response size: %d bytes',
+                    $post_id,
+                    $queue_entry['id'],
+                    strlen($translation_result)
+                ));
+            }
 
             // Update status to failed with error message
+            // Suppress "Packets out of order" warnings during $wpdb->update() call
+            $old_error_reporting = error_reporting();
+            error_reporting(0);
+            try {
+                $wpdb->update(
+                    $table_name,
+                    array(
+                        'status' => 'failed',
+                        'error_message' => $this->last_error
+                    ),
+                    array('id' => $queue_entry['id'], 'status' => 'processing'),
+                    array('%s', '%s'),
+                    array('%d', '%s')
+                );
+            } finally {
+                error_reporting($old_error_reporting);
+            }
+            return false;
+        }
+
+        // Ensure DB connection is valid before post creation
+        $this->db_reconnect_if_needed();
+
+        // Create translated post (pass language name)
+        $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
+
+        if ($translated_post_id === false) {
+            $this->last_error = "Failed to create translated post. Check WordPress permissions and post data.";
+            error_log('XF Translator Error: ' . $this->last_error);
+            
+            // Update status to failed with error message (only if still in progress)
             $wpdb->update(
                 $table_name,
                 array(
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
 
-        // DEBUG: Log successful translation parsing
-        error_log('XF Translator DEBUG: Translation parsed successfully for Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Language: ' . $target_language_name);
-        error_log('XF Translator DEBUG: Parsed translation contains fields: ' . implode(', ', array_keys($parsed_translation)));
-        if (isset($parsed_translation['title'])) {
-            error_log('XF Translator DEBUG: Translated title length: ' . strlen($parsed_translation['title']));
-        }
-        if (isset($parsed_translation['content'])) {
-            error_log('XF Translator DEBUG: Translated content length: ' . strlen($parsed_translation['content']));
-        }
-
-        // DIAGNOSTIC: Log parsed translation result before post creation
-        error_log('XF Translator DEBUG: Parsed translation result: ' . ($parsed_translation ? 'SUCCESS - Fields: ' . implode(', ', array_keys($parsed_translation)) : 'FAILED - parse_translation_response returned false/empty'));
-        if ($parsed_translation && !empty($parsed_translation)) {
-            error_log('XF Translator DEBUG: Parsed translation field count: ' . count($parsed_translation));
-            foreach ($parsed_translation as $field => $value) {
-                error_log('XF Translator DEBUG: Field "' . $field . '" length: ' . strlen($value) . ' chars');
-            }
-        }
-
-        // Create translated post (pass language name)
-        error_log('XF Translator DEBUG: About to call create_translated_post for Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Language: ' . $target_language_name);
-        $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
-        error_log('XF Translator DEBUG: create_translated_post returned. Queue ID: ' . $queue_entry['id'] . ', Returned value: ' . ($translated_post_id === false ? 'FALSE' : 'Post ID: ' . $translated_post_id));
-
-        if ($translated_post_id === false) {
-            $this->last_error = "Failed to create translated post. Check WordPress permissions and post data.";
-            error_log('XF Translator Error: ' . $this->last_error);
-            error_log('XF Translator DEBUG: Post creation failed for Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Language: ' . $target_language_name);
-            error_log('XF Translator DEBUG: Last error from create_translated_post: ' . $this->last_error);
-            
-            // Check if post was actually created despite returning false
-            $check_existing = get_post_meta($post_id, '_xf_translator_translated_post_' . $target_language_name, true);
-            if ($check_existing) {
-                error_log('XF Translator DEBUG: WARNING - Post creation returned false BUT translated post meta exists! Post ID: ' . $check_existing);
-                $check_post = get_post($check_existing);
-                if ($check_post) {
-                    error_log('XF Translator DEBUG: WARNING - Post actually exists! Post ID: ' . $check_existing . ', Status: ' . $check_post->post_status . ', Title: ' . $check_post->post_title);
-                }
-            }
-            
-            // Update status to failed with error message
-            $update_result = $wpdb->update(
-                $table_name,
-                array(
-                    'status' => 'failed',
-                    'error_message' => $this->last_error
-                ),
-                array('id' => $queue_entry['id']),
-                array('%s', '%s'),
-                array('%d')
-            );
-            error_log('XF Translator DEBUG: Updated queue status to failed. Queue ID: ' . $queue_entry['id'] . ', Update result: ' . ($update_result !== false ? 'Success (rows affected: ' . $update_result . ')' : 'FAILED - ' . $wpdb->last_error));
-            return false;
-        }
-
-        // DEBUG: Verify post was actually created
-        error_log('XF Translator DEBUG: Post creation succeeded. Queue ID: ' . $queue_entry['id'] . ', Translated Post ID: ' . $translated_post_id);
+        // Verify post was actually created
         $verify_post = get_post($translated_post_id);
         if (!$verify_post) {
-            error_log('XF Translator DEBUG: CRITICAL ERROR - create_translated_post returned Post ID ' . $translated_post_id . ' but get_post() returns NULL!');
-            error_log('XF Translator DEBUG: This means the post was not actually created despite returning a post ID.');
+            error_log('XF Translator Error: Post creation returned ID ' . $translated_post_id . ' but post does not exist in database.');
             $this->last_error = "Post creation returned ID but post does not exist in database.";
             $wpdb->update(
                 $table_name,
@@ -379,51 +384,36 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
-        } else {
-            error_log('XF Translator DEBUG: Post verification successful. Post ID: ' . $translated_post_id . ', Status: ' . $verify_post->post_status . ', Title: ' . $verify_post->post_title);
         }
 
-        // Update status to completed and store translated post ID
-        error_log('XF Translator DEBUG: About to update queue status to completed. Queue ID: ' . $queue_entry['id'] . ', Translated Post ID: ' . $translated_post_id);
-        $update_result = $wpdb->update(
-            $table_name,
-            array(
-                'status' => 'completed',
-                'translated_post_id' => $translated_post_id
-            ),
-            array('id' => $queue_entry['id']),
-            array('%s', '%d'),
-            array('%d')
-        );
-        
+        // Ensure DB connection is valid before final queue update
+        $this->db_reconnect_if_needed();
+
+        // Update status to completed and store translated post ID (only if still in progress - safe completion)
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        try {
+            $update_result = $wpdb->update(
+                $table_name,
+                array(
+                    'status' => 'completed',
+                    'translated_post_id' => $translated_post_id
+                ),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
+                array('%s', '%d'),
+                array('%d', '%s')
+            );
+        } finally {
+            error_reporting($old_error_reporting);
+        }
         if ($update_result === false) {
-            error_log('XF Translator DEBUG: CRITICAL ERROR - Failed to update queue status to completed! Queue ID: ' . $queue_entry['id']);
-            error_log('XF Translator DEBUG: Database error: ' . $wpdb->last_error);
-            error_log('XF Translator DEBUG: Last query: ' . $wpdb->last_query);
-        } else {
-            error_log('XF Translator DEBUG: Successfully updated queue status to completed. Queue ID: ' . $queue_entry['id'] . ', Rows affected: ' . $update_result);
-            
-            // Verify the update
-            $verify_queue = $wpdb->get_row($wpdb->prepare("SELECT status, translated_post_id FROM $table_name WHERE id = %d", $queue_entry['id']), ARRAY_A);
-            if ($verify_queue) {
-                error_log('XF Translator DEBUG: Queue verification - Status: ' . $verify_queue['status'] . ', Translated Post ID: ' . $verify_queue['translated_post_id']);
-                if ($verify_queue['status'] !== 'completed') {
-                    error_log('XF Translator DEBUG: WARNING - Queue status is NOT completed after update! Current status: ' . $verify_queue['status']);
-                }
-                if ($verify_queue['translated_post_id'] != $translated_post_id) {
-                    error_log('XF Translator DEBUG: WARNING - Queue translated_post_id mismatch! Expected: ' . $translated_post_id . ', Actual: ' . $verify_queue['translated_post_id']);
-                }
-            } else {
-                error_log('XF Translator DEBUG: CRITICAL ERROR - Cannot verify queue entry after update! Queue ID: ' . $queue_entry['id']);
-            }
+            error_log('XF Translator Error: Failed to update queue status to completed. Queue ID: ' . $queue_entry['id'] . ', Database error: ' . $wpdb->last_error);
         }
-
-        error_log('XF Translator DEBUG: Translation processing completed successfully. Queue ID: ' . $queue_entry['id'] . ', Post ID: ' . $post_id . ', Translated Post ID: ' . $translated_post_id);
 
         return array(
             'queue_id' => $queue_entry['id'],
@@ -477,7 +467,14 @@ class Xf_Translator_Processor
 
         // Get selected meta fields
         if (!empty($translatable_meta_fields)) {
+            $meta_field_index = 0;
             foreach ($translatable_meta_fields as $meta_key) {
+                // Ensure DB connection is valid periodically during meta field retrieval
+                if ($meta_field_index % 5 === 0) {
+                    $this->db_reconnect_if_needed();
+                }
+                $meta_field_index++;
+                
                 $value = get_post_meta($post_id, $meta_key, true);
 
                 // Only include if value is not empty and is a string/numeric
@@ -492,14 +489,27 @@ class Xf_Translator_Processor
             $translatable_acf_fields = $this->settings->get_translatable_acf_fields();
 
             if (!empty($translatable_acf_fields)) {
+                $acf_field_index = 0;
                 foreach ($translatable_acf_fields as $acf_field_key) {
+                    // Ensure DB connection is valid before each ACF field retrieval
+                    $this->db_reconnect_if_needed();
+                    $acf_field_index++;
+                    
                     // Check if this is a nested field (contains '/')
                     if (strpos($acf_field_key, '/') !== false) {
                         // Use helper method for nested/repeated fields
+                        // Connection check is inside get_nested_acf_field_value()
                         $acf_value = $this->get_nested_acf_field_value($acf_field_key, $post_id);
                     } else {
                         // Simple field - use get_field directly
-                        $acf_value = get_field($acf_field_key, $post_id);
+                        // Suppress "Packets out of order" warnings during get_field() call
+                        $old_error_reporting = error_reporting();
+                        error_reporting(0); // Suppress all errors during ACF field retrieval
+                        try {
+                            $acf_value = get_field($acf_field_key, $post_id);
+                        } finally {
+                            error_reporting($old_error_reporting);
+                        }
                     }
 
                     // Only include ACF fields that contain text content (string/numeric)
@@ -523,6 +533,9 @@ class Xf_Translator_Processor
      * @return mixed Field value, or null if not found. For repeaters, returns combined string with row separator.
      */
     private function get_nested_acf_field_value($field_path, $post_id) {
+        // Ensure DB connection is valid before ACF field retrieval (can take time)
+        $this->db_reconnect_if_needed();
+        
         // Check if path contains a separator (nested field)
         if (strpos($field_path, '/') === false) {
             // Simple field, use get_field directly
@@ -539,16 +552,30 @@ class Xf_Translator_Processor
         $parent_field = $path_parts[0];
         $sub_field = $path_parts[1];
         
-        // Get parent field value
-        $parent_value = get_field($parent_field, $post_id);
+        // Ensure DB connection is valid before getting parent field (ACF queries can take time)
+        $this->db_reconnect_if_needed();
+        
+        // Suppress "Packets out of order" warnings during get_field() call
+        $old_error_reporting = error_reporting();
+        error_reporting(0); // Suppress all errors during ACF field retrieval
+        try {
+            // Get parent field value
+            $parent_value = get_field($parent_field, $post_id);
+        } finally {
+            error_reporting($old_error_reporting);
+        }
         
         if ($parent_value === null || $parent_value === false) {
-            error_log('XF Translator: Parent field "' . $parent_field . '" not found for nested field "' . $field_path . '" in post ID: ' . $post_id);
+            // error_log('XF Translator: Parent field "' . $parent_field . '" not found for nested field "' . $field_path . '" in post ID: ' . $post_id);
             return null;
         }
         
         // Check if parent is a repeater (array of rows)
         if (is_array($parent_value) && isset($parent_value[0]) && is_array($parent_value[0])) {
+            // Ensure DB connection is valid before starting repeater extraction loop
+            // (get_field() may have taken time, connection could be stale)
+            $this->db_reconnect_if_needed();
+            
             // It's a repeater - extract sub-field from all rows
             $values = array();
             $row_count = 0;
@@ -564,7 +591,6 @@ class Xf_Translator_Processor
             }
             
             if (empty($values)) {
-                error_log('XF Translator: No translatable values found in repeater field "' . $field_path . '" for post ID: ' . $post_id);
                 return null;
             }
             
@@ -574,7 +600,17 @@ class Xf_Translator_Processor
             $separator = '|||XF_ROW_SEP_' . $row_count_for_sep . '|||';
             $combined = $separator . implode($separator, $values) . $separator;
             
-            error_log('XF Translator: Extracted ' . $row_count . ' row(s) from repeater field "' . $field_path . '" for post ID: ' . $post_id);
+            // CRITICAL: Ensure DB connection is valid immediately after extracting repeater field data
+            // The extraction may have taken time, and the connection could be stale
+            // Suppress any errors during reconnection to prevent "Packets out of order" from appearing in logs
+            $old_error_reporting = error_reporting();
+            error_reporting(0); // Suppress all errors during reconnection
+            try {
+                $this->db_reconnect_if_needed();
+            } finally {
+                error_reporting($old_error_reporting);
+            }
+            
             return $combined;
         } elseif (is_array($parent_value) && isset($parent_value[$sub_field])) {
             // It's a group field - single value
@@ -584,7 +620,6 @@ class Xf_Translator_Processor
             }
             return null;
         } else {
-            error_log('XF Translator: Sub-field "' . $sub_field . '" not found in parent field "' . $parent_field . '" for nested field "' . $field_path . '" in post ID: ' . $post_id);
             return null;
         }
     }
@@ -598,10 +633,20 @@ class Xf_Translator_Processor
      * @return bool Success
      */
     private function update_nested_acf_field_value($field_path, $translated_value, $post_id) {
+        // Ensure DB connection is valid before nested ACF field update
+        $this->db_reconnect_if_needed();
+        
         // Check if path contains a separator (nested field)
         if (strpos($field_path, '/') === false) {
             // Simple field, use update_field directly
-            return update_field($field_path, $translated_value, $post_id);
+            // Suppress "Packets out of order" warnings during update_field() call
+            $old_error_reporting = error_reporting();
+            error_reporting(0); // Suppress all errors during ACF field update
+            try {
+                return update_field($field_path, $translated_value, $post_id);
+            } finally {
+                error_reporting($old_error_reporting);
+            }
         }
         
         // Split the path
@@ -609,15 +654,25 @@ class Xf_Translator_Processor
         $parent_field = $path_parts[0];
         $sub_field = $path_parts[1];
         
-        // Get current parent field value
-        $parent_value = get_field($parent_field, $post_id);
+        // Ensure DB connection is valid before getting parent field
+        $this->db_reconnect_if_needed();
+        
+        // Suppress "Packets out of order" warnings during get_field() call
+        $old_error_reporting = error_reporting();
+        error_reporting(0); // Suppress all errors during ACF field retrieval
+        try {
+            // Get current parent field value
+            $parent_value = get_field($parent_field, $post_id);
+        } finally {
+            error_reporting($old_error_reporting);
+        }
 
         // Try to get the ACF field object (to use field keys when updating)
         $parent_field_obj = function_exists('acf_get_field') ? acf_get_field($parent_field) : null;
         $parent_field_key = ($parent_field_obj && isset($parent_field_obj['key'])) ? $parent_field_obj['key'] : $parent_field;
         
         if ($parent_value === null || $parent_value === false) {
-            error_log('XF Translator: Cannot update nested field "' . $field_path . '" - parent field not found in post ID: ' . $post_id);
+            // error_log('XF Translator: Cannot update nested field "' . $field_path . '" - parent field not found in post ID: ' . $post_id);
             return false;
         }
         
@@ -669,18 +724,39 @@ class Xf_Translator_Processor
             }
             
             if ($updated) {
-                // Use field key if available to improve ACF reliability
-                $result = update_field($parent_field_key, $parent_value, $post_id);
+                // Ensure DB connection is valid before updating repeater field
+                $this->db_reconnect_if_needed();
+                
+                // Suppress "Packets out of order" warnings during update_field() call
+                $old_error_reporting = error_reporting();
+                error_reporting(0); // Suppress all errors during ACF field update
+                try {
+                    // Use field key if available to improve ACF reliability
+                    $result = update_field($parent_field_key, $parent_value, $post_id);
+                } finally {
+                    error_reporting($old_error_reporting);
+                }
                 error_log('XF Translator: Updated ' . $rows_updated_count . ' row(s) of repeater field "' . $parent_field . '" (key: ' . $parent_field_key . ') for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
                 return $result;
             } else {
                 error_log('XF Translator: No rows updated for repeater field "' . $field_path . '" in post ID: ' . $post_id . ' - translated values count: ' . count($translated_values));
             }
         } elseif (is_array($parent_value)) {
+            // Ensure DB connection is valid before updating group field
+            $this->db_reconnect_if_needed();
+            
             // It's a group field - single value
             $parent_value[$sub_field] = $translated_value;
-            // Use field key if available
-            $result = update_field($parent_field_key, $parent_value, $post_id);
+            
+            // Suppress "Packets out of order" warnings during update_field() call
+            $old_error_reporting = error_reporting();
+            error_reporting(0); // Suppress all errors during ACF field update
+            try {
+                // Use field key if available
+                $result = update_field($parent_field_key, $parent_value, $post_id);
+            } finally {
+                error_reporting($old_error_reporting);
+            }
             error_log('XF Translator: Updated group field "' . $field_path . '" (key: ' . $parent_field_key . ') for post ID: ' . $post_id . ' - result: ' . ($result ? 'success' : 'failed'));
             return $result;
         }
@@ -1542,7 +1618,8 @@ class Xf_Translator_Processor
         }
         
         // Cap at 90 seconds to stay under Cloudflare's 100-second limit
-        $timeout = 200;
+        // CRITICAL: Use calculated timeout and cap at 90 seconds to prevent Cloudflare timeouts
+        $timeout = min($calculated_timeout, 90);
         
         // Warn if content is very large (might need chunking)
         if ($content_length > 50000) {
@@ -1551,61 +1628,27 @@ class Xf_Translator_Processor
             }
         }
 
-        // Log API request to debug.log
-        $request_log = array(
-            'type' => 'API_REQUEST',
-            'timestamp' => current_time('mysql'),
-            'endpoint' => $endpoint,
-            'model' => $model,
-            'api_type' => $is_deepseek ? 'DeepSeek' : 'OpenAI',
-            'post_id' => $post_id,
-            'queue_id' => $queue_id,
-            'target_language' => $target_language_prefix,
-            'content_length' => $content_length,
-            'timeout' => $timeout,
-            'request_body' => $body
-        );
-        
-        // Add chunk info if chunked
-        if ($is_chunked) {
-            $request_log['chunk_num'] = $chunk_num;
-            $request_log['total_chunks'] = $total_chunks;
-        }
-        // Log to plugin-specific log file
-        if (class_exists('Xf_Translator_Logger')) {
-            Xf_Translator_Logger::log_api('REQUEST', $request_log);
-        } else {
-            error_log('XF Translator API Request: ' . json_encode($request_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        }
-
-        // Save API request to post meta BEFORE making the call (so we always have the request)
-        if ($post_id && $queue_id) {
-            $api_log = array(
-                'request' => $body,
+        // Log API request to file (minimal - no request body)
+        if ($post_id && $queue_id && class_exists('Xf_Translator_Logger')) {
+            $request_log_minimal = array(
+                'request' => $body, // Only for size calculation, won't be saved
                 'endpoint' => $endpoint,
                 'model' => $model,
+                'api_type' => $is_deepseek ? 'DeepSeek' : 'OpenAI',
                 'api_key_configured' => !empty($api_key),
+                'post_id' => $post_id,
+                'queue_id' => $queue_id,
+                'target_language' => $target_language_prefix,
                 'timestamp' => current_time('mysql')
             );
-
-            // Save initial log with request
-            $log_key = '_xf_translator_api_log_' . $queue_id;
-            $log_saved = update_post_meta($post_id, $log_key, json_encode($api_log, JSON_PRETTY_PRINT));
-
-            // Debug: Log if save failed
-            if (!$log_saved) {
-                if (class_exists('Xf_Translator_Logger')) {
-                Xf_Translator_Logger::error('Failed to save API log to post meta. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id . ', Key: ' . $log_key);
-            } else {
-                error_log('XF Translator: Failed to save API log to post meta. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id . ', Key: ' . $log_key);
+            
+            // Add chunk info if chunked
+            if ($is_chunked) {
+                $request_log_minimal['chunk_num'] = $chunk_num;
+                $request_log_minimal['total_chunks'] = $total_chunks;
             }
-            } else {
-                if (class_exists('Xf_Translator_Logger')) {
-                    Xf_Translator_Logger::debug('API log saved successfully. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
-                } else {
-                    error_log('XF Translator: API log saved successfully. Post ID: ' . $post_id . ', Queue ID: ' . $queue_id);
-                }
-            }
+            
+            Xf_Translator_Logger::log_api_minimal('REQUEST', $request_log_minimal);
         }
 
         if (empty($api_key)) {
@@ -1617,12 +1660,20 @@ class Xf_Translator_Processor
                 error_log('XF Translator API Error: ' . $this->last_error);
             }
 
-            // Update log with error
-            if ($post_id && $queue_id) {
-                $api_log['error'] = $this->last_error;
-                $api_log['response_code'] = 0;
-                $api_log['response_body'] = '';
-                update_post_meta($post_id, '_xf_translator_api_log_' . $queue_id, json_encode($api_log, JSON_PRETTY_PRINT));
+            // Log error to file (minimal)
+            if ($post_id && $queue_id && class_exists('Xf_Translator_Logger')) {
+                $error_log_minimal = array(
+                    'error' => $this->last_error,
+                    'response_code' => 0,
+                    'is_error' => true,
+                    'post_id' => $post_id,
+                    'queue_id' => $queue_id,
+                    'endpoint' => $endpoint,
+                    'model' => $model,
+                    'api_type' => $is_deepseek ? 'DeepSeek' : 'OpenAI',
+                    'timestamp' => current_time('mysql')
+                );
+                Xf_Translator_Logger::log_api_minimal('RESPONSE', $error_log_minimal);
             }
 
             return false;
@@ -1640,11 +1691,6 @@ class Xf_Translator_Processor
         }
 
         // Log PHP execution time settings
-        if (class_exists('Xf_Translator_Logger')) {
-            // Xf_Translator_Logger::debug('PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds, content length: ' . number_format($content_length) . ' chars)');
-        } else {
-            error_log('XF Translator: PHP max_execution_time set to: ' . $php_time_limit . ' seconds (timeout: ' . $timeout . ' seconds)');
-        }
 
         // Make API request with retry logic for DeepSeek
         $max_retries = $is_deepseek ? 2 : 0; // Retry up to 2 times for DeepSeek only
@@ -1654,11 +1700,9 @@ class Xf_Translator_Processor
         
         for ($attempt = 0; $attempt <= $max_retries; $attempt++) {
             if ($attempt > 0) {
-                // Log retry attempt
+                // Log retry attempt only via logger
                 if (class_exists('Xf_Translator_Logger')) {
                     Xf_Translator_Logger::info("DeepSeek API retry attempt #{$attempt} for post {$post_id}, queue {$queue_id}");
-                } else {
-                    error_log("XF Translator: DeepSeek API retry attempt #{$attempt} for post {$post_id}, queue {$queue_id}");
                 }
                 
                 // Exponential backoff: wait before retrying
@@ -1786,72 +1830,26 @@ class Xf_Translator_Processor
         $response_code = wp_remote_retrieve_response_code($response);
         $response_body = is_wp_error($response) ? '' : wp_remote_retrieve_body($response);
 
-        // Log API response to debug.log
-        $response_log = array(
-            'type' => 'API_RESPONSE',
-            'timestamp' => current_time('mysql'),
-            'endpoint' => $endpoint,
-            'model' => $model,
-            'api_type' => $is_deepseek ? 'DeepSeek' : 'OpenAI',
-            'post_id' => $post_id,
-            'queue_id' => $queue_id,
-            'target_language' => $target_language_prefix,
-            'response_code' => $response_code ?: 0,
-            'response_body' => $response_body,
-            'is_error' => is_wp_error($response)
-        );
-
-        if (is_wp_error($response)) {
-            $response_log['error'] = $response->get_error_message();
-        }
-
-        // Try to decode response for better logging
-        $decoded_response = json_decode($response_body, true);
-        if ($decoded_response !== null) {
-            $response_log['response_body_parsed'] = $decoded_response;
-        }
-
-        // Log to plugin-specific log file
-        if (class_exists('Xf_Translator_Logger')) {
-            Xf_Translator_Logger::log_api('RESPONSE', $response_log);
-        } else {
-            error_log('XF Translator API Response: ' . json_encode($response_log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        }
-
-        // Update API log with response (always save, even on error)
-        if ($post_id && $queue_id) {
-            // Retrieve existing log or create new one
-            $log_key = '_xf_translator_api_log_' . $queue_id;
-            $existing_log_json = get_post_meta($post_id, $log_key, true);
-            if ($existing_log_json) {
-                $api_log = json_decode($existing_log_json, true);
-                if ($api_log === null) {
-                    // If decode failed, create new log
-                    $api_log = array(
-                        'request' => $body,
-                        'endpoint' => $endpoint,
-                        'model' => $model,
-                        'timestamp' => current_time('mysql')
-                    );
-                }
-            } else {
-                // If no existing log, create new one
-                $api_log = array(
-                    'request' => $body,
-                    'endpoint' => $endpoint,
-                    'model' => $model,
-                    'timestamp' => current_time('mysql')
-                );
-            }
-
-            $api_log['response_code'] = $response_code ?: 0;
-            $api_log['response_body'] = $response_body;
+        // Log API response to file (minimal - no response body)
+        if ($post_id && $queue_id && class_exists('Xf_Translator_Logger')) {
+            $response_log_minimal = array(
+                'response_body' => $response_body, // Only for size calculation, won't be saved
+                'timestamp' => current_time('mysql'),
+                'endpoint' => $endpoint,
+                'model' => $model,
+                'api_type' => $is_deepseek ? 'DeepSeek' : 'OpenAI',
+                'post_id' => $post_id,
+                'queue_id' => $queue_id,
+                'target_language' => $target_language_prefix,
+                'response_code' => $response_code ?: 0,
+                'is_error' => is_wp_error($response)
+            );
 
             if (is_wp_error($response)) {
-                $api_log['error'] = $response->get_error_message();
+                $response_log_minimal['error'] = $response->get_error_message();
             }
 
-            update_post_meta($post_id, $log_key, json_encode($api_log, JSON_PRETTY_PRINT));
+            Xf_Translator_Logger::log_api_minimal('RESPONSE', $response_log_minimal);
         }
 
         // Handle response
@@ -1885,9 +1883,6 @@ class Xf_Translator_Processor
                 Xf_Translator_Logger::error('Raw error: ' . $error_message . ' (Code: ' . $error_code . ', Response Code: ' . $response_code . ')');
             } else {
                 error_log('XF Translator API Error: ' . $this->last_error);
-                error_log('XF Translator: Timeout used: ' . $timeout . ' seconds, Content length: ' . $content_length . ' characters');
-                error_log('XF Translator: PHP max_execution_time: ' . $current_max_execution_time . ' seconds');
-                error_log('XF Translator: Raw error message: ' . $error_message . ' (Code: ' . $error_code . ', Response Code: ' . $response_code . ')');
             }
             return false;
         }
@@ -1913,7 +1908,6 @@ class Xf_Translator_Processor
                 Xf_Translator_Logger::error('API Response: ' . substr($response_body, 0, 1000));
             } else {
                 error_log('XF Translator API Error: ' . $this->last_error);
-                error_log('XF Translator API Response: ' . $response_body);
             }
             return false;
         }
@@ -1966,7 +1960,6 @@ class Xf_Translator_Processor
 
         $this->last_error = "Invalid API response format. No translation content found.";
         error_log('XF Translator API Error: ' . $this->last_error);
-        error_log('XF Translator API Response: ' . print_r($data, true));
         return false;
     }
 
@@ -1985,9 +1978,6 @@ class Xf_Translator_Processor
         $translation_response = str_replace(array("\r\n", "\r"), "\n", $translation_response);
         $translation_response = trim($translation_response);
 
-        // Log the raw response for debugging
-        error_log('XF Translator: Parsing translation response, length: ' . strlen($translation_response));
-        error_log('XF Translator: Response preview (first 500 chars): ' . substr($translation_response, 0, 500));
 
         // If response is empty, return false
         if (empty($translation_response)) {
@@ -2037,12 +2027,6 @@ class Xf_Translator_Processor
             $sections = preg_split('/\n\s*\n/', $translation_response, -1, PREG_SPLIT_NO_EMPTY);
         }
 
-        // Log sections found
-        error_log('XF Translator: Split into ' . count($sections) . ' sections');
-        foreach ($sections as $idx => $section) {
-            error_log('XF Translator: Section ' . $idx . ' preview (first 200 chars): ' . substr(trim($section), 0, 200));
-        }
-
         // Parse each section to find label: value pairs
         $found_fields = array();
         $found_labels = array(); // Track which labels we found and their order
@@ -2058,6 +2042,16 @@ class Xf_Translator_Processor
                 $response_label = trim($matches[1]);
                 $response_value = trim($matches[2]);
 
+                // CRITICAL FIX: Stop value extraction at the next field label pattern
+                // This prevents ACF field content from leaking into other fields (title, content, etc.)
+                // Pattern matches: "FieldName: " or "FieldName/SubField: " at start of line
+                // But exclude the current field label itself
+                if (preg_match('/\n([A-Za-z0-9_\/\s]+):\s/', $response_value, $next_field_match, PREG_OFFSET_CAPTURE)) {
+                    // Found another field label - truncate value at that point
+                    $response_value = substr($response_value, 0, $next_field_match[0][1]);
+                    $response_value = trim($response_value);
+                }
+
                 // Try to match this response label to an original field
                 $matched_field = $this->match_label_to_field($response_label, $original_labels);
 
@@ -2067,10 +2061,15 @@ class Xf_Translator_Processor
                     // Only trim leading/trailing whitespace, preserve all content including HTML
                     $response_value = trim($response_value);
 
+                    // SPECIAL CLEANUP FOR TITLE AND CONTENT: Remove ACF field patterns and separators
+                    if ($matched_field === 'title' || $matched_field === 'content') {
+                        $response_value = $this->clean_field_value($response_value, $matched_field);
+                    }
+
                     // Log for debugging HTML content
                     if ($matched_field === 'content' && strpos($response_value, '<table') !== false) {
-                        error_log('XF Translator: Found table HTML in content field, length: ' . strlen($response_value));
-                        error_log('XF Translator: Table HTML preview: ' . substr($response_value, strpos($response_value, '<table'), 200));
+                        // error_log('XF Translator: Found table HTML in content field, length: ' . strlen($response_value));
+                        // error_log('XF Translator: Table HTML preview: ' . substr($response_value, strpos($response_value, '<table'), 200));
                     }
 
                     // If we already have this field, append (might be multi-line)
@@ -2099,7 +2098,12 @@ class Xf_Translator_Processor
                 if (empty($line)) {
                     // Empty line - save current field if exists
                     if ($current_field !== null && !empty($current_value)) {
-                        $found_fields[$current_field] = trim(implode("\n", $current_value));
+                        $field_value = trim(implode("\n", $current_value));
+                        // SPECIAL CLEANUP FOR TITLE AND CONTENT: Remove ACF field patterns and separators
+                        if ($current_field === 'title' || $current_field === 'content') {
+                            $field_value = $this->clean_field_value($field_value, $current_field);
+                        }
+                        $found_fields[$current_field] = $field_value;
                         $current_field = null;
                         $current_value = array();
                     }
@@ -2117,7 +2121,12 @@ class Xf_Translator_Processor
                     if ($matched_field) {
                         // Save previous field
                         if ($current_field !== null && !empty($current_value)) {
-                            $found_fields[$current_field] = trim(implode("\n", $current_value));
+                            $field_value = trim(implode("\n", $current_value));
+                            // SPECIAL CLEANUP FOR TITLE AND CONTENT: Remove ACF field patterns and separators
+                            if ($current_field === 'title' || $current_field === 'content') {
+                                $field_value = $this->clean_field_value($field_value, $current_field);
+                            }
+                            $found_fields[$current_field] = $field_value;
                         }
 
                         // Start new field
@@ -2147,7 +2156,12 @@ class Xf_Translator_Processor
 
             // Save last field
             if ($current_field !== null && !empty($current_value)) {
-                $found_fields[$current_field] = trim(implode("\n", $current_value));
+                $field_value = trim(implode("\n", $current_value));
+                // SPECIAL CLEANUP FOR TITLE AND CONTENT: Remove ACF field patterns and separators
+                if ($current_field === 'title' || $current_field === 'content') {
+                    $field_value = $this->clean_field_value($field_value, $current_field);
+                }
+                $found_fields[$current_field] = $field_value;
             }
         }
 
@@ -2176,13 +2190,18 @@ class Xf_Translator_Processor
 
                     // Match by position if we haven't matched this field yet
                     if ($index < count($field_order) && !isset($found_fields[$field_order[$index]])) {
-                        $found_fields[$field_order[$index]] = $response_value;
+                        $field_key = $field_order[$index];
+                        // SPECIAL CLEANUP FOR TITLE AND CONTENT: Remove ACF field patterns and separators
+                        if ($field_key === 'title' || $field_key === 'content') {
+                            $response_value = $this->clean_field_value($response_value, $field_key);
+                        }
+                        $found_fields[$field_key] = $response_value;
                     }
                 }
             }
         }
 
-        // Clean up values - remove any remaining labels at the start
+        // Clean up values - remove any remaining labels at the start and end
         foreach ($found_fields as $field_key => $value) {
             // Get the original label we sent
             $original_label = isset($original_labels[$field_key]) ? $original_labels[$field_key] : '';
@@ -2204,26 +2223,18 @@ class Xf_Translator_Processor
                 }
             }
 
-            $found_fields[$field_key] = trim($value);
-
-            // Log if content field has table HTML to verify it's preserved
-            if ($field_key === 'content' && strpos($value, '<table') !== false) {
-                error_log('XF Translator: Final parsed content has table HTML, length: ' . strlen($value));
+            // SPECIAL CLEANUP FOR TITLE AND CONTENT: Remove ACF field patterns and separators
+            // This handles cases where ACF field labels appear at the end of content
+            if ($field_key === 'title' || $field_key === 'content') {
+                $value = $this->clean_field_value($value, $field_key);
             }
+
+            $found_fields[$field_key] = trim($value);
         }
 
         // Use found fields as parsed result
         $parsed = $found_fields;
 
-        // Log what fields were found
-        error_log('XF Translator: Parsed fields: ' . implode(', ', array_keys($parsed)));
-        foreach ($parsed as $field_key => $value) {
-            $preview = substr($value, 0, 200);
-            error_log('XF Translator: Field "' . $field_key . '" length: ' . strlen($value) . ', preview: ' . $preview);
-            if ($field_key === 'content' && strpos($value, '<table') !== false) {
-                error_log('XF Translator: Content field contains table HTML');
-            }
-        }
 
         // If no fields were found and we only sent one field, treat the entire response as that field
         // This handles cases where API returns just the translated text without labels
@@ -2258,6 +2269,38 @@ class Xf_Translator_Processor
 
         // No valid fields found (all were empty)
         return false;
+    }
+
+    /**
+     * Clean field value to remove ACF field patterns, separator strings, and field labels
+     * 
+     * @param string $value The field value to clean
+     * @param string $field_type The field type ('title' or 'content')
+     * @return string Cleaned value
+     */
+    private function clean_field_value($value, $field_type = '') {
+        if (empty($value)) {
+            return $value;
+        }
+        
+        // Remove ACF field label patterns from anywhere in the value (start, middle, or end)
+        // Pattern matches field names with slashes, underscores, and colons
+        // Examples: "Sbposts__content/button_label:", "sbposts__content/button_label:"
+        // Match both with and without underscores, and handle variations
+        $value = preg_replace('/\s*[A-Za-z0-9_\/]+(?:\/[A-Za-z0-9_]+)*:\s*/u', '', $value);
+        
+        // Remove separator patterns (e.g., "|||XF_ROW_SEP_6|||")
+        $value = preg_replace('/\|{3}XF_ROW_SEP_\d+\|{3}/u', '', $value);
+        
+        // Remove any remaining field path patterns without colons (e.g., "Sbposts__content/button_label")
+        // This catches cases where the colon was already removed but the field path remains
+        $value = preg_replace('/\s*[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)+\s*/u', '', $value);
+        
+        // Clean up multiple spaces and trim
+        $value = preg_replace('/\s+/u', ' ', $value);
+        $value = trim($value);
+        
+        return $value;
     }
 
     /**
@@ -2352,20 +2395,26 @@ class Xf_Translator_Processor
      */
     private function create_translated_post($original_post_id, $target_language, $translated_data, $original_data)
     {
-        error_log('XF Translator: Starting create_translated_post for post ID: ' . $original_post_id . ', Language: ' . $target_language);
-        error_log('XF Translator DEBUG: create_translated_post called with - Original Post ID: ' . $original_post_id . ', Target Language: ' . $target_language);
-        error_log('XF Translator DEBUG: Translated data keys: ' . implode(', ', array_keys($translated_data)));
+        // Start output buffering if not already started (prevents 502 errors during long post creation)
+        if (!ob_get_level()) {
+            ob_start();
+        }
+        
+        // Send initial keep-alive data
+        if (ob_get_level()) {
+            echo str_repeat(' ', 512); // Send 512 bytes of whitespace
+            ob_flush();
+            flush();
+        }
+        
         $post_creation_start_time = time();
         
         $original_post = get_post($original_post_id);
 
         if (!$original_post) {
-            error_log('XF Translator: Original post not found. Post ID: ' . $original_post_id);
-            error_log('XF Translator DEBUG: CRITICAL - Original post does not exist! Post ID: ' . $original_post_id);
+            error_log('XF Translator Error: Original post not found. Post ID: ' . $original_post_id);
             return false;
         }
-        
-        error_log('XF Translator DEBUG: Original post found. Post ID: ' . $original_post_id . ', Title: ' . $original_post->post_title . ', Status: ' . $original_post->post_status . ', Type: ' . $original_post->post_type);
 
         // Get language prefix for meta key (use prefix for consistency)
         $languages = $this->settings->get('languages', array());
@@ -2378,11 +2427,9 @@ class Xf_Translator_Processor
         }
         
         if (empty($language_prefix)) {
-            error_log('XF Translator: Language prefix not found for language: ' . $target_language);
+            error_log('XF Translator Error: Language prefix not found for language: ' . $target_language);
             return false;
         }
-        
-        error_log('XF Translator: Language prefix: ' . $language_prefix);
 
         // Check if translated post already exists (use prefix for meta key)
         $existing_translated_post_id = get_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, true);
@@ -2406,36 +2453,19 @@ class Xf_Translator_Processor
 
         // Set translated title
         if (isset($translated_data['title']) && !empty($translated_data['title'])) {
-            $post_data['post_title'] = $translated_data['title'];
+            // Clean title to remove any ACF field patterns that might have leaked in
+            $post_data['post_title'] = $this->clean_field_value($translated_data['title'], 'title');
         } else {
             $post_data['post_title'] = $original_post->post_title . ' (' . $target_language . ')';
         }
 
         // Set translated content
         if (isset($translated_data['content']) && !empty($translated_data['content'])) {
+            // Clean content to remove any ACF field patterns that might have leaked in
             // Preserve HTML structure - WordPress will sanitize but we want to keep tables and other HTML
             // Use wp_kses_post to allow standard HTML including tables, but bypass if content is already sanitized
-            $post_data['post_content'] = $translated_data['content'];
-
-            // Log content length for debugging
-            error_log('XF Translator: Setting post_content, length: ' . strlen($translated_data['content']) . ' chars');
-            error_log('XF Translator: Content preview (first 500 chars): ' . substr($translated_data['content'], 0, 500));
-
-            // Check for table HTML
-            if (strpos($translated_data['content'], '<table') !== false) {
-                error_log('XF Translator: Content contains <table> tag - HTML should be preserved');
-                $table_pos = strpos($translated_data['content'], '<table');
-                error_log('XF Translator: Table starts at position: ' . $table_pos);
-                error_log('XF Translator: Table HTML preview: ' . substr($translated_data['content'], $table_pos, 300));
-            } else {
-                error_log('XF Translator: WARNING - Content does NOT contain <table> tag!');
-            }
-
-            // Check language - log first few words to verify
-            $first_words = substr(strip_tags($translated_data['content']), 0, 100);
-            error_log('XF Translator: Content first words (no HTML): ' . $first_words);
+            $post_data['post_content'] = $this->clean_field_value($translated_data['content'], 'content');
         } else {
-            error_log('XF Translator: WARNING - No translated content found, using original post content');
             $post_data['post_content'] = $original_post->post_content;
         }
 
@@ -2461,7 +2491,6 @@ class Xf_Translator_Processor
         // IMPORTANT: Set flag EARLY before wp_insert_post to ensure filters work
         // This must be set before WordPress processes the post data
         self::$creating_translated_post = true;
-        error_log('XF Translator: Flag set to true. Original slug: ' . $original_slug);
 
         // Copy categories
         $categories = wp_get_post_categories($original_post_id, array('fields' => 'ids'));
@@ -2474,26 +2503,16 @@ class Xf_Translator_Processor
         if (!empty($tags)) {
             $post_data['tags_input'] = $tags;
         }
-
-        error_log('XF Translator: Creating/updating translated post. Existing ID: ' . ($existing_translated_post_id ?: 'none'));
         
         // Create or update post
         if ($existing_translated_post_id && get_post($existing_translated_post_id)) {
             // Update existing translated post
-            error_log('XF Translator: Updating existing translated post ID: ' . $existing_translated_post_id);
             $post_data['ID'] = $existing_translated_post_id;
             // For updates, keep original status (don't change to draft)
             $post_data['post_status'] = $original_post_status;
             // Preserve original post date on updates too
             $post_data['post_date'] = $original_post->post_date;
             $post_data['post_date_gmt'] = $original_post->post_date_gmt;
-            
-            // DIAGNOSTIC: Log before wp_update_post
-            error_log('XF Translator DEBUG: About to call wp_update_post for post ID: ' . $existing_translated_post_id);
-            error_log('XF Translator DEBUG: Post data keys: ' . implode(', ', array_keys($post_data)));
-            error_log('XF Translator DEBUG: Post data post_title length: ' . (isset($post_data['post_title']) ? strlen($post_data['post_title']) : 'NOT SET'));
-            error_log('XF Translator DEBUG: Post data post_content length: ' . (isset($post_data['post_content']) ? strlen($post_data['post_content']) : 'NOT SET'));
-            error_log('XF Translator DEBUG: Post data post_status: ' . (isset($post_data['post_status']) ? $post_data['post_status'] : 'NOT SET'));
             
             // Disable pingbacks/trackbacks to prevent HTTP requests during update
             $post_data['ping_status'] = 'closed';
@@ -2521,7 +2540,6 @@ class Xf_Translator_Processor
             // Translated posts don't need pingbacks/trackbacks/webhooks
             $block_http_requests = function($preempt, $parsed_args, $url) use ($target_post_id) {
                 // Block all HTTP requests during translated post update
-                error_log('XF Translator DEBUG: Blocking HTTP request during post update: ' . $url);
                 // Return a successful empty response to prevent errors
                 return array(
                     'response' => array(
@@ -2535,21 +2553,22 @@ class Xf_Translator_Processor
             };
             add_filter('pre_http_request', $block_http_requests, 999, 3); // High priority to block all requests
             
-            $start_time = microtime(true);
-            
             // Wrap in try-catch to catch any fatal errors
             try {
-                error_log('XF Translator DEBUG: Calling wp_update_post NOW... (pingbacks/trackbacks disabled)');
-                
-                // Use wp_update_post with wp_slash to prevent issues
-                $translated_post_id = wp_update_post(wp_slash($post_data), true);
-                
-                error_log('XF Translator DEBUG: wp_update_post CALL COMPLETED - reached immediately after call');
+                // Suppress "Packets out of order" warnings during wp_update_post() call
+                $old_error_reporting = error_reporting();
+                error_reporting(0);
+                try {
+                    // Use wp_update_post with wp_slash to prevent issues
+                    $translated_post_id = wp_update_post(wp_slash($post_data), true);
+                } finally {
+                    error_reporting($old_error_reporting);
+                }
             } catch (Exception $e) {
-                error_log('XF Translator DEBUG: Exception caught in wp_update_post: ' . $e->getMessage());
+                error_log('XF Translator Error: Exception in wp_update_post: ' . $e->getMessage());
                 $translated_post_id = new WP_Error('exception', $e->getMessage());
             } catch (Error $e) {
-                error_log('XF Translator DEBUG: Fatal Error caught in wp_update_post: ' . $e->getMessage());
+                error_log('XF Translator Error: Fatal error in wp_update_post: ' . $e->getMessage());
                 $translated_post_id = new WP_Error('fatal_error', $e->getMessage());
             } finally {
                 // Remove filters
@@ -2558,65 +2577,50 @@ class Xf_Translator_Processor
                 remove_filter('pre_http_request', $block_http_requests, 999);
             }
             
-            $elapsed_time = microtime(true) - $start_time;
-            
-            // DIAGNOSTIC: Log after wp_update_post - these MUST execute
-            error_log('XF Translator DEBUG: wp_update_post completed in ' . round($elapsed_time, 3) . ' seconds');
-            error_log('XF Translator DEBUG: wp_update_post returned. Result type: ' . gettype($translated_post_id) . ', Value: ' . var_export($translated_post_id, true));
-            
             if (is_wp_error($translated_post_id)) {
-                error_log('XF Translator: Error updating post. Error: ' . $translated_post_id->get_error_message());
-                error_log('XF Translator DEBUG: wp_update_post WP_Error - Code: ' . $translated_post_id->get_error_code() . ', Message: ' . $translated_post_id->get_error_message());
+                error_log('XF Translator Error: Error updating post. Error: ' . $translated_post_id->get_error_message());
                 
                 // Check if post was actually updated despite the error (common with HTTP request errors)
                 $updated_post = get_post($existing_translated_post_id);
                 if ($updated_post && isset($post_data['post_title']) && $updated_post->post_title === $post_data['post_title']) {
-                    error_log('XF Translator DEBUG: Post was actually updated successfully despite WP_Error! Treating as success.');
                     $translated_post_id = $existing_translated_post_id; // Override error with success
                 }
-            } elseif ($translated_post_id === 0) {
-                error_log('XF Translator DEBUG: wp_update_post returned 0 (update failed silently)');
-            } elseif (!is_numeric($translated_post_id)) {
-                error_log('XF Translator DEBUG: wp_update_post returned non-numeric value!');
-            } else {
-                error_log('XF Translator: Successfully updated post ID: ' . $translated_post_id);
             }
         } else {
             // Create new translated post
-            error_log('XF Translator: Creating new translated post');
-            $translated_post_id = wp_insert_post($post_data, true);
+            // Suppress "Packets out of order" warnings during wp_insert_post() call
+            $old_error_reporting = error_reporting();
+            error_reporting(0);
+            try {
+                $translated_post_id = wp_insert_post($post_data, true);
+            } finally {
+                error_reporting($old_error_reporting);
+            }
             
             if (is_wp_error($translated_post_id)) {
-                error_log('XF Translator: Error creating post. Error: ' . $translated_post_id->get_error_message());
-            } else {
-                error_log('XF Translator: Successfully created post ID: ' . $translated_post_id);
+                error_log('XF Translator Error: Error creating post. Error: ' . $translated_post_id->get_error_message());
             }
         }
 
         if (is_wp_error($translated_post_id)) {
-            error_log('XF Translator: Post creation/update failed. Returning false.');
-            error_log('XF Translator DEBUG: CRITICAL - wp_insert_post/wp_update_post returned WP_Error');
-            error_log('XF Translator DEBUG: WP_Error code: ' . $translated_post_id->get_error_code());
-            error_log('XF Translator DEBUG: WP_Error message: ' . $translated_post_id->get_error_message());
-            error_log('XF Translator DEBUG: WP_Error data: ' . print_r($translated_post_id->get_error_data(), true));
+            error_log('XF Translator Error: Post creation/update failed. Error: ' . $translated_post_id->get_error_message());
             self::$creating_translated_post = false; // Clear flag on error
             return false;
         }
         
-        // DEBUG: Verify post ID is valid
+        // Verify post ID is valid
         if (!is_numeric($translated_post_id) || $translated_post_id <= 0) {
-            error_log('XF Translator DEBUG: CRITICAL - Invalid post ID returned! Value: ' . var_export($translated_post_id, true));
+            error_log('XF Translator Error: Invalid post ID returned from wp_insert_post/wp_update_post.');
             self::$creating_translated_post = false;
             return false;
         }
         
-        error_log('XF Translator DEBUG: Post creation/update returned Post ID: ' . $translated_post_id . ' (type: ' . gettype($translated_post_id) . ')');
+        // Ensure DB connection is valid before meta operations
+        $this->db_reconnect_if_needed();
         
         // Store meta immediately so filter can check it even if flag is cleared
-        error_log('XF Translator DEBUG: Storing post meta for translated post ID: ' . $translated_post_id);
-        $meta1_result = update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
-        $meta2_result = update_post_meta($translated_post_id, '_xf_translator_desired_slug', $original_slug);
-        error_log('XF Translator DEBUG: Meta storage results - original_post_id: ' . ($meta1_result ? 'success' : 'failed') . ', desired_slug: ' . ($meta2_result ? 'success' : 'failed'));
+        update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
+        update_post_meta($translated_post_id, '_xf_translator_desired_slug', $original_slug);
         
         // CRITICAL: ALWAYS ensure the slug is correct (WordPress might have changed it despite our filter)
         // We need to do this immediately after post creation
@@ -2629,6 +2633,9 @@ class Xf_Translator_Processor
             if ($saved_post->post_name !== $desired_slug) {
                 // WordPress changed the slug, fix it directly in database IMMEDIATELY
                 error_log('XF Translator: CRITICAL - Slug mismatch detected! Desired: ' . $desired_slug . ', Actual: ' . $saved_post->post_name . '. Fixing directly in database...');
+                
+                // Ensure DB connection is valid before direct DB update
+                $this->db_reconnect_if_needed();
                 
                 global $wpdb;
                 // Use direct database update to bypass WordPress slug checks
@@ -2655,7 +2662,14 @@ class Xf_Translator_Processor
                     } else {
                         error_log('XF Translator: WARNING - Slug fix verification failed. Current slug: ' . ($verify_post ? $verify_post->post_name : 'post not found'));
                         // Try one more time with wp_update_post
-                        wp_update_post(array('ID' => $translated_post_id, 'post_name' => $desired_slug));
+                        // Suppress "Packets out of order" warnings during wp_update_post() call
+                        $old_error_reporting = error_reporting();
+                        error_reporting(0);
+                        try {
+                            wp_update_post(array('ID' => $translated_post_id, 'post_name' => $desired_slug));
+                        } finally {
+                            error_reporting($old_error_reporting);
+                        }
                         error_log('XF Translator: Attempted wp_update_post fix');
                     }
                 } else {
@@ -2671,60 +2685,63 @@ class Xf_Translator_Processor
         // Clear flag AFTER we've fixed the slug
         self::$creating_translated_post = false;
         
+        // Ensure DB connection is valid before taxonomy operations
+        $this->db_reconnect_if_needed();
+
         // Ensure tags are copied (wp_update_post may not always handle tags_input correctly)
         $tags = wp_get_post_tags($original_post_id, array('fields' => 'names'));
         if (!empty($tags)) {
             wp_set_post_terms($translated_post_id, $tags, 'post_tag', false);
         }
         
-        error_log('XF Translator: Post created/updated successfully. ID: ' . $translated_post_id . '. Starting meta/field processing...');
-
         // Verify table HTML was preserved after saving
         if (isset($translated_data['content']) && strpos($translated_data['content'], '<table') !== false) {
             $saved_post = get_post($translated_post_id);
             if ($saved_post) {
                 $saved_content = $saved_post->post_content;
                 if (strpos($saved_content, '<table') === false) {
-                    error_log('XF Translator: WARNING - Table HTML was stripped during save! Original had table, saved content does not.');
-                    error_log('XF Translator: Attempting to re-save with table HTML preserved...');
-
                     // Try to re-save with the original content that has tables
-                    // Use wp_update_post with the raw content
+                    // Clean content to remove any ACF field patterns that might have leaked in
                     $update_data = array(
                         'ID' => $translated_post_id,
-                        'post_content' => $translated_data['content']
+                        'post_content' => $this->clean_field_value($translated_data['content'], 'content')
                     );
                     wp_update_post($update_data);
-
-                    // Verify again
-                    $saved_post_after = get_post($translated_post_id);
-                    if ($saved_post_after && strpos($saved_post_after->post_content, '<table') !== false) {
-                        error_log('XF Translator: Successfully re-saved with table HTML preserved.');
-                    } else {
-                        error_log('XF Translator: ERROR - Table HTML still missing after re-save. WordPress may be stripping table tags.');
-                    }
-                } else {
-                    error_log('XF Translator: Table HTML successfully preserved in saved post.');
                 }
             }
         }
 
+        // Ensure DB connection is valid before relationship meta operations
+        $this->db_reconnect_if_needed();
+        
         // Link translated post to original (use prefix for meta keys)
-        error_log('XF Translator DEBUG: Storing relationship meta links. Original Post ID: ' . $original_post_id . ', Translated Post ID: ' . $translated_post_id . ', Language Prefix: ' . $language_prefix);
-        $link1_result = update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
-        $link2_result = update_post_meta($translated_post_id, '_xf_translator_language', $language_prefix);
-        $link3_result = update_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, $translated_post_id);
-        error_log('XF Translator DEBUG: Relationship meta storage results - original_post_id link: ' . ($link1_result ? 'success' : 'failed') . ', language link: ' . ($link2_result ? 'success' : 'failed') . ', translated_post link: ' . ($link3_result ? 'success' : 'failed'));
+        // Suppress "Packets out of order" warnings during update_post_meta() calls
+        $old_error_reporting = error_reporting();
+        error_reporting(0); // Suppress all errors during meta updates
+        try {
+            update_post_meta($translated_post_id, '_xf_translator_original_post_id', $original_post_id);
+            update_post_meta($translated_post_id, '_xf_translator_language', $language_prefix);
+            update_post_meta($original_post_id, '_xf_translator_translated_post_' . $language_prefix, $translated_post_id);
+        } finally {
+            error_reporting($old_error_reporting);
+        }
 
+        // CRITICAL: Ensure DB connection is valid immediately after relationship meta storage
+        // This prevents "Packets out of order" errors that occur between meta storage and ACF processing
+        $this->db_reconnect_if_needed();
+
+        // Ensure DB connection is valid before featured image operations
+        $this->db_reconnect_if_needed();
+        
         // Copy featured image from original post
         $thumbnail_id = get_post_thumbnail_id($original_post_id);
         if ($thumbnail_id) {
             $thumbnail_set = set_post_thumbnail($translated_post_id, $thumbnail_id);
             if (!$thumbnail_set) {
-                error_log('XF Translator: Failed to set featured image for translated post ID: ' . $translated_post_id . ' from original post ID: ' . $original_post_id);
+                // error_log('XF Translator: Failed to set featured image for translated post ID: ' . $translated_post_id . ' from original post ID: ' . $original_post_id);
             }
         } else {
-            error_log('XF Translator: Original post ID: ' . $original_post_id . ' does not have a featured image. Translated post may fail to publish if featured image is required.');
+            // error_log('XF Translator: Original post ID: ' . $original_post_id . ' does not have a featured image. Translated post may fail to publish if featured image is required.');
         }
 
         // If original post was published, update status back to publish (after featured image is set)
@@ -2733,9 +2750,11 @@ class Xf_Translator_Processor
             if ($thumbnail_id) {
                 $verify_thumbnail = get_post_thumbnail_id($translated_post_id);
                 if (!$verify_thumbnail) {
-                    error_log('XF Translator: Warning - Featured image not found on translated post before publishing. Post ID: ' . $translated_post_id);
                 }
             }
+
+            // Ensure DB connection is valid before publishing
+            $this->db_reconnect_if_needed();
 
             $update_result = wp_update_post(array(
                 'ID' => $translated_post_id,
@@ -2747,7 +2766,18 @@ class Xf_Translator_Processor
             }
         }
 
+        // Ensure DB connection is valid before ACF field processing
+        $this->db_reconnect_if_needed();
+
+        // Flush output buffer before starting ACF processing (keeps connection alive)
+        if (ob_get_level()) {
+            echo str_repeat(' ', 512);
+            ob_flush();
+            flush();
+        }
+
         // Copy and translate custom fields/ACF fields from original_data
+        $field_count = 0;
         foreach ($original_data as $field_key => $original_value) {
             // Skip standard WordPress fields
             if (in_array($field_key, array('title', 'content', 'excerpt'))) {
@@ -2757,6 +2787,15 @@ class Xf_Translator_Processor
             // Get translated value if available
             $translated_value = isset($translated_data[$field_key]) ? $translated_data[$field_key] : $original_value;
 
+            // Flush output buffer periodically during field processing (every 3 fields)
+            // This keeps the HTTP connection alive during long operations
+            $field_count++;
+            if ($field_count % 3 === 0 && ob_get_level()) {
+                echo str_repeat(' ', 256);
+                ob_flush();
+                flush();
+            }
+
             // Remove prefix to get actual field name
             $actual_field_name = str_replace(array('acf_', 'meta_'), '', $field_key);
 
@@ -2765,6 +2804,9 @@ class Xf_Translator_Processor
 
             // Update the field
             if (strpos($field_key, 'acf_') === 0 && function_exists('update_field')) {
+                // Ensure DB connection is valid before ACF field update
+                $this->db_reconnect_if_needed();
+                
                 // ACF field - check if it's a nested field
                 if (strpos($actual_field_name, '/') !== false) {
                     // Nested field - use special update method
@@ -2783,23 +2825,36 @@ class Xf_Translator_Processor
             }
         }
 
+        // Ensure DB connection is valid right before ACF processing starts
+        // This is critical as there may be a long gap between post creation and ACF processing
+        $this->db_reconnect_if_needed();
+
         // Copy ALL ACF fields from original post (including fields not in translatable list)
         // This ensures fields like "you may like" are always copied, even if not translatable
         if (function_exists('get_fields')) {
-            error_log('XF Translator: Starting ACF field processing for post ID: ' . $translated_post_id);
+            // CRITICAL: Ensure DB connection is valid immediately before get_fields() call
+            // get_fields() can trigger multiple database queries and take significant time
+            $this->db_reconnect_if_needed();
+            
             $acf_start_time = time();
             $max_acf_time = 60; // 1 minute max for ACF processing
             
-            $all_acf_fields = get_fields($original_post_id);
+            // Suppress "Packets out of order" warnings during get_fields() call
+            // WordPress core database operations can trigger these warnings
+            $old_error_reporting = error_reporting();
+            error_reporting(0); // Suppress all errors during ACF field retrieval
+            try {
+                $all_acf_fields = get_fields($original_post_id);
+            } finally {
+                error_reporting($old_error_reporting);
+            }
             if ($all_acf_fields && is_array($all_acf_fields)) {
                 $acf_field_count = count($all_acf_fields);
-                error_log('XF Translator: Found ' . $acf_field_count . ' ACF field(s) to process');
                 
                 $processed_count = 0;
                 foreach ($all_acf_fields as $acf_field_name => $acf_field_value) {
                     // Check for timeout
                     if ((time() - $acf_start_time) > $max_acf_time) {
-                        error_log('XF Translator: ACF field processing timeout. Processed ' . $processed_count . ' of ' . $acf_field_count . ' fields');
                         break;
                     }
 
@@ -2813,17 +2868,40 @@ class Xf_Translator_Processor
                         continue;
                     }
 
+                    // Flush output buffer periodically during ACF processing (every 5 fields)
+                    // This keeps the HTTP connection alive during long operations
+                    if ($processed_count > 0 && $processed_count % 5 === 0 && ob_get_level()) {
+                        echo str_repeat(' ', 256);
+                        ob_flush();
+                        flush();
+                    }
+
+                    // Ensure DB connection is valid before EACH ACF field update
+                    // Complex ACF fields can take time, causing connection to go stale
+                    $this->db_reconnect_if_needed();
+
                     // Convert post IDs to translated versions
                     $converted_value = $this->convert_post_ids_to_translated($acf_field_value, $language_prefix);
                     
-                    // Save the field to translated post
-                    update_field($acf_field_name, $converted_value, $translated_post_id);
+                    // Suppress "Packets out of order" warnings during update_field() call
+                    // WordPress core database operations can trigger these warnings
+                    $old_error_reporting = error_reporting();
+                    error_reporting(0); // Suppress all errors during ACF field update
+                    try {
+                        // Save the field to translated post
+                        update_field($acf_field_name, $converted_value, $translated_post_id);
+                    } finally {
+                        error_reporting($old_error_reporting);
+                    }
                     $processed_count++;
                 }
                 
                 error_log('XF Translator: Completed ACF field processing. Processed ' . $processed_count . ' field(s)');
             }
         }
+
+        // Ensure DB connection is valid after ACF processing (which can take time)
+        $this->db_reconnect_if_needed();
 
         // Translate user meta fields (author bio, etc.) if configured
         $author_id = $original_post->post_author;
@@ -2860,23 +2938,20 @@ class Xf_Translator_Processor
                 }
 
                 if (!empty($terms_to_assign)) {
+                    // Ensure DB connection is valid before taxonomy assignment
+                    $this->db_reconnect_if_needed();
                     wp_set_post_terms($translated_post_id, $terms_to_assign, $taxonomy);
                 }
             }
         }
 
-        $total_time = time() - $post_creation_start_time;
-        error_log('XF Translator: Completed create_translated_post for post ID: ' . $original_post_id . '. Translated post ID: ' . $translated_post_id . '. Total time: ' . $total_time . ' seconds');
-        
-        // DEBUG: Final verification before returning
-        $final_verify = get_post($translated_post_id);
-        if ($final_verify) {
-            error_log('XF Translator DEBUG: Final verification - Post exists. ID: ' . $translated_post_id . ', Status: ' . $final_verify->post_status . ', Title: ' . $final_verify->post_title);
-        } else {
-            error_log('XF Translator DEBUG: CRITICAL ERROR - Final verification FAILED! Post ID ' . $translated_post_id . ' does not exist!');
+        // Flush output buffer after post creation completes
+        if (ob_get_level()) {
+            echo str_repeat(' ', 512);
+            ob_flush();
+            flush();
         }
         
-        error_log('XF Translator DEBUG: Returning from create_translated_post with Post ID: ' . $translated_post_id);
         return $translated_post_id;
     }
 
@@ -2922,19 +2997,26 @@ class Xf_Translator_Processor
 
         // Also check reverse lookup
         global $wpdb;
-        $translated_post_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT p.ID FROM {$wpdb->posts} p
-            INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
-                AND pm1.meta_key = '_xf_translator_original_post_id' 
-                AND pm1.meta_value = %d
-            INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
-                AND pm2.meta_key = '_xf_translator_language' 
-                AND pm2.meta_value = %s
-            WHERE p.post_status = 'publish'
-            LIMIT 1",
-            $original_post_id,
-            $language_prefix
-        ));
+        // Suppress "Packets out of order" warnings during $wpdb->get_var() call
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        try {
+            $translated_post_id = $wpdb->get_var($wpdb->prepare(
+                "SELECT p.ID FROM {$wpdb->posts} p
+                INNER JOIN {$wpdb->postmeta} pm1 ON p.ID = pm1.post_id 
+                    AND pm1.meta_key = '_xf_translator_original_post_id' 
+                    AND pm1.meta_value = %d
+                INNER JOIN {$wpdb->postmeta} pm2 ON p.ID = pm2.post_id 
+                    AND pm2.meta_key = '_xf_translator_language' 
+                    AND pm2.meta_value = %s
+                WHERE p.post_status = 'publish'
+                LIMIT 1",
+                $original_post_id,
+                $language_prefix
+            ));
+        } finally {
+            error_reporting($old_error_reporting);
+        }
 
         return $translated_post_id ? intval($translated_post_id) : false;
     }
@@ -3054,6 +3136,119 @@ class Xf_Translator_Processor
     }
 
     /**
+     * Static property to store the previous error handler
+     * @var callable|null
+     */
+    private static $previous_error_handler = null;
+
+    /**
+     * Custom error handler to suppress "Packets out of order" warnings
+     * 
+     * @param int $errno Error number
+     * @param string $errstr Error message
+     * @param string $errfile Error file
+     * @param int $errline Error line
+     * @return bool True if error was handled, false otherwise
+     */
+    public static function suppress_packets_error_handler($errno, $errstr, $errfile, $errline)
+    {
+        // Suppress "Packets out of order" warnings from wpdb
+        if (strpos($errstr, 'Packets out of order') !== false && 
+            strpos($errfile, 'class-wpdb.php') !== false) {
+            return true; // Suppress this error - don't log it
+        }
+        
+        // If there was a previous error handler, call it for other errors
+        if (self::$previous_error_handler !== null) {
+            return call_user_func(self::$previous_error_handler, $errno, $errstr, $errfile, $errline);
+        }
+        
+        // Let other errors be handled normally
+        return false;
+    }
+
+    /**
+     * Wrap a database operation with error suppression
+     * 
+     * @param callable $operation The database operation to execute
+     * @return mixed The result of the operation
+     */
+    private function suppress_db_errors($operation)
+    {
+        global $wpdb;
+        
+        // Set up custom error handler to suppress "Packets out of order" warnings
+        self::$previous_error_handler = set_error_handler(array(__CLASS__, 'suppress_packets_error_handler'));
+        
+        // Also suppress via error_reporting
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        
+        // Temporarily suppress wpdb errors
+        $old_suppress_errors = isset($wpdb->suppress_errors) ? $wpdb->suppress_errors : false;
+        if (isset($wpdb->suppress_errors)) {
+            $wpdb->suppress_errors = true;
+        }
+        
+        try {
+            $result = $operation();
+        } finally {
+            // Restore wpdb error suppression
+            if (isset($wpdb->suppress_errors)) {
+                $wpdb->suppress_errors = $old_suppress_errors;
+            }
+            
+            // Restore error reporting and error handler
+            error_reporting($old_error_reporting);
+            if (self::$previous_error_handler !== null) {
+                set_error_handler(self::$previous_error_handler);
+                self::$previous_error_handler = null;
+            } else {
+                restore_error_handler();
+            }
+        }
+        
+        return $result;
+    }
+
+    /**
+     * Check and reconnect database connection if needed
+     * Prevents "Packets out of order" errors after long-running API calls
+     * 
+     * @return void
+     */
+    private function db_reconnect_if_needed()
+    {
+        global $wpdb;
+
+        if (!is_object($wpdb)) {
+            return;
+        }
+
+        // Use the suppress_db_errors wrapper for reconnection
+        $this->suppress_db_errors(function() use ($wpdb) {
+            // Always reconnect to ensure fresh connection after long operations
+            // Don't test connection first - testing itself can trigger "Packets out of order" errors
+            // Just close and reconnect silently
+            
+            // Safely close existing connection if it exists
+            if (!empty($wpdb->dbh) && is_object($wpdb->dbh)) {
+                @mysqli_close($wpdb->dbh);
+            }
+            $wpdb->dbh = null;
+            
+            // Clear any errors before reconnecting
+            $wpdb->last_error = '';
+            $wpdb->last_query = '';
+            
+            // Force reconnect with fresh connection
+            if (method_exists($wpdb, 'db_connect')) {
+                @$wpdb->db_connect(true);
+            }
+        });
+    }
+
+    /**
      * Process a specific queue entry by ID
      *
      * @param int $queue_entry_id Queue entry ID
@@ -3075,10 +3270,17 @@ class Xf_Translator_Processor
         }
 
         // Get the specific queue entry
-        $queue_entry = $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM $table_name WHERE id = %d",
-            $queue_entry_id
-        ), ARRAY_A);
+        // Suppress "Packets out of order" warnings during $wpdb->get_row() call
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        try {
+            $queue_entry = $wpdb->get_row($wpdb->prepare(
+                "SELECT * FROM $table_name WHERE id = %d",
+                $queue_entry_id
+            ), ARRAY_A);
+        } finally {
+            error_reporting($old_error_reporting);
+        }
 
         if (!$queue_entry) {
             $this->last_error = "Queue entry not found for ID: {$queue_entry_id}";
@@ -3109,16 +3311,23 @@ class Xf_Translator_Processor
         $max_failures = 5; // Maximum number of failures before giving up
         $failure_check_time = date('Y-m-d H:i:s', strtotime('-1 hour')); // Check failures in last hour
         
-        $failure_count = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table_name} 
-            WHERE parent_post_id = %d 
-            AND lng = %s 
-            AND status = 'failed' 
-            AND updated >= %s",
-            $queue_entry['parent_post_id'],
-            $queue_entry['lng'],
-            $failure_check_time
-        ));
+        // Suppress "Packets out of order" warnings during $wpdb->get_var() call
+        $old_error_reporting = error_reporting();
+        error_reporting(0);
+        try {
+            $failure_count = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$table_name} 
+                WHERE parent_post_id = %d 
+                AND lng = %s 
+                AND status = 'failed' 
+                AND updated >= %s",
+                $queue_entry['parent_post_id'],
+                $queue_entry['lng'],
+                $failure_check_time
+            ));
+        } finally {
+            error_reporting($old_error_reporting);
+        }
         
         if ($failure_count >= $max_failures) {
             // Too many failures - mark as permanently failed and skip
@@ -3142,30 +3351,12 @@ class Xf_Translator_Processor
             return false;
         }
 
-        // SAFETY: Limit concurrent processing to prevent resource exhaustion
-        // Get max concurrent processing limit from settings (default: 20)
-        // NOTE: This limit only applies to OLD type posts, not NEW posts
-        $max_concurrent_processing = $this->settings->get('max_concurrent_processing', 20);
-
-        // Only check concurrent limit for OLD type posts
-        if (isset($queue_entry['type']) && $queue_entry['type'] === 'OLD') {
-            $current_processing_count = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT COUNT(*) FROM $table_name WHERE status = 'processing' AND type = %s",
-                    'OLD'
-                )
-            );
-
-            if ($current_processing_count >= $max_concurrent_processing) {
-                // Too many items already processing - skip this one for now
-                $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
-                if (class_exists('Xf_Translator_Logger')) {
-                    Xf_Translator_Logger::info("Skipping queue entry #{$queue_entry_id} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
-                } else {
-                    error_log("XF Translator: Skipping queue entry #{$queue_entry_id} - {$current_processing_count} OLD items already processing (max: {$max_concurrent_processing})");
-                }
-                return false; // Leave as pending, will be picked up later
-            }
+        // SAFETY: Bounded parallelism - enforce global limit for all types
+        $max_concurrent_processing = (int) $this->settings->get('max_concurrent_processing', 20);
+        $current_processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'processing'");
+        if ($current_processing_count >= $max_concurrent_processing) {
+            $this->last_error = "Maximum concurrent processing limit reached ({$max_concurrent_processing}). Please wait for current translations to complete.";
+            return false;
         }
 
         // Update status to processing (also update 'updated' field to track when status changed)
@@ -3202,9 +3393,9 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry_id),
+                array('id' => $queue_entry_id, 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -3214,8 +3405,14 @@ class Xf_Translator_Processor
             return $this->process_edit_translation($queue_entry);
         }
 
+        // Ensure DB connection is valid before getting post data (ACF field extraction can take time)
+        $this->db_reconnect_if_needed();
+
         // Get post data
         $post_data = $this->get_post_data($post_id);
+
+        // Ensure DB connection is valid after getting post data (ACF processing may have taken time)
+        $this->db_reconnect_if_needed();
 
         if (!$post_data) {
             $this->last_error = "Post data not found for post ID: {$post_id}";
@@ -3226,9 +3423,9 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry_id),
+                array('id' => $queue_entry_id, 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -3242,6 +3439,9 @@ class Xf_Translator_Processor
         // Pass prompt_data for chunking support
         $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry_id, $post_id, $prompt_data);
 
+        // Ensure DB connection is valid after long API call
+        $this->db_reconnect_if_needed();
+
         if ($translation_result === false) {
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
             error_log('XF Translator Error: ' . $detailed_error);
@@ -3251,9 +3451,9 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $detailed_error
                 ),
-                array('id' => $queue_entry_id),
+                array('id' => $queue_entry_id, 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -3272,13 +3472,19 @@ class Xf_Translator_Processor
 
         if (!$parsed_translation) {
             $this->last_error = "Failed to parse translation response. Response format may be incorrect.";
-            error_log('XF Translator Error: ' . $this->last_error);
-            error_log('XF Translator: Full translation response length: ' . strlen($translation_result));
-            error_log('XF Translator: Translation response (first 1000 chars): ' . substr($translation_result, 0, 1000));
-            error_log('XF Translator: Original post data fields: ' . implode(', ', array_keys($post_data)));
-
-            // Save the raw response for manual inspection
-            update_post_meta($post_id, '_xf_translator_raw_response_' . $queue_entry_id, $translation_result);
+            
+            // Log parsing failure to file (minimal)
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error(sprintf(
+                    'Translation parsing failed - Post ID: %d, Queue ID: %d, Response size: %d bytes, Fields: %s',
+                    $post_id,
+                    $queue_entry_id,
+                    strlen($translation_result),
+                    implode(', ', array_keys($post_data))
+                ));
+            } else {
+                error_log('XF Translator Error: ' . $this->last_error);
+            }
 
             $wpdb->update(
                 $table_name,
@@ -3286,12 +3492,15 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry_id),
+                array('id' => $queue_entry_id, 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
+
+        // Ensure DB connection is valid before post operations
+        $this->db_reconnect_if_needed();
 
         // Check if translated post already exists
         $translated_post_id = get_post_meta($post_id, '_xf_translator_translated_post_' . $target_language_prefix, true);
@@ -3315,14 +3524,17 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry_id),
+                array('id' => $queue_entry_id, 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
 
-        // Update queue entry with translated post ID and mark as completed
+        // Ensure DB connection is valid before final queue update
+        $this->db_reconnect_if_needed();
+
+        // Update queue entry with translated post ID and mark as completed (only if still in progress)
         $wpdb->update(
             $table_name,
             array(
@@ -3330,9 +3542,9 @@ class Xf_Translator_Processor
                 'translated_post_id' => $updated_post_id,
                 'error_message' => null
             ),
-            array('id' => $queue_entry_id),
+            array('id' => $queue_entry_id, 'status' => 'processing'),
             array('%s', '%d', '%s'),
-            array('%d')
+            array('%d', '%s')
         );
 
         return array(
@@ -3372,9 +3584,9 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -3398,15 +3610,21 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
 
+        // Ensure DB connection is valid before getting post data (ACF field extraction can take time)
+        $this->db_reconnect_if_needed();
+
         // Get full post data
         $full_post_data = $this->get_post_data($post_id);
+
+        // Ensure DB connection is valid after getting post data (ACF processing may have taken time)
+        $this->db_reconnect_if_needed();
 
         if (!$full_post_data) {
             $this->last_error = "Post data not found for post ID: {$post_id}";
@@ -3417,9 +3635,9 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -3441,9 +3659,9 @@ class Xf_Translator_Processor
                     'status' => 'failed',
                     'error_message' => $this->last_error
                 ),
-                array('id' => $queue_entry['id']),
+                array('id' => $queue_entry['id'], 'status' => 'processing'),
                 array('%s', '%s'),
-                array('%d')
+                array('%d', '%s')
             );
             return false;
         }
@@ -3456,6 +3674,9 @@ class Xf_Translator_Processor
         // Call API
         // Pass prompt_data for chunking support
         $translation_result = $this->call_translation_api($prompt, $target_language_prefix, $queue_entry['id'], $post_id, $prompt_data);
+
+        // Ensure DB connection is valid after long API call
+        $this->db_reconnect_if_needed();
 
         if ($translation_result === false) {
             $detailed_error = $this->last_error ?: "API translation call failed. Check API key and model settings.";
@@ -3488,7 +3709,16 @@ class Xf_Translator_Processor
         if (!$parsed_translation) {
             $this->last_error = "Failed to parse translation response. Response format may be incorrect.";
             error_log('XF Translator Error: ' . $this->last_error);
-            update_post_meta($post_id, '_xf_translator_raw_response_' . $queue_entry['id'], $translation_result);
+            
+            // Log parsing failure to file (minimal)
+            if (class_exists('Xf_Translator_Logger')) {
+                Xf_Translator_Logger::error(sprintf(
+                    'Translation parsing failed - Post ID: %d, Queue ID: %d, Response size: %d bytes',
+                    $post_id,
+                    $queue_entry['id'],
+                    strlen($translation_result)
+                ));
+            }
             $wpdb->update(
                 $table_name,
                 array(
@@ -3501,6 +3731,9 @@ class Xf_Translator_Processor
             );
             return false;
         }
+
+        // Ensure DB connection is valid before post update
+        $this->db_reconnect_if_needed();
 
         // Update existing translated post (not create new)
         $update_result = $this->update_translated_post($translated_post_id, $parsed_translation, $edited_fields);
@@ -3521,15 +3754,18 @@ class Xf_Translator_Processor
             return false;
         }
 
-        // Update status to completed
+        // Ensure DB connection is valid before final queue update
+        $this->db_reconnect_if_needed();
+
+        // Update status to completed (only if still in progress - safe completion)
         $wpdb->update(
             $table_name,
             array(
                 'status' => 'completed'
             ),
-            array('id' => $queue_entry['id']),
+            array('id' => $queue_entry['id'], 'status' => 'processing'),
             array('%s'),
-            array('%d')
+            array('%d', '%s')
         );
 
         return array(
@@ -3573,14 +3809,19 @@ class Xf_Translator_Processor
         // Update only the edited fields
         foreach ($edited_fields as $field) {
             if ($field === 'title' && isset($translated_data['title'])) {
-                $update_data['post_title'] = $translated_data['title'];
+                // Clean title to remove any ACF field patterns that might have leaked in
+                $update_data['post_title'] = $this->clean_field_value($translated_data['title'], 'title');
                 // Don't update slug - keep it as {language-prefix}/{original-slug}
                 // Slug should remain unchanged even when title is updated
             } elseif ($field === 'content' && isset($translated_data['content'])) {
-                $update_data['post_content'] = $translated_data['content'];
+                // Clean content to remove any ACF field patterns that might have leaked in
+                $update_data['post_content'] = $this->clean_field_value($translated_data['content'], 'content');
             } elseif ($field === 'excerpt' && isset($translated_data['excerpt'])) {
                 $update_data['post_excerpt'] = $translated_data['excerpt'];
             } elseif (strpos($field, 'acf_') === 0 && isset($translated_data[$field])) {
+                // Ensure DB connection is valid before ACF field update
+                $this->db_reconnect_if_needed();
+                
                 // ACF field update
                 $acf_field_name = str_replace('acf_', '', $field);
                 if (function_exists('update_field')) {
@@ -3779,14 +4020,16 @@ class Xf_Translator_Processor
 
         // Set translated title with test indicator
         if (isset($translated_data['title']) && !empty($translated_data['title'])) {
-            $post_data['post_title'] = $translated_data['title'] . ' [TEST]';
+            // Clean title to remove any ACF field patterns that might have leaked in
+            $post_data['post_title'] = $this->clean_field_value($translated_data['title'], 'title') . ' [TEST]';
         } else {
             $post_data['post_title'] = $original_post->post_title . ' (' . $target_language . ') [TEST]';
         }
 
         // Set translated content
         if (isset($translated_data['content']) && !empty($translated_data['content'])) {
-            $post_data['post_content'] = $translated_data['content'];
+            // Clean content to remove any ACF field patterns that might have leaked in
+            $post_data['post_content'] = $this->clean_field_value($translated_data['content'], 'content');
         } else {
             $post_data['post_content'] = $original_post->post_content;
         }
@@ -3960,6 +4203,9 @@ class Xf_Translator_Processor
         // Call translation API
         $translation_result = $this->call_translation_api($prompt, $language_prefix, 0, 0);
         
+        // Ensure DB connection is valid after long API call
+        $this->db_reconnect_if_needed();
+        
         if ($translation_result === false) {
             error_log('XF Translator: Failed to translate user meta fields for user ID: ' . $user_id);
             return false;
@@ -3973,6 +4219,9 @@ class Xf_Translator_Processor
             return false;
         }
         
+        // Ensure DB connection is valid before user meta updates
+        $this->db_reconnect_if_needed();
+
         // Save translated user meta fields
         foreach ($parsed_translation as $field_key => $translated_value) {
             // Remove prefix to get actual meta key
@@ -4048,6 +4297,9 @@ class Xf_Translator_Processor
         // Call translation API
         $translation_result = $this->call_translation_api($prompt, $language_prefix, 0, 0);
         
+        // Ensure DB connection is valid after long API call
+        $this->db_reconnect_if_needed();
+        
         if ($translation_result === false) {
             return array(
                 'success' => false,
@@ -4068,6 +4320,9 @@ class Xf_Translator_Processor
         }
         
         if (!empty($translated_value)) {
+            // Ensure DB connection is valid before user meta update
+            $this->db_reconnect_if_needed();
+            
             // Save the translation
             $store_key = ($meta_key === 'user_description') ? 'description' : $meta_key;
             $translated_meta_key = '_xf_translator_user_meta_' . $store_key . '_' . $language_prefix;

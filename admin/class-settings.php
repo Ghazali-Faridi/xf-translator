@@ -31,6 +31,7 @@ class Settings {
         'glossary_terms' => array(),
         'processing_delay_minutes' => 0,
         'max_concurrent_processing' => 20,
+        'translation_job_max_runtime_minutes' => 15,
         'translatable_post_meta_fields' => array(),
         'translatable_user_meta_fields' => array('description', 'user_description'),
         'translatable_acf_fields' => array(),

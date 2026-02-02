@@ -16,7 +16,7 @@
  * Plugin Name:       Unite.AI Translations
  * Plugin URI:        https://xfinitive.co
  * Description:       Serverside translation multilingual plugin 
- * Version:           1.0.5
+ * Version:           1.1.1
  * Author:            ghazali
  * Author URI:        https://xfinitive.co/
  * License:           GPL-2.0+
@@ -42,8 +42,20 @@ define( 'XF_TRANSLATOR_VERSION', '1.0.0' );
  * This action is documented in includes/class-xf-translator-activator.php
  */
 function activate_xf_translator() {
-	require_once plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator-activator.php';
-	Xf_Translator_Activator::activate();
+	try {
+		$activator_file = plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator-activator.php';
+		if (file_exists($activator_file)) {
+			require_once $activator_file;
+			if (class_exists('Xf_Translator_Activator')) {
+				Xf_Translator_Activator::activate();
+			}
+		}
+	} catch (Throwable $e) {
+		// Log error but don't fail activation completely
+		if (function_exists('error_log')) {
+			error_log('XF Translator: Activation error: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+		}
+	}
 }
 
 /**
@@ -61,13 +73,19 @@ register_deactivation_hook( __FILE__, 'deactivate_xf_translator' );
 /**
  * Load the logger class
  */
-require_once plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator-logger.php';
+$logger_file = plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator-logger.php';
+if (file_exists($logger_file)) {
+	require_once $logger_file;
+}
 
 /**
  * The core plugin class that is used to define internationalization,
  * admin-specific hooks, and public-facing site hooks.
  */
-require plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator.php';
+$core_file = plugin_dir_path( __FILE__ ) . 'includes/class-xf-translator.php';
+if (file_exists($core_file)) {
+	require $core_file;
+}
 
 /**
  * Helper function to log messages to plugin-specific log file
@@ -83,28 +101,68 @@ function xf_translator_log($message, $level = 'info') {
 }
 
 /**
- * Increase HTTP request timeout for translation API calls
- * Note: Per-request timeouts are set in call_translation_api() and capped at 90 seconds
- * to avoid Cloudflare's 100-second timeout limit. This global filter provides a fallback.
+ * Global error handler to suppress "Packets out of order" warnings from wpdb
+ * These warnings occur due to stale database connections after long-running operations
+ * and don't indicate actual errors - the operations complete successfully
  *
- * @since    1.0.0
+ * @param int $errno Error number
+ * @param string $errstr Error message
+ * @param string $errfile Error file
+ * @param int $errline Error line
+ * @return bool True if error was suppressed, false to let WordPress handle it
  */
-add_filter('http_request_timeout', function($timeout) {
-	// Per-request timeout in call_translation_api() will override this
-	// This is just a fallback for other requests
-	return 90; // 90 seconds to stay under Cloudflare's 100-second limit
-});
+function xf_translator_suppress_packets_warning($errno, $errstr, $errfile, $errline) {
+	// Suppress "Packets out of order" warnings from wpdb
+	// These are harmless connection state warnings that occur after long operations
+	if (strpos($errstr, 'Packets out of order') !== false && 
+		strpos($errfile, 'class-wpdb.php') !== false) {
+		return true; // Suppress this warning - don't log it
+	}
+	// Let other errors be handled normally by WordPress
+	return false;
+}
+
+// Set up error handler early to catch all "Packets out of order" warnings
+// Only set if WordPress core functions are available
+// Priority 999 ensures it runs before most other error handlers
+if (function_exists('add_action')) {
+	// Store previous error handler to restore if needed
+	$previous_handler = set_error_handler('xf_translator_suppress_packets_warning', E_WARNING | E_NOTICE);
+}
 
 /**
- * Increase cURL connection timeout for translation API requests
- * This prevents connection timeouts when the API server is slow to respond
- * 
- * WordPress sets both CURLOPT_CONNECTTIMEOUT and CURLOPT_TIMEOUT to the same value,
- * but we want a longer connection timeout to allow the API server time to accept the connection
- *
- * @since    1.0.0
+ * Register hooks after WordPress is loaded
+ * This prevents fatal errors during activation on PHP 8.3
  */
-add_filter('http_api_curl', function($handle, $r, $url) {
+function xf_translator_register_hooks() {
+	// Check if WordPress functions are available
+	if (!function_exists('add_filter') || !function_exists('add_action')) {
+		return;
+	}
+	
+	/**
+	 * Increase HTTP request timeout for translation API calls
+	 * Note: Per-request timeouts are set in call_translation_api() and capped at 90 seconds
+	 * to avoid Cloudflare's 100-second timeout limit. This global filter provides a fallback.
+	 *
+	 * @since    1.0.0
+	 */
+	add_filter('http_request_timeout', function($timeout) {
+		// Per-request timeout in call_translation_api() will override this
+		// This is just a fallback for other requests
+		return 90; // 90 seconds to stay under Cloudflare's 100-second limit
+	});
+
+	/**
+	 * Increase cURL connection timeout for translation API requests
+	 * This prevents connection timeouts when the API server is slow to respond
+	 * 
+	 * WordPress sets both CURLOPT_CONNECTTIMEOUT and CURLOPT_TIMEOUT to the same value,
+	 * but we want a longer connection timeout to allow the API server time to accept the connection
+	 *
+	 * @since    1.0.0
+	 */
+	add_filter('http_api_curl', function($handle, $r, $url) {
 	// Only apply to OpenAI or DeepSeek API endpoints
 	if (strpos($url, 'api.openai.com') !== false || strpos($url, 'api.deepseek.com') !== false) {
 		// Get the timeout from request args, or use a default
@@ -160,18 +218,32 @@ add_filter('http_api_curl', function($handle, $r, $url) {
 	return $handle;
 }, PHP_INT_MAX, 3); // Highest possible priority - runs after ALL plugins
 
-/**
- * Add custom cron schedule for every 3 minutes
- *
- * @since    1.0.0
- */
-add_filter('cron_schedules', function($schedules) {
-	$schedules['every_3_minutes'] = array(
-		'interval' => 180, // 180 seconds = 3 minutes
-		'display' => __('Every 3 Minutes', 'xf-translator')
-	);
-	return $schedules;
-});
+	/**
+	 * Add custom cron schedule for every 3 minutes
+	 *
+	 * @since    1.0.0
+	 */
+	add_filter('cron_schedules', function($schedules) {
+		$schedules['every_3_minutes'] = array(
+			'interval' => 180, // 180 seconds = 3 minutes
+			'display' => __('Every 3 Minutes', 'xf-translator')
+		);
+		return $schedules;
+	});
+	
+	/**
+	 * Clean up orphaned cron events on plugin load
+	 * This ensures disabled cron jobs don't run even if events are still scheduled
+	 *
+	 * @since    1.0.0
+	 */
+	add_action('init', 'xf_translator_cleanup_orphaned_cron_events', 1);
+}
+
+// Register hooks after WordPress is loaded (but early enough for filters to work)
+if (function_exists('add_action')) {
+	add_action('plugins_loaded', 'xf_translator_register_hooks', 1);
+}
 
 /**
  * Compatibility function to unschedule all events for a hook
@@ -240,6 +312,15 @@ function xf_translator_process_new_translations_cron() {
 		return;
 	}
 	
+	// Bounded parallelism: exit immediately if at capacity (no new workers)
+	global $wpdb;
+	$queue_table = $wpdb->prefix . 'xf_translate_queue';
+	$max_concurrent = (int) $settings->get('max_concurrent_processing', 20);
+	$processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$queue_table} WHERE status = 'processing'");
+	if ($processing_count >= $max_concurrent) {
+		return;
+	}
+	
 	// SAFETY: Only run in proper cron context to prevent blocking page loads
 	// This prevents WordPress pseudo-cron from running during regular page requests
 	if (!wp_doing_cron() && !defined('WP_CLI')) {
@@ -262,7 +343,7 @@ function xf_translator_process_new_translations_cron() {
 	// SAFETY: Check if processing took too long
 	$execution_time = time() - $start_time;
 	if ($execution_time > $max_execution_time) {
-		xf_translator_log('Cron: NEW translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
+		// xf_translator_log('Cron: NEW translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
 	}
 	
 	if ($result) {
@@ -313,6 +394,15 @@ function xf_translator_process_old_translations_cron() {
 		return;
 	}
 	
+	// Bounded parallelism: exit immediately if at capacity (no new workers)
+	global $wpdb;
+	$queue_table = $wpdb->prefix . 'xf_translate_queue';
+	$max_concurrent = (int) $settings->get('max_concurrent_processing', 20);
+	$processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$queue_table} WHERE status = 'processing'");
+	if ($processing_count >= $max_concurrent) {
+		return;
+	}
+	
 	// SAFETY: Only run in proper cron context to prevent blocking page loads
 	// This prevents WordPress pseudo-cron from running during regular page requests
 	if (!wp_doing_cron() && !defined('WP_CLI')) {
@@ -335,7 +425,7 @@ function xf_translator_process_old_translations_cron() {
 	// SAFETY: Check if processing took too long
 	$execution_time = time() - $start_time;
 	if ($execution_time > $max_execution_time) {
-		xf_translator_log('Cron: OLD translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
+		// xf_translator_log('Cron: OLD translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
 	}
 	
 	if ($result) {
@@ -391,8 +481,6 @@ function xf_translator_cleanup_orphaned_cron_events() {
 		error_log('XF Translator: Error cleaning up cron events: ' . $e->getMessage());
 	}
 }
-// Run cleanup early, before WordPress cron system processes events
-add_action('init', 'xf_translator_cleanup_orphaned_cron_events', 1);
 
 /**
  * Begins execution of the plugin.
@@ -404,9 +492,33 @@ add_action('init', 'xf_translator_cleanup_orphaned_cron_events', 1);
  * @since    1.0.0
  */
 function run_xf_translator() {
-
-	$plugin = new Xf_Translator();
-	$plugin->run();
-
+	// Only run if WordPress is fully loaded to prevent errors during activation
+	// Check if we're in a context where WordPress core functions are available
+	if (!function_exists('add_action') || !function_exists('add_filter')) {
+		return;
+	}
+	
+	try {
+		$plugin = new Xf_Translator();
+		$plugin->run();
+	} catch (Exception $e) {
+		// Log error but don't break the site
+		if (function_exists('error_log')) {
+			error_log('XF Translator: Failed to initialize plugin: ' . $e->getMessage());
+		}
+	} catch (Error $e) {
+		// Catch PHP 7+ fatal errors
+		if (function_exists('error_log')) {
+			error_log('XF Translator: Fatal error initializing plugin: ' . $e->getMessage());
+		}
+	} catch (Throwable $e) {
+		// Catch any other throwable (PHP 7+)
+		if (function_exists('error_log')) {
+			error_log('XF Translator: Throwable error initializing plugin: ' . $e->getMessage());
+		}
+	}
 }
+
+// Run the plugin - WordPress will handle activation separately via register_activation_hook
+// The try-catch blocks above will prevent fatal errors during activation
 run_xf_translator();
