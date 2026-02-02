@@ -86,8 +86,9 @@ $failed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 
                 <!-- <?php submit_button(__('Process Next Pending Job', 'xf-translator'), 'primary', 'submit', false); ?> -->
             </form>
             <p style="margin-top: 10px; font-size: 12px; color: #666;">
-                <?php _e('Processing URL:', 'xf-translator'); ?> 
-                <code><?php echo esc_url(plugin_dir_url(dirname(dirname(__FILE__))) . 'process-translation.php'); ?></code>
+                <?php _e('Translation is now handled by external workers. Use REST API:', 'xf-translator'); ?><br>
+                <code>GET <?php echo esc_url(rest_url('xf-translator/v1/claim-job')); ?></code><br>
+                <code>POST <?php echo esc_url(rest_url('xf-translator/v1/submit-result')); ?></code>
             </p>
         </div>
     <?php endif; ?>

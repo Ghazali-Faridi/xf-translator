@@ -425,6 +425,127 @@ class Xf_Translator_Processor
     }
 
     /**
+     * Build job payload for external worker (claim endpoint).
+     *
+     * @param array $queue_entry Queue entry row.
+     * @return array|null Payload or null on failure.
+     */
+    public function build_job_payload_for_worker($queue_entry) {
+        $post_id = (int) $queue_entry['parent_post_id'];
+        $target_language_name = $queue_entry['lng'];
+
+        $post_data = $this->get_post_data($post_id);
+        if (!$post_data) {
+            $this->last_error = "Post data not found for post ID: {$post_id}";
+            return null;
+        }
+
+        $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
+
+        $model = $this->settings->get('selected_model', 'gpt-4o');
+        $is_deepseek = strpos($model, 'deepseek') !== false;
+        $api_key = $is_deepseek ? $this->settings->get('deepseek_api_key', '') : $this->settings->get('api_key', '');
+        $endpoint = $is_deepseek
+            ? 'https://api.deepseek.com/v1/chat/completions'
+            : 'https://api.openai.com/v1/chat/completions';
+
+        return array(
+            'queue_id' => (int) $queue_entry['id'],
+            'post_id' => $post_id,
+            'target_language' => $target_language_name,
+            'type' => isset($queue_entry['type']) ? $queue_entry['type'] : 'NEW',
+            'prompt' => $prompt_data['prompt'],
+            'placeholders_map' => $prompt_data['placeholders_map'],
+            'post_data' => $post_data,
+            'model' => $model,
+            'api_endpoint' => $endpoint,
+            'api_key' => $api_key,
+        );
+    }
+
+    /**
+     * Submit translation result from external worker.
+     *
+     * @param int    $queue_id               Queue entry ID.
+     * @param string $raw_translation_response Raw API response from DeepSeek/OpenAI.
+     * @return array{success: bool, message?: string}
+     */
+    public function submit_translation_result_from_worker($queue_id, $raw_translation_response) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'xf_translate_queue';
+
+        $queue_entry = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $queue_id), ARRAY_A);
+        if (!$queue_entry) {
+            return array('success' => false, 'message' => 'Queue entry not found');
+        }
+
+        if ($queue_entry['status'] === 'completed') {
+            return array('success' => true, 'message' => 'Already completed (idempotent)');
+        }
+
+        if ($queue_entry['status'] !== 'processing') {
+            return array('success' => false, 'message' => 'Job not in processing status');
+        }
+
+        $post_id = (int) $queue_entry['parent_post_id'];
+        $target_language_name = $queue_entry['lng'];
+
+        $post_data = $this->get_post_data($post_id);
+        if (!$post_data) {
+            $this->mark_job_failed($queue_id, "Post data not found for post ID: {$post_id}");
+            return array('success' => false, 'message' => 'Post data not found');
+        }
+
+        $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
+        $placeholders_map = $prompt_data['placeholders_map'];
+
+        $parsed_translation = $this->parse_translation_response($raw_translation_response, $post_data);
+        if (!$parsed_translation) {
+            $this->mark_job_failed($queue_id, 'Failed to parse translation response');
+            return array('success' => false, 'message' => 'Failed to parse translation');
+        }
+
+        foreach ($parsed_translation as $field => $value) {
+            if (isset($placeholders_map[$field]) && !empty($placeholders_map[$field])) {
+                $parsed_translation[$field] = $this->restore_html_and_urls($value, $placeholders_map[$field]);
+            }
+        }
+
+        $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
+        if ($translated_post_id === false) {
+            $this->mark_job_failed($queue_id, $this->last_error ?: 'Failed to create translated post');
+            return array('success' => false, 'message' => $this->last_error);
+        }
+
+        $wpdb->update(
+            $table,
+            array('status' => 'completed', 'translated_post_id' => $translated_post_id),
+            array('id' => $queue_id, 'status' => 'processing'),
+            array('%s', '%d'),
+            array('%d', '%s')
+        );
+
+        return array('success' => true);
+    }
+
+    /**
+     * Mark job as failed.
+     *
+     * @param int    $queue_id     Queue entry ID.
+     * @param string $error_message Error message.
+     */
+    private function mark_job_failed($queue_id, $error_message) {
+        global $wpdb;
+        $wpdb->update(
+            $wpdb->prefix . 'xf_translate_queue',
+            array('status' => 'failed', 'error_message' => $error_message),
+            array('id' => $queue_id, 'status' => 'processing'),
+            array('%s', '%s'),
+            array('%d', '%s')
+        );
+    }
+
+    /**
      * Get post data including title, content, excerpt, and ACF fields
      *
      * @param int $post_id Post ID

@@ -40,7 +40,8 @@ class Xf_Translator_Admin {
 	 */
 	private $version;
 
-	private $settings;
+	/** @var Settings */
+	public $settings;
 
 	/**
 	 * Initialize the class and set its properties.
@@ -127,14 +128,15 @@ class Xf_Translator_Admin {
 
 	}
 
-	/**
+    /**
      * Add admin menu
      */
     public function add_admin_menu() {
+        $capability = apply_filters('xf_translator_admin_capability', 'manage_options');
         add_menu_page(
             __('Unite.AI Translations', 'xf-translator'),
             __('Unite.AI Translations', 'xf-translator'),
-            'manage_options',
+            $capability,
             'xf-translator',
             array($this, 'render_settings_page'),
             'dashicons-translation',
@@ -427,79 +429,12 @@ class Xf_Translator_Admin {
             }
         }
         
-        // Save cron enable/disable settings
-        $enable_new_cron = isset($_POST['enable_new_translations_cron']) ? true : false;
-        $enable_old_cron = isset($_POST['enable_old_translations_cron']) ? true : false;
-        
-        $this->settings->update('enable_new_translations_cron', $enable_new_cron);
-        $this->settings->update('enable_old_translations_cron', $enable_old_cron);
-        
-        // Update cron schedules based on settings
-        $this->update_cron_schedules($enable_new_cron, $enable_old_cron);
-        
+        // Save worker API token
+        if (isset($_POST['worker_api_token'])) {
+            $this->settings->update('worker_api_token', sanitize_text_field($_POST['worker_api_token']));
+        }
+
         $this->add_notice(__('Settings saved successfully.', 'api-translator'), 'success');
-    }
-    
-    /**
-     * Update cron schedules based on settings
-     *
-     * @param bool $enable_new Enable NEW translations cron
-     * @param bool $enable_old Enable OLD translations cron
-     */
-    private function update_cron_schedules($enable_new, $enable_old) {
-        // Handle NEW translations cron
-        if ($enable_new) {
-            // Enable: schedule if not already scheduled
-            $new_timestamp = wp_next_scheduled('xf_translator_process_new_cron');
-            if (!$new_timestamp) {
-                wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_new_cron');
-            }
-        } else {
-            // Disable: unschedule ALL instances to prevent any from running
-            // Use compatibility function for older WordPress versions
-            if (function_exists('wp_unschedule_all_events')) {
-                wp_unschedule_all_events('xf_translator_process_new_cron');
-            } else {
-                // Fallback for older WordPress versions - loop until all events are removed
-                $max_iterations = 100;
-                $iterations = 0;
-                while ($iterations < $max_iterations) {
-                    $timestamp = wp_next_scheduled('xf_translator_process_new_cron');
-                    if ($timestamp === false) {
-                        break; // No more scheduled events
-                    }
-                    wp_unschedule_event($timestamp, 'xf_translator_process_new_cron');
-                    $iterations++;
-                }
-            }
-        }
-        
-        // Handle OLD translations cron
-        if ($enable_old) {
-            // Enable: schedule if not already scheduled
-            $old_timestamp = wp_next_scheduled('xf_translator_process_old_cron');
-            if (!$old_timestamp) {
-                wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_old_cron');
-            }
-        } else {
-            // Disable: unschedule ALL instances to prevent any from running
-            // Use compatibility function for older WordPress versions
-            if (function_exists('wp_unschedule_all_events')) {
-                wp_unschedule_all_events('xf_translator_process_old_cron');
-            } else {
-                // Fallback for older WordPress versions - loop until all events are removed
-                $max_iterations = 100;
-                $iterations = 0;
-                while ($iterations < $max_iterations) {
-                    $timestamp = wp_next_scheduled('xf_translator_process_old_cron');
-                    if ($timestamp === false) {
-                        break; // No more scheduled events
-                    }
-                    wp_unschedule_event($timestamp, 'xf_translator_process_old_cron');
-                    $iterations++;
-                }
-            }
-        }
     }
     
     /**
@@ -1009,15 +944,14 @@ class Xf_Translator_Admin {
         // Store job with fixed key (only one active job at a time)
         set_transient('xf_analyze_active_job', $job_data, DAY_IN_SECONDS);
         
-        // Get cron URL
-        $cron_url = site_url('/wp-content/plugins/xf-translator/analyze-posts.php');
+        $analyze_url = rest_url('xf-translator/v1/analyze-batch');
         
         $this->add_notice(
             sprintf(
-                __('Analysis job created! Total posts to analyze: %d. The job will process 50 posts per run. Add the cron URL to your system cron to start processing.', 'xf-translator'),
-                $total_posts
-            ) . '<br><br><strong>' . __('Cron URL:', 'xf-translator') . '</strong> <code>' . esc_html($cron_url) . '</code><br>' .
-            '<a href="' . esc_url($cron_url) . '" target="_blank" class="button">' . __('View Progress', 'xf-translator') . '</a>',
+                __('Analysis job created! Total posts to analyze: %d. The job will process 50 posts per run. Add to cron: curl -H "Authorization: Bearer YOUR_TOKEN" "%s"', 'xf-translator'),
+                $total_posts,
+                esc_html($analyze_url)
+            ),
             'success'
         );
     }

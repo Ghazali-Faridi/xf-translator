@@ -76,6 +76,7 @@ class Xf_Translator {
 
 		$this->load_dependencies();
 		$this->set_locale();
+		$this->define_rest_routes();
 		$this->define_admin_hooks();
 		$this->define_public_hooks();
 
@@ -145,6 +146,26 @@ class Xf_Translator {
 	}
 
 	/**
+	 * Register REST API routes.
+	 *
+	 * @since    1.0.0
+	 */
+	private function define_rest_routes() {
+		$this->loader->add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
+	}
+
+	/**
+	 * Load REST controller and register routes (called on rest_api_init).
+	 */
+	public function register_rest_routes() {
+		$rest_file = plugin_dir_path( dirname( __FILE__ ) ) . 'includes/rest/class-xf-translator-rest-controller.php';
+		if ( file_exists( $rest_file ) ) {
+			require_once $rest_file;
+			Xf_Translator_Rest_Controller::register_routes();
+		}
+	}
+
+	/**
 	 * Register all of the hooks related to the admin area functionality
 	 * of the plugin.
 	 *
@@ -158,7 +179,7 @@ class Xf_Translator {
         $this->loader->add_action( 'admin_enqueue_scripts', $plugin_admin, 'enqueue_styles' );
 		$this->loader->add_action( 'admin_enqueue_scripts', $plugin_admin, 'enqueue_scripts' );
 
-        $this->loader->add_action('admin_menu', $plugin_admin,'add_admin_menu');
+        // Menu is registered directly in xf-translator.php so it always shows
         $this->loader->add_action('admin_init', $plugin_admin,'handle_form_submissions');
         $this->loader->add_action('restrict_manage_posts', $plugin_admin, 'add_language_filter_dropdown');
         $this->loader->add_action('pre_get_posts', $plugin_admin, 'filter_posts_by_language');

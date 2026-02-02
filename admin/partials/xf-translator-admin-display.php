@@ -12,6 +12,9 @@ if (!defined('ABSPATH')) {
 
 // Get settings instance from admin object
 global $api_translator_admin;
+if (empty($api_translator_admin) || !is_object($api_translator_admin)) {
+    wp_die(esc_html__('Translation plugin admin not loaded. Deactivate and reactivate the plugin.', 'xf-translator'));
+}
 $settings = $api_translator_admin->settings;
 $languages = $settings->get('languages', array());
 $brand_tone = $settings->get('brand_tone', '');
@@ -22,8 +25,7 @@ $deepseek_api_key = $settings->get('deepseek_api_key', '');
 $selected_model = $settings->get('selected_model', 'gpt-4o');
 $processing_delay_minutes = $settings->get('processing_delay_minutes', 0);
 $max_concurrent_processing = $settings->get('max_concurrent_processing', 20);
-$enable_new_cron = $settings->get('enable_new_translations_cron', true);
-$enable_old_cron = $settings->get('enable_old_translations_cron', true);
+$worker_api_token = $settings->get('worker_api_token', '');
 ?>
 
 <div class="wrap api-translator-settings">

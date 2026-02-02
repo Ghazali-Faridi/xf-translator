@@ -218,26 +218,6 @@ function xf_translator_register_hooks() {
 	return $handle;
 }, PHP_INT_MAX, 3); // Highest possible priority - runs after ALL plugins
 
-	/**
-	 * Add custom cron schedule for every 3 minutes
-	 *
-	 * @since    1.0.0
-	 */
-	add_filter('cron_schedules', function($schedules) {
-		$schedules['every_3_minutes'] = array(
-			'interval' => 180, // 180 seconds = 3 minutes
-			'display' => __('Every 3 Minutes', 'xf-translator')
-		);
-		return $schedules;
-	});
-	
-	/**
-	 * Clean up orphaned cron events on plugin load
-	 * This ensures disabled cron jobs don't run even if events are still scheduled
-	 *
-	 * @since    1.0.0
-	 */
-	add_action('init', 'xf_translator_cleanup_orphaned_cron_events', 1);
 }
 
 // Register hooks after WordPress is loaded (but early enough for filters to work)
@@ -246,241 +226,61 @@ if (function_exists('add_action')) {
 }
 
 /**
- * Compatibility function to unschedule all events for a hook
- * Works with both old and new WordPress versions
- *
- * @param string $hook The hook name
- * @since    1.0.0
+ * Register admin menu directly so it always shows even if core class fails.
  */
-function xf_translator_unschedule_all_events($hook) {
-	// Use WordPress 5.1+ function if available
-	if (function_exists('wp_unschedule_all_events')) {
-		wp_unschedule_all_events($hook);
-		return;
-	}
-	
-	// Fallback for older WordPress versions
-	// Get all scheduled events for this hook and unschedule them one by one
-	// Use wp_get_scheduled_event() in a loop until no more events are found
-	$max_iterations = 100; // Safety limit to prevent infinite loops
-	$iterations = 0;
-	
-	while ($iterations < $max_iterations) {
-		$timestamp = wp_next_scheduled($hook);
-		if ($timestamp === false) {
-			// No more scheduled events found
-			break;
-		}
-		wp_unschedule_event($timestamp, $hook);
-		$iterations++;
-	}
+function xf_translator_add_admin_menu() {
+	$capability = apply_filters('xf_translator_admin_capability', 'manage_options');
+	add_menu_page(
+		__('Unite.AI Translations', 'xf-translator'),
+		__('Unite.AI Translations', 'xf-translator'),
+		$capability,
+		'xf-translator',
+		'xf_translator_render_settings_page',
+		'dashicons-translation',
+		30
+	);
 }
 
 /**
- * Process NEW translations via cron
- *
- * @since    1.0.0
+ * Render settings page (standalone so menu works even if admin class fails).
  */
-function xf_translator_process_new_translations_cron() {
-	// CRITICAL: Check if cron is enabled FIRST before any processing
-	// This prevents any execution if the option is disabled
-	$settings_file = plugin_dir_path(__FILE__) . 'admin/class-settings.php';
-	
-	// Check if settings file exists
-	if (!file_exists($settings_file)) {
-		// If settings file doesn't exist, unschedule events and exit
-		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
+function xf_translator_render_settings_page() {
+	$admin_file = plugin_dir_path(__FILE__) . 'admin/class-xf-translator-admin.php';
+	if (!file_exists($admin_file)) {
+		echo '<div class="wrap"><p>' . esc_html__('Plugin files missing.', 'xf-translator') . '</p></div>';
 		return;
 	}
-	
-	// Check if class already exists to avoid conflicts
 	if (!class_exists('Settings')) {
-		require_once $settings_file;
+		require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
 	}
-	
-	// Only proceed if Settings class is available
-	if (!class_exists('Settings')) {
-		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
-		return;
+	if (!class_exists('Xf_Translator_Admin')) {
+		require_once $admin_file;
 	}
-	
-	$settings = new Settings();
-	
-	if (!$settings->get('enable_new_translations_cron', true)) {
-		// Cron disabled - unschedule any remaining events and exit immediately
-		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
-		return;
+	$plugin_name = 'xf-translator';
+	$version = defined('XF_TRANSLATOR_VERSION') ? XF_TRANSLATOR_VERSION : '1.0.0';
+	$plugin_admin = new Xf_Translator_Admin($plugin_name, $version);
+	global $api_translator_admin;
+	$api_translator_admin = $plugin_admin;
+	$current_tab = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'general';
+	if ($current_tab === 'translations') {
+		$current_tab = 'general';
 	}
-	
-	// Bounded parallelism: exit immediately if at capacity (no new workers)
-	global $wpdb;
-	$queue_table = $wpdb->prefix . 'xf_translate_queue';
-	$max_concurrent = (int) $settings->get('max_concurrent_processing', 20);
-	$processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$queue_table} WHERE status = 'processing'");
-	if ($processing_count >= $max_concurrent) {
-		return;
-	}
-	
-	// SAFETY: Only run in proper cron context to prevent blocking page loads
-	// This prevents WordPress pseudo-cron from running during regular page requests
-	if (!wp_doing_cron() && !defined('WP_CLI')) {
-		return; // Don't run during regular page loads
-	}
-	
-	// SAFETY: Track execution time to prevent long-running processes
-	$start_time = time();
-	$max_execution_time = 240; // 4 minutes max (leaves buffer for cleanup)
-	
-	// Load required files
-	require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
-	
-	// Initialize processor
-	$processor = new Xf_Translator_Processor();
-	
-	// Process next NEW translation (type='NEW', status='pending')
-	$result = $processor->process_next_translation('NEW');
-	
-	// SAFETY: Check if processing took too long
-	$execution_time = time() - $start_time;
-	if ($execution_time > $max_execution_time) {
-		// xf_translator_log('Cron: NEW translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
-	}
-	
-	if ($result) {
-		xf_translator_log('Cron: NEW translation processed successfully', 'info');
-	} else {
-		$error = $processor->get_last_error();
-		if (empty($error)) {
-			$error = 'No pending NEW translations found in queue';
-		}
-		//xf_translator_log('Cron: ' . $error, 'debug');
-	}
+	$tabs = array(
+		'general' => __('Settings', 'api-translator'),
+		'test-translation' => __('Test Translation', 'api-translator'),
+		'queue' => __('Translation Queue', 'api-translator'),
+		'existing-queue' => __('Existing Post Queue', 'api-translator'),
+		'translation-rules' => __('Translation Rules', 'api-translator'),
+		'menu-translation' => __('Menu Translation', 'api-translator'),
+		'taxonomy-translation' => __('Taxonomy Translation', 'api-translator'),
+		'acf-translation' => __('ACF Translation', 'api-translator'),
+		'user-meta-translation' => __('User Meta Translation', 'api-translator'),
+		'logs' => __('Logs', 'api-translator')
+	);
+	include plugin_dir_path(__FILE__) . 'admin/partials/xf-translator-admin-display.php';
 }
-add_action('xf_translator_process_new_cron', 'xf_translator_process_new_translations_cron');
 
-/**
- * Process OLD translations via cron
- *
- * @since    1.0.0
- */
-function xf_translator_process_old_translations_cron() {
-	// CRITICAL: Check if cron is enabled FIRST before any processing
-	// This prevents any execution if the option is disabled
-	$settings_file = plugin_dir_path(__FILE__) . 'admin/class-settings.php';
-	
-	// Check if settings file exists
-	if (!file_exists($settings_file)) {
-		// If settings file doesn't exist, unschedule events and exit
-		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
-		return;
-	}
-	
-	// Check if class already exists to avoid conflicts
-	if (!class_exists('Settings')) {
-		require_once $settings_file;
-	}
-	
-	// Only proceed if Settings class is available
-	if (!class_exists('Settings')) {
-		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
-		return;
-	}
-	
-	$settings = new Settings();
-	
-	if (!$settings->get('enable_old_translations_cron', true)) {
-		// Cron disabled - unschedule any remaining events and exit immediately
-		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
-		return;
-	}
-	
-	// Bounded parallelism: exit immediately if at capacity (no new workers)
-	global $wpdb;
-	$queue_table = $wpdb->prefix . 'xf_translate_queue';
-	$max_concurrent = (int) $settings->get('max_concurrent_processing', 20);
-	$processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$queue_table} WHERE status = 'processing'");
-	if ($processing_count >= $max_concurrent) {
-		return;
-	}
-	
-	// SAFETY: Only run in proper cron context to prevent blocking page loads
-	// This prevents WordPress pseudo-cron from running during regular page requests
-	if (!wp_doing_cron() && !defined('WP_CLI')) {
-		return; // Don't run during regular page loads
-	}
-	
-	// SAFETY: Track execution time to prevent long-running processes
-	$start_time = time();
-	$max_execution_time = 240; // 4 minutes max (leaves buffer for cleanup)
-	
-	// Load required files
-	require_once plugin_dir_path(__FILE__) . 'includes/class-translation-processor.php';
-	
-	// Initialize processor
-	$processor = new Xf_Translator_Processor();
-	
-	// Process next OLD translation (type='OLD', status='pending')
-	$result = $processor->process_next_translation('OLD');
-	
-	// SAFETY: Check if processing took too long
-	$execution_time = time() - $start_time;
-	if ($execution_time > $max_execution_time) {
-		// xf_translator_log('Cron: OLD translation processing exceeded time limit (' . $execution_time . 's). Aborted to prevent site slowdown.', 'warning');
-	}
-	
-	if ($result) {
-		xf_translator_log('Cron: OLD translation processed successfully', 'info');
-	} else {
-		$error = $processor->get_last_error();
-		if (empty($error)) {
-			$error = 'No pending OLD translations found in queue';
-		}
-		xf_translator_log('Cron: ' . $error, 'debug');
-	}
-}
-add_action('xf_translator_process_old_cron', 'xf_translator_process_old_translations_cron');
-
-/**
- * Clean up orphaned cron events on plugin load
- * This ensures disabled cron jobs don't run even if events are still scheduled
- *
- * @since    1.0.0
- */
-function xf_translator_cleanup_orphaned_cron_events() {
-	$settings_file = plugin_dir_path(__FILE__) . 'admin/class-settings.php';
-	
-	// Check if settings file exists before requiring it
-	if (!file_exists($settings_file)) {
-		return;
-	}
-	
-	// Check if class already exists to avoid conflicts
-	if (!class_exists('Settings')) {
-		require_once $settings_file;
-	}
-	
-	// Only proceed if Settings class is available
-	if (!class_exists('Settings')) {
-		return;
-	}
-	
-	try {
-		$settings = new Settings();
-		
-		// If NEW translations cron is disabled, remove any scheduled events
-		if (!$settings->get('enable_new_translations_cron', true)) {
-			xf_translator_unschedule_all_events('xf_translator_process_new_cron');
-		}
-		
-		// If OLD translations cron is disabled, remove any scheduled events
-		if (!$settings->get('enable_old_translations_cron', true)) {
-			xf_translator_unschedule_all_events('xf_translator_process_old_cron');
-		}
-	} catch (Exception $e) {
-		// Silently fail to prevent breaking the site
-		error_log('XF Translator: Error cleaning up cron events: ' . $e->getMessage());
-	}
-}
+add_action('admin_menu', 'xf_translator_add_admin_menu', 9);
 
 /**
  * Begins execution of the plugin.

@@ -30,23 +30,12 @@ class Xf_Translator_Activator {
 	 * @since    1.0.0
 	 */
 	public static function activate() {
-		require_once plugin_dir_path(dirname(__FILE__)) . 'admin/class-settings.php';
-		$settings = new Settings();
-		
-		// Get settings (defaults to enabled if not set)
-		$enable_new = $settings->get('enable_new_translations_cron', true);
-		$enable_old = $settings->get('enable_old_translations_cron', true);
-		
-		// Schedule cron events only if enabled
-		if ($enable_new && !wp_next_scheduled('xf_translator_process_new_cron')) {
-			wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_new_cron');
+		// Unschedule any legacy cron events (processing moved to external workers)
+		if (function_exists('wp_unschedule_all_events')) {
+			wp_unschedule_all_events('xf_translator_process_new_cron');
+			wp_unschedule_all_events('xf_translator_process_old_cron');
 		}
-		
-		if ($enable_old && !wp_next_scheduled('xf_translator_process_old_cron')) {
-			wp_schedule_event(time(), 'every_3_minutes', 'xf_translator_process_old_cron');
-		}
-		
-		// Flush rewrite rules to register new author archive rules
+
 		flush_rewrite_rules();
 	}
 

@@ -115,33 +115,23 @@ if (!defined('ABSPATH')) {
             </tr>
             <tr>
                 <th scope="row">
-                    <?php _e('Background Processing', 'api-translator'); ?>
+                    <label for="worker_api_token"><?php _e('Worker API Token', 'api-translator'); ?></label>
                 </th>
                 <td>
-                    <fieldset>
-                        <label>
-                            <input type="checkbox" 
-                                   name="enable_new_translations_cron" 
-                                   value="1" 
-                                   <?php checked($enable_new_cron, true); ?>>
-                            <?php _e('Enable automatic processing of NEW translations', 'api-translator'); ?>
-                        </label>
-                        <p class="description" style="margin-left: 25px; margin-top: 5px;">
-                            <?php _e('When enabled, the system will automatically process NEW translation queue entries via wp-cron.', 'api-translator'); ?>
-                        </p>
-                    </fieldset>
-                    <fieldset style="margin-top: 15px;">
-                        <label>
-                            <input type="checkbox" 
-                                   name="enable_old_translations_cron" 
-                                   value="1" 
-                                   <?php checked($enable_old_cron, true); ?>>
-                            <?php _e('Enable automatic processing of OLD translations', 'api-translator'); ?>
-                        </label>
-                        <p class="description" style="margin-left: 25px; margin-top: 5px;">
-                            <?php _e('When enabled, the system will automatically process OLD translation queue entries via wp-cron.', 'api-translator'); ?>
-                        </p>
-                    </fieldset>
+                    <input type="password" 
+                           id="worker_api_token" 
+                           name="worker_api_token" 
+                           value="<?php echo esc_attr($worker_api_token); ?>" 
+                           class="regular-text"
+                           placeholder="<?php esc_attr_e('Generate or enter a secure token', 'api-translator'); ?>">
+                    <p class="description">
+                        <?php _e('Required for external workers to claim jobs and submit results. Use: Authorization: Bearer YOUR_TOKEN', 'api-translator'); ?>
+                    </p>
+                    <p class="description">
+                        <strong><?php _e('Endpoints:', 'api-translator'); ?></strong><br>
+                        GET <?php echo esc_html(rest_url('xf-translator/v1/claim-job')); ?><br>
+                        POST <?php echo esc_html(rest_url('xf-translator/v1/submit-result')); ?>
+                    </p>
                 </td>
             </tr>
         </table>
