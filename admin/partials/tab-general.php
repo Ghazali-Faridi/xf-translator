@@ -118,22 +118,19 @@ if (!defined('ABSPATH')) {
                     <label for="worker_api_token"><?php _e('Worker API Token', 'api-translator'); ?></label>
                 </th>
                 <td>
-                    <input type="password" 
-                           id="worker_api_token" 
-                           name="worker_api_token" 
-                           value="<?php echo esc_attr($worker_api_token); ?>" 
+                    <input type="password"
+                           id="worker_api_token"
+                           name="worker_api_token"
+                           value="<?php echo esc_attr($worker_api_token); ?>"
                            class="regular-text"
-                           placeholder="<?php esc_attr_e('Generate or enter a secure token', 'api-translator'); ?>">
+                           placeholder="<?php esc_attr_e('Any string for Bearer token', 'api-translator'); ?>"
+                           autocomplete="off">
                     <p class="description">
-                        <?php _e('Required for external workers to claim jobs and submit results. Use: Authorization: Bearer YOUR_TOKEN', 'api-translator'); ?>
-                    </p>
-                    <p class="description">
-                        <strong><?php _e('Endpoints:', 'api-translator'); ?></strong><br>
-                        GET <?php echo esc_html(rest_url('xf-translator/v1/claim-job')); ?><br>
-                        POST <?php echo esc_html(rest_url('xf-translator/v1/submit-result')); ?>
+                        <?php _e('Token for external translation workers (e.g. DigitalOcean). Workers must send this in the Authorization header as Bearer token when calling claim-job and submit-result. Leave empty to disable REST API access for workers.', 'api-translator'); ?>
                     </p>
                 </td>
             </tr>
+          
         </table>
         
         <?php submit_button(__('Save API Settings', 'api-translator'), 'primary', 'submit', false); ?>

@@ -31,7 +31,7 @@ $failed_old_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
         <?php
         // Check if there's an active job
         $active_job = get_transient('xf_analyze_active_job');
-        $analyze_url = rest_url('xf-translator/v1/analyze-batch');
+        $cron_url = site_url('/wp-content/plugins/xf-translator/analyze-posts.php');
         ?>
         
         <?php if ($active_job && $active_job['status'] === 'processing'): ?>
@@ -45,8 +45,12 @@ $failed_old_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
                 <p><strong><?php _e('Queue Entries Added:', 'xf-translator'); ?></strong> <?php echo number_format($active_job['added_entries']); ?></p>
                 
                 <p style="margin-top: 15px;">
-                    <strong><?php _e('Cron URL (use Worker API token):', 'xf-translator'); ?></strong><br>
-                    <code style="display: block; padding: 10px; background: #f5f5f5; margin: 10px 0; word-break: break-all;">curl -H "Authorization: Bearer YOUR_TOKEN" "<?php echo esc_html($analyze_url); ?>"</code>
+                    <strong><?php _e('Cron URL:', 'xf-translator'); ?></strong><br>
+                    <code style="display: block; padding: 10px; background: #f5f5f5; margin: 10px 0; word-break: break-all;"><?php echo esc_html($cron_url); ?></code>
+                </p>
+                
+                <p>
+                    <a href="<?php echo esc_url($cron_url); ?>" target="_blank" class="button button-primary"><?php _e('View Progress Page', 'xf-translator'); ?></a>
                 </p>
                 
             </div>

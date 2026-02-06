@@ -16,7 +16,7 @@
  * Plugin Name:       Unite.AI Translations
  * Plugin URI:        https://xfinitive.co
  * Description:       Serverside translation multilingual plugin 
- * Version:           1.1.1
+ * Version:           1.1.2
  * Author:            ghazali
  * Author URI:        https://xfinitive.co/
  * License:           GPL-2.0+
@@ -218,6 +218,12 @@ function xf_translator_register_hooks() {
 	return $handle;
 }, PHP_INT_MAX, 3); // Highest possible priority - runs after ALL plugins
 
+	/**
+	 * Unschedule any legacy translation cron events (processing is now via external workers).
+	 *
+	 * @since    1.0.0
+	 */
+	add_action('init', 'xf_translator_unschedule_legacy_cron_events', 1);
 }
 
 // Register hooks after WordPress is loaded (but early enough for filters to work)
@@ -226,61 +232,45 @@ if (function_exists('add_action')) {
 }
 
 /**
- * Register admin menu directly so it always shows even if core class fails.
+ * Compatibility function to unschedule all events for a hook
+ * Works with both old and new WordPress versions
+ *
+ * @param string $hook The hook name
+ * @since    1.0.0
  */
-function xf_translator_add_admin_menu() {
-	$capability = apply_filters('xf_translator_admin_capability', 'manage_options');
-	add_menu_page(
-		__('Unite.AI Translations', 'xf-translator'),
-		__('Unite.AI Translations', 'xf-translator'),
-		$capability,
-		'xf-translator',
-		'xf_translator_render_settings_page',
-		'dashicons-translation',
-		30
-	);
+function xf_translator_unschedule_all_events($hook) {
+	// Use WordPress 5.1+ function if available
+	if (function_exists('wp_unschedule_all_events')) {
+		wp_unschedule_all_events($hook);
+		return;
+	}
+	
+	// Fallback for older WordPress versions
+	// Get all scheduled events for this hook and unschedule them one by one
+	// Use wp_get_scheduled_event() in a loop until no more events are found
+	$max_iterations = 100; // Safety limit to prevent infinite loops
+	$iterations = 0;
+	
+	while ($iterations < $max_iterations) {
+		$timestamp = wp_next_scheduled($hook);
+		if ($timestamp === false) {
+			// No more scheduled events found
+			break;
+		}
+		wp_unschedule_event($timestamp, $hook);
+		$iterations++;
+	}
 }
 
 /**
- * Render settings page (standalone so menu works even if admin class fails).
+ * Unschedule legacy translation cron events. Processing is done by external workers.
+ *
+ * @since    1.0.0
  */
-function xf_translator_render_settings_page() {
-	$admin_file = plugin_dir_path(__FILE__) . 'admin/class-xf-translator-admin.php';
-	if (!file_exists($admin_file)) {
-		echo '<div class="wrap"><p>' . esc_html__('Plugin files missing.', 'xf-translator') . '</p></div>';
-		return;
-	}
-	if (!class_exists('Settings')) {
-		require_once plugin_dir_path(__FILE__) . 'admin/class-settings.php';
-	}
-	if (!class_exists('Xf_Translator_Admin')) {
-		require_once $admin_file;
-	}
-	$plugin_name = 'xf-translator';
-	$version = defined('XF_TRANSLATOR_VERSION') ? XF_TRANSLATOR_VERSION : '1.0.0';
-	$plugin_admin = new Xf_Translator_Admin($plugin_name, $version);
-	global $api_translator_admin;
-	$api_translator_admin = $plugin_admin;
-	$current_tab = isset($_GET['tab']) ? sanitize_text_field($_GET['tab']) : 'general';
-	if ($current_tab === 'translations') {
-		$current_tab = 'general';
-	}
-	$tabs = array(
-		'general' => __('Settings', 'api-translator'),
-		'test-translation' => __('Test Translation', 'api-translator'),
-		'queue' => __('Translation Queue', 'api-translator'),
-		'existing-queue' => __('Existing Post Queue', 'api-translator'),
-		'translation-rules' => __('Translation Rules', 'api-translator'),
-		'menu-translation' => __('Menu Translation', 'api-translator'),
-		'taxonomy-translation' => __('Taxonomy Translation', 'api-translator'),
-		'acf-translation' => __('ACF Translation', 'api-translator'),
-		'user-meta-translation' => __('User Meta Translation', 'api-translator'),
-		'logs' => __('Logs', 'api-translator')
-	);
-	include plugin_dir_path(__FILE__) . 'admin/partials/xf-translator-admin-display.php';
+function xf_translator_unschedule_legacy_cron_events() {
+	xf_translator_unschedule_all_events('xf_translator_process_new_cron');
+	xf_translator_unschedule_all_events('xf_translator_process_old_cron');
 }
-
-add_action('admin_menu', 'xf_translator_add_admin_menu', 9);
 
 /**
  * Begins execution of the plugin.

@@ -76,22 +76,6 @@ $failed_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 
         </div>
     <?php endif; ?>
     
-    <?php if ($pending_count > 0) : ?>
-        <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
-            <h3 style="margin-top: 0;"><?php _e('Process Pending Jobs', 'xf-translator'); ?></h3>
-            <!-- <p><?php _e('Click the button below to process the next pending translation job. You can also access the processing script directly or set it up as a cron job.', 'xf-translator'); ?></p> -->
-            <form method="post" action="" style="margin-top: 10px;">
-                <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
-                <input type="hidden" name="api_translator_action" value="process_queue">
-                <!-- <?php submit_button(__('Process Next Pending Job', 'xf-translator'), 'primary', 'submit', false); ?> -->
-            </form>
-            <p style="margin-top: 10px; font-size: 12px; color: #666;">
-                <?php _e('Translation is now handled by external workers. Use REST API:', 'xf-translator'); ?><br>
-                <code>GET <?php echo esc_url(rest_url('xf-translator/v1/claim-job')); ?></code><br>
-                <code>POST <?php echo esc_url(rest_url('xf-translator/v1/submit-result')); ?></code>
-            </p>
-        </div>
-    <?php endif; ?>
     
     <?php settings_errors('api_translator_messages'); ?>
 </div>

@@ -305,11 +305,20 @@ class Xf_Translator_Processor
         // Parse the structured translation response
         $parsed_translation = $this->parse_translation_response($translation_result, $post_data);
 
-        // Restore HTML tags and URLs from placeholders
-        if (!empty($parsed_translation) && !empty($placeholders_map)) {
+        // Re-inject original URLs: by context (src/href) for HTML fields; by order for plain text
+        if (!empty($parsed_translation)) {
             foreach ($parsed_translation as $field => $value) {
-                if (isset($placeholders_map[$field]) && !empty($placeholders_map[$field])) {
-                    $parsed_translation[$field] = $this->restore_html_and_urls($value, $placeholders_map[$field]);
+                if (!isset($post_data[$field]) || !is_string($post_data[$field]) || !is_string($value)) {
+                    continue;
+                }
+                $orig = $post_data[$field];
+                if ($field === 'content' || strpos($orig, 'src=') !== false || strpos($orig, 'href=') !== false) {
+                    $parsed_translation[$field] = $this->restore_urls_by_context($value, $orig);
+                } else {
+                    $ordered_urls = $this->extract_urls_from_content($orig);
+                    if (!empty($ordered_urls)) {
+                        $parsed_translation[$field] = $this->restore_corrupted_urls_in_order($value, $ordered_urls);
+                    }
                 }
             }
         }
@@ -425,123 +434,271 @@ class Xf_Translator_Processor
     }
 
     /**
-     * Build job payload for external worker (claim endpoint).
+     * Claim one job for external worker (NEW then OLD). Used by DigitalOcean workers.
      *
-     * @param array $queue_entry Queue entry row.
-     * @return array|null Payload or null on failure.
+     * @return array ['status' => 'busy'|'empty'|'success', 'job' => array|null]
      */
-    public function build_job_payload_for_worker($queue_entry) {
-        $post_id = (int) $queue_entry['parent_post_id'];
-        $target_language_name = $queue_entry['lng'];
+    public function claim_job_for_worker()
+    {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
 
-        $post_data = $this->get_post_data($post_id);
-        if (!$post_data) {
-            $this->last_error = "Post data not found for post ID: {$post_id}";
-            return null;
+        $this->db_reconnect_if_needed();
+
+        $max_runtime_minutes = (int) $this->settings->get('translation_job_max_runtime_minutes', 15);
+        if ($max_runtime_minutes > 0) {
+            $reclaim_before = date('Y-m-d H:i:s', strtotime("-{$max_runtime_minutes} minutes"));
+            $wpdb->query($wpdb->prepare(
+                "UPDATE $table_name SET status = 'pending', error_message = NULL WHERE status = 'processing' AND updated < %s",
+                $reclaim_before
+            ));
         }
 
-        $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
+        $max_concurrent_processing = (int) $this->settings->get('max_concurrent_processing', 20);
+        $current_processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'processing'");
+        if ($current_processing_count >= $max_concurrent_processing) {
+            return array('status' => 'busy');
+        }
 
-        $model = $this->settings->get('selected_model', 'gpt-4o');
-        $is_deepseek = strpos($model, 'deepseek') !== false;
-        $api_key = $is_deepseek ? $this->settings->get('deepseek_api_key', '') : $this->settings->get('api_key', '');
-        $endpoint = $is_deepseek
-            ? 'https://api.deepseek.com/v1/chat/completions'
-            : 'https://api.openai.com/v1/chat/completions';
+        $processing_delay_minutes = (int) $this->settings->get('processing_delay_minutes', 0);
+        $min_created_time = $processing_delay_minutes > 0 ? date('Y-m-d H:i:s', strtotime("-{$processing_delay_minutes} minutes")) : null;
 
+        foreach (array('NEW', 'OLD') as $type) {
+            $claimed_id = null;
+            $wpdb->query('START TRANSACTION');
+            $old_err = error_reporting(0);
+            try {
+                $where = "status = 'pending' AND type = %s";
+                $params = array($type);
+                if ($type === 'NEW' && $min_created_time) {
+                    $where .= " AND created <= %s";
+                    $params[] = $min_created_time;
+                }
+                // FOR UPDATE SKIP LOCKED: concurrent claim requests each get a different row (MySQL 8+, MariaDB 10.6+)
+                $ids = $wpdb->get_col($wpdb->prepare(
+                    "SELECT id FROM $table_name WHERE $where ORDER BY id DESC LIMIT 1 FOR UPDATE SKIP LOCKED",
+                    $params
+                ));
+                if (empty($ids) && $wpdb->last_error) {
+                    // Fallback for MySQL < 8 / MariaDB < 10.6 which don't support SKIP LOCKED
+                    $wpdb->last_error = '';
+                    $ids = $wpdb->get_col($wpdb->prepare(
+                        "SELECT id FROM $table_name WHERE $where ORDER BY id DESC LIMIT 1 FOR UPDATE",
+                        $params
+                    ));
+                }
+                if (!empty($ids)) {
+                    $claimed_id = (int) $ids[0];
+                    $rows = $wpdb->update(
+                        $table_name,
+                        array('status' => 'processing', 'updated' => current_time('mysql')),
+                        array('id' => $claimed_id, 'status' => 'pending'),
+                        array('%s', '%s'),
+                        array('%d', '%s')
+                    );
+                    if ($rows !== 1) {
+                        $claimed_id = null;
+                    }
+                }
+                $wpdb->query('COMMIT');
+            } catch (Exception $e) {
+                $wpdb->query('ROLLBACK');
+                $claimed_id = null;
+            }
+            error_reporting($old_err);
+
+            if ($claimed_id === null) {
+                continue;
+            }
+
+            $queue_entry = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE id = %d", $claimed_id), ARRAY_A);
+            if (!$queue_entry) {
+                return array('status' => 'empty');
+            }
+
+            $max_failures = 5;
+            $failure_check_time = date('Y-m-d H:i:s', strtotime('-1 hour'));
+            $failure_count = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->prefix}xf_translate_queue WHERE parent_post_id = %d AND lng = %s AND status = 'failed' AND updated >= %s",
+                $queue_entry['parent_post_id'],
+                $queue_entry['lng'],
+                $failure_check_time
+            ));
+            if ($failure_count >= $max_failures) {
+                $wpdb->update(
+                    $table_name,
+                    array('status' => 'failed', 'error_message' => 'Circuit breaker: too many failures.'),
+                    array('id' => $claimed_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                continue;
+            }
+
+            $post_id = (int) $queue_entry['parent_post_id'];
+            $post_data = $this->get_post_data($post_id);
+            if (!$post_data) {
+                $wpdb->update(
+                    $table_name,
+                    array('status' => 'failed', 'error_message' => 'Post data not found'),
+                    array('id' => $claimed_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                continue;
+            }
+
+            $target_language_name = $queue_entry['lng'];
+            $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
+            $prompt = isset($prompt_data['prompt']) ? $prompt_data['prompt'] : '';
+
+            $model = $this->settings->get('selected_model', 'gpt-4o');
+            $is_deepseek = strpos($model, 'deepseek') !== false;
+            $api_key = $is_deepseek
+                ? $this->settings->get('deepseek_api_key', '')
+                : $this->settings->get('api_key', '');
+            $api_endpoint = $is_deepseek
+                ? 'https://api.deepseek.com/v1/chat/completions'
+                : 'https://api.openai.com/v1/chat/completions';
+
+            // Debug: log what we send to the translation API (define XF_TRANSLATOR_DEBUG_TRANSLATION in wp-config.php to enable)
+            if (defined('XF_TRANSLATOR_DEBUG_TRANSLATION') && XF_TRANSLATOR_DEBUG_TRANSLATION) {
+                error_log('XF Translator DEBUG [sent to API] queue_id=' . (int) $queue_entry['id'] . ' prompt_length=' . strlen($prompt) . ' snippet: ' . substr($prompt, 0, 28000));
+            }
+
+            return array(
+                'status' => 'success',
+                'job' => array(
+                    'queue_id' => (int) $queue_entry['id'],
+                    'post_id' => $post_id,
+                    'language' => $target_language_name,
+                    'lang' => $target_language_name,
+                    'type' => isset($queue_entry['type']) ? $queue_entry['type'] : 'NEW',
+                    'content' => $post_data,
+                    'prompt' => $prompt,
+                    'api_endpoint' => $api_endpoint,
+                    'api_key' => $api_key,
+                    'model' => $model
+                )
+            );
+        }
+
+        $pending_new = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $table_name WHERE status = 'pending' AND type = %s", 'NEW'));
+        $pending_old = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $table_name WHERE status = 'pending' AND type = %s", 'OLD'));
+        $processing = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'processing'");
         return array(
-            'queue_id' => (int) $queue_entry['id'],
-            'post_id' => $post_id,
-            'target_language' => $target_language_name,
-            'type' => isset($queue_entry['type']) ? $queue_entry['type'] : 'NEW',
-            'prompt' => $prompt_data['prompt'],
-            'placeholders_map' => $prompt_data['placeholders_map'],
-            'post_data' => $post_data,
-            'model' => $model,
-            'api_endpoint' => $endpoint,
-            'api_key' => $api_key,
+            'status' => 'empty',
+            'queue_stats' => array(
+                'pending_new' => $pending_new,
+                'pending_old' => $pending_old,
+                'processing' => $processing,
+            )
         );
     }
 
     /**
-     * Submit translation result from external worker.
+     * Submit translated content from external worker. Idempotent: if job already completed, returns success.
      *
-     * @param int    $queue_id               Queue entry ID.
-     * @param string $raw_translation_response Raw API response from DeepSeek/OpenAI.
-     * @return array{success: bool, message?: string}
+     * @param int $queue_id Queue entry ID
+     * @param array $translated_content Parsed translated data (title, content, excerpt, meta_*, acf_*)
+     * @return array ['success' => bool, 'message' => string, 'translated_post_id' => int|null]
      */
-    public function submit_translation_result_from_worker($queue_id, $raw_translation_response) {
+    public function submit_translation_result($queue_id, $translated_content)
+    {
         global $wpdb;
-        $table = $wpdb->prefix . 'xf_translate_queue';
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        $queue_id = (int) $queue_id;
 
-        $queue_entry = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $queue_id), ARRAY_A);
+        $queue_entry = $wpdb->get_row($wpdb->prepare("SELECT * FROM $table_name WHERE id = %d", $queue_id), ARRAY_A);
         if (!$queue_entry) {
-            return array('success' => false, 'message' => 'Queue entry not found');
+            return array('success' => false, 'message' => 'Queue entry not found.', 'translated_post_id' => null);
         }
 
         if ($queue_entry['status'] === 'completed') {
-            return array('success' => true, 'message' => 'Already completed (idempotent)');
+            return array(
+                'success' => true,
+                'message' => 'Already completed (idempotent).',
+                'translated_post_id' => (int) $queue_entry['translated_post_id']
+            );
         }
 
         if ($queue_entry['status'] !== 'processing') {
-            return array('success' => false, 'message' => 'Job not in processing status');
+            return array('success' => false, 'message' => 'Job is not in processing status.', 'translated_post_id' => null);
         }
 
         $post_id = (int) $queue_entry['parent_post_id'];
         $target_language_name = $queue_entry['lng'];
-
-        $post_data = $this->get_post_data($post_id);
-        if (!$post_data) {
-            $this->mark_job_failed($queue_id, "Post data not found for post ID: {$post_id}");
-            return array('success' => false, 'message' => 'Post data not found');
+        $original_data = $this->get_post_data($post_id);
+        if (!$original_data) {
+            $wpdb->update(
+                $table_name,
+                array('status' => 'failed', 'error_message' => 'Original post data not found'),
+                array('id' => $queue_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+            return array('success' => false, 'message' => 'Original post data not found.', 'translated_post_id' => null);
         }
 
-        $prompt_data = $this->build_translation_prompt($post_data, $target_language_name);
-        $placeholders_map = $prompt_data['placeholders_map'];
-
-        $parsed_translation = $this->parse_translation_response($raw_translation_response, $post_data);
-        if (!$parsed_translation) {
-            $this->mark_job_failed($queue_id, 'Failed to parse translation response');
-            return array('success' => false, 'message' => 'Failed to parse translation');
+        // Debug: log raw response from translation API (define XF_TRANSLATOR_DEBUG_TRANSLATION in wp-config.php to enable)
+        if (defined('XF_TRANSLATOR_DEBUG_TRANSLATION') && XF_TRANSLATOR_DEBUG_TRANSLATION && is_string($translated_content)) {
+            error_log('XF Translator DEBUG [received from API] queue_id=' . $queue_id . ' length=' . strlen($translated_content) . ' snippet: ' . substr($translated_content, 0, 1200));
         }
 
-        foreach ($parsed_translation as $field => $value) {
-            if (isset($placeholders_map[$field]) && !empty($placeholders_map[$field])) {
-                $parsed_translation[$field] = $this->restore_html_and_urls($value, $placeholders_map[$field]);
+        if (is_string($translated_content)) {
+            $translated_content = $this->parse_translation_response($translated_content, $original_data);
+            if (!is_array($translated_content) || empty($translated_content)) {
+                $wpdb->update(
+                    $table_name,
+                    array('status' => 'failed', 'error_message' => 'Failed to parse raw translation response. Send structured object or labeled text (e.g. "Title: ...\n\nContent: ...").'),
+                    array('id' => $queue_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                return array('success' => false, 'message' => 'Failed to parse raw translation response.', 'translated_post_id' => null);
             }
         }
 
-        $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $parsed_translation, $post_data);
+        // Re-inject original URLs: by context (src/href) for HTML fields so images and links stay correct; by order for plain text
+        foreach ($translated_content as $field => $value) {
+            if (!is_string($value) || !isset($original_data[$field]) || !is_string($original_data[$field])) {
+                continue;
+            }
+            $orig = $original_data[$field];
+            if ($field === 'content' || strpos($orig, 'src=') !== false || strpos($orig, 'href=') !== false) {
+                $translated_content[$field] = $this->restore_urls_by_context($value, $orig);
+            } else {
+                $ordered_urls = $this->extract_urls_from_content($orig);
+                if (!empty($ordered_urls)) {
+                    $translated_content[$field] = $this->restore_corrupted_urls_in_order($value, $ordered_urls);
+                }
+            }
+        }
+
+        $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $translated_content, $original_data);
         if ($translated_post_id === false) {
-            $this->mark_job_failed($queue_id, $this->last_error ?: 'Failed to create translated post');
-            return array('success' => false, 'message' => $this->last_error);
+            $wpdb->update(
+                $table_name,
+                array('status' => 'failed', 'error_message' => $this->get_last_error() ?: 'Failed to create translated post'),
+                array('id' => $queue_id, 'status' => 'processing'),
+                array('%s', '%s'),
+                array('%d', '%s')
+            );
+            return array('success' => false, 'message' => $this->get_last_error() ?: 'Failed to create translated post.', 'translated_post_id' => null);
         }
 
         $wpdb->update(
-            $table,
+            $table_name,
             array('status' => 'completed', 'translated_post_id' => $translated_post_id),
             array('id' => $queue_id, 'status' => 'processing'),
             array('%s', '%d'),
             array('%d', '%s')
         );
 
-        return array('success' => true);
-    }
-
-    /**
-     * Mark job as failed.
-     *
-     * @param int    $queue_id     Queue entry ID.
-     * @param string $error_message Error message.
-     */
-    private function mark_job_failed($queue_id, $error_message) {
-        global $wpdb;
-        $wpdb->update(
-            $wpdb->prefix . 'xf_translate_queue',
-            array('status' => 'failed', 'error_message' => $error_message),
-            array('id' => $queue_id, 'status' => 'processing'),
-            array('%s', '%s'),
-            array('%d', '%s')
+        return array(
+            'success' => true,
+            'message' => 'Translation saved.',
+            'translated_post_id' => (int) $translated_post_id
         );
     }
 
@@ -985,6 +1142,80 @@ class Xf_Translator_Processor
     }
 
     /**
+     * Extract URLs from content in order (same regex as protect_urls).
+     * Used for fallback restore when context-aware restore has nothing to do.
+     *
+     * @param string $content Content to scan
+     * @return array List of URLs in order of appearance
+     */
+    private function extract_urls_from_content($content)
+    {
+        if (!is_string($content) || $content === '') {
+            return array();
+        }
+        $urls = array();
+        if (preg_match_all('/(https?:\/\/[^\s<>"\'\)]+|www\.[^\s<>"\'\)]+|\/\/[^\s<>"\'\)]+)/i', $content, $matches)) {
+            $urls = $matches[0];
+        }
+        return $urls;
+    }
+
+    /**
+     * Extract URL attribute values by context: src="..." and href="..." in order.
+     * Ensures we restore the 1st img src with the 1st original img src, etc., even if the model reorders.
+     *
+     * @param string $content HTML content
+     * @return array ['src' => [url1, url2, ...], 'href' => [url1, url2, ...]]
+     */
+    private function extract_urls_by_context($content)
+    {
+        if (!is_string($content) || $content === '') {
+            return array('src' => array(), 'href' => array());
+        }
+        $out = array('src' => array(), 'href' => array());
+        foreach (array('src', 'href') as $attr) {
+            if (preg_match_all('/' . preg_quote($attr, '/') . '\s*=\s*["\']([^"\']*)["\']/i', $content, $matches)) {
+                $out[$attr] = $matches[1];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Restore URL attributes in translated content using originals by context (src and href separately).
+     * Replaces 1st src in translated with 1st src from original, etc. So images and links stay correct even if model reorders.
+     *
+     * @param string $translated_content Translated HTML
+     * @param string $original_content Original HTML
+     * @return string Content with src and href values restored from original
+     */
+    private function restore_urls_by_context($translated_content, $original_content)
+    {
+        if (!is_string($translated_content) || !is_string($original_content)) {
+            return $translated_content;
+        }
+        $originals = $this->extract_urls_by_context($original_content);
+        foreach (array('src', 'href') as $attr) {
+            if (empty($originals[$attr])) {
+                continue;
+            }
+            $index = 0;
+            $count = count($originals[$attr]);
+            $translated_content = preg_replace_callback(
+                '/' . preg_quote($attr, '/') . '\s*=\s*(["\'])([^"\']*)\1/i',
+                function ($m) use ($attr, $originals, &$index, $count) {
+                    $quote = $m[1];
+                    $replacement = $index < $count ? $originals[$attr][$index] : $m[2];
+                    $index++;
+                    return $attr . '=' . $quote . $replacement . $quote;
+                },
+                $translated_content
+            );
+        }
+        return $translated_content;
+    }
+
+    /**
      * Extract and replace HTML tags, URLs, and images with placeholders
      * This preserves them so they won't be translated
      * DEPRECATED: Use protect_urls() instead - HTML tags are now kept as-is
@@ -1017,6 +1248,50 @@ class Xf_Translator_Processor
     }
 
     /**
+     * Get ordered list of original URLs from a placeholders map ({{URL_0}} => url, ...).
+     *
+     * @param array $placeholders Map of placeholder => original URL
+     * @return array List of original URLs in order (index 0, 1, 2, ...)
+     */
+    private function get_ordered_urls_from_placeholders($placeholders)
+    {
+        if (!is_array($placeholders) || empty($placeholders)) {
+            return array();
+        }
+        $ordered = array();
+        $i = 0;
+        while (isset($placeholders['{{URL_' . $i . '}}'])) {
+            $ordered[] = $placeholders['{{URL_' . $i . '}}'];
+            $i++;
+        }
+        return $ordered;
+    }
+
+    /**
+     * Replace URL-like patterns in content with original URLs in order.
+     * Use when the model corrupts or omits placeholders (e.g. outputs //domain.--path instead of {{URL_0}}).
+     * Matches full URLs (http/https/www) and protocol-relative or broken URLs (//...).
+     *
+     * @param string $content Translated content that may contain corrupted URLs
+     * @param array $ordered_original_urls List of original URLs in the same order as in the source
+     * @return string Content with URL-like runs replaced by originals (first N matches, N = count(ordered_original_urls))
+     */
+    private function restore_corrupted_urls_in_order($content, $ordered_original_urls)
+    {
+        if (!is_string($content) || empty($ordered_original_urls)) {
+            return $content;
+        }
+        $count = count($ordered_original_urls);
+        $index = 0;
+        $regex = '/(https?:\/\/[^\s<>"\'\)]+|www\.[^\s<>"\'\)]+|\/\/[^\s<>"\'\)]+)/i';
+        return preg_replace_callback($regex, function ($matches) use ($ordered_original_urls, $count, &$index) {
+            $replacement = $index < $count ? $ordered_original_urls[$index] : $matches[0];
+            $index++;
+            return $replacement;
+        }, $content);
+    }
+
+    /**
      * Build translation prompt from Brand Tone template
      *
      * @param array $post_data Post data array
@@ -1042,22 +1317,17 @@ class Xf_Translator_Processor
         // $target_language is now the language name directly
         $language_name = $target_language;
 
-        // Build content string with all fields, keeping HTML tags as-is, only protecting URLs
+        // Build content string with all fields: send raw content (URLs and HTML as-is). Prompt instructs model not to translate them.
         $content_parts = array();
-        $field_labels_list = array(); // Track field labels for example
-        $placeholders_map = array(); // Store placeholders for each field (only URLs now)
+        $field_labels_list = array();
+        $placeholders_map = array(); // Kept empty; we no longer use placeholders; URL fix is done from original content after translation
 
         foreach ($post_data as $field => $value) {
             if (!empty($value)) {
                 $field_label = ucfirst(str_replace(array('acf_', 'meta_'), '', $field));
-
-                // Only protect URLs, keep HTML tags as-is
-                $protected = $this->protect_urls($value);
-                $protected_value = $protected['content'];
-                $placeholders_map[$field] = $protected['placeholders'];
-
-                $content_parts[] = "{$field_label}: {$protected_value}";
+                $content_parts[] = "{$field_label}: " . $value;
                 $field_labels_list[] = $field_label;
+                $placeholders_map[$field] = array();
             }
         }
         $content_string = implode("\n\n", $content_parts);
@@ -1111,8 +1381,11 @@ class Xf_Translator_Processor
             $example_format = "\n\nIMPORTANT: You MUST respond in the following exact format, maintaining the same structure with field labels:\n" . implode("\n\n", $example_parts) . "\n\nEach field must be on a separate line with its label followed by a colon and space, then the translated content.";
         }
 
-        // Add strict formatting instructions with example
-        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. IMPORTANT: Do NOT translate any placeholders like {{URL_0}}, {{URL_1}}, etc. Keep them exactly as they appear.\n7. CRITICAL: Do NOT translate HTML tags. Keep all HTML tags exactly as they appear in the original content, including all attributes, opening tags, closing tags, and self-closing tags.\n8. CRITICAL: Do NOT translate images. Keep all image tags (<img>), image URLs, image attributes (src, alt, etc.), and any image references exactly as they appear in the original content.\n9. Only translate the actual text content that appears between HTML tags or outside of HTML tags. HTML tags and images must remain completely unchanged." . $example_format;
+        // Add strict formatting instructions: send raw content; instruct model not to touch URLs or HTML
+        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. CRITICAL: Do NOT translate, modify, or alter any URLs. Keep every URL exactly as in the source—including in href=\"...\", src=\"...\", and any other attribute. Copy them character-for-character.\n7. CRITICAL: Do NOT translate or modify any HTML tags. Keep all tags, attributes, opening/closing tags, and self-closing tags exactly as in the original.\n8. Only translate the actual visible text (e.g. alt text, link text, paragraph text). URLs and HTML structure must remain unchanged." . $example_format;
+
+        // Translation rules: tone, fidelity, and what not to translate
+        $prompt = $prompt . "\n\nTRANSLATION RULES:\n- Translate while keeping a professional and SEO-optimized tone.\n- Do NOT add new information, remove information, alter meaning, or provide any kind of advice. Simply translate the text exactly as written.\n- Do NOT translate any brand names, company names, personal names, URLs, or any text inside square brackets [ ].\n- Preserve all structure, formatting, headings, punctuation, and special characters.\n- If the content includes medical, legal, or regulated topics, translate it factually without modifying interpretation.";
 
         return array(
             'prompt' => $prompt,
@@ -1401,8 +1674,11 @@ class Xf_Translator_Processor
             $example_format = "\n\nIMPORTANT: You MUST respond in the following exact format, maintaining the same structure with field labels:\n" . implode("\n\n", $example_parts) . "\n\nEach field must be on a separate line with its label followed by a colon and space, then the translated content.";
         }
         
-        // Add CRITICAL INSTRUCTIONS
-        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. IMPORTANT: Do NOT translate any placeholders like {{URL_0}}, {{URL_1}}, etc. Keep them exactly as they appear.\n7. CRITICAL: Do NOT translate HTML tags. Keep all HTML tags exactly as they appear in the original content, including all attributes, opening tags, closing tags, and self-closing tags.\n8. CRITICAL: Do NOT translate images. Keep all image tags (<img>), image URLs, image attributes (src, alt, etc.), and any image references exactly as they appear in the original content.\n9. Only translate the actual text content that appears between HTML tags or outside of HTML tags. HTML tags and images must remain completely unchanged." . $example_format;
+        // Add CRITICAL INSTRUCTIONS (no placeholders; do not touch URLs or HTML)
+        $prompt = $prompt . "\n\nCRITICAL INSTRUCTIONS:\n1. You MUST maintain the exact same structure as the input.\n2. Each field must start with its label followed by a colon and space (e.g., 'Title: ', 'Content: ', 'Excerpt: ').\n3. Do NOT provide just the translated text without labels.\n4. Do NOT add any explanations, comments, or additional text.\n5. Provide ONLY the translated content in the structured format.\n6. CRITICAL: Do NOT translate, modify, or alter any URLs. Keep every URL exactly as in the source—including in href=\"...\", src=\"...\", and any other attribute. Copy them character-for-character.\n7. CRITICAL: Do NOT translate or modify any HTML tags. Keep all tags, attributes, opening/closing tags, and self-closing tags exactly as in the original.\n8. Only translate the actual visible text (e.g. alt text, link text, paragraph text). URLs and HTML structure must remain unchanged." . $example_format;
+
+        // Translation rules: tone, fidelity, and what not to translate
+        $prompt = $prompt . "\n\nTRANSLATION RULES:\n- Translate while keeping a professional and SEO-optimized tone.\n- Do NOT add new information, remove information, alter meaning, or provide any kind of advice. Simply translate the text exactly as written.\n- Do NOT translate any brand names, company names, personal names, URLs, or any text inside square brackets [ ].\n- Preserve all structure, formatting, headings, punctuation, and special characters.\n- If the content includes medical, legal, or regulated topics, translate it factually without modifying interpretation.";
         
         return $prompt;
     }
@@ -2402,6 +2678,13 @@ class Xf_Translator_Processor
     private function clean_field_value($value, $field_type = '') {
         if (empty($value)) {
             return $value;
+        }
+
+        // For post content: do NOT run label/path regexes - they match URL parts (e.g. "https:" and path segments)
+        // and corrupt img src, href, etc. Only remove the known separator token if present.
+        if ($field_type === 'content') {
+            $value = preg_replace('/\|{3}XF_ROW_SEP_\d+\|{3}/u', '', $value);
+            return trim($value);
         }
         
         // Remove ACF field label patterns from anywhere in the value (start, middle, or end)
@@ -3582,11 +3865,20 @@ class Xf_Translator_Processor
         // Parse the structured translation response
         $parsed_translation = $this->parse_translation_response($translation_result, $post_data);
 
-        // Restore HTML tags and URLs from placeholders
-        if (!empty($parsed_translation) && !empty($placeholders_map)) {
+        // Re-inject original URLs: by context (src/href) for HTML fields; by order for plain text
+        if (!empty($parsed_translation)) {
             foreach ($parsed_translation as $field => $value) {
-                if (isset($placeholders_map[$field]) && !empty($placeholders_map[$field])) {
-                    $parsed_translation[$field] = $this->restore_html_and_urls($value, $placeholders_map[$field]);
+                if (!isset($post_data[$field]) || !is_string($post_data[$field]) || !is_string($value)) {
+                    continue;
+                }
+                $orig = $post_data[$field];
+                if ($field === 'content' || strpos($orig, 'src=') !== false || strpos($orig, 'href=') !== false) {
+                    $parsed_translation[$field] = $this->restore_urls_by_context($value, $orig);
+                } else {
+                    $ordered_urls = $this->extract_urls_from_content($orig);
+                    if (!empty($ordered_urls)) {
+                        $parsed_translation[$field] = $this->restore_corrupted_urls_in_order($value, $ordered_urls);
+                    }
                 }
             }
         }
@@ -3818,11 +4110,20 @@ class Xf_Translator_Processor
         // Parse the structured translation response
         $parsed_translation = $this->parse_translation_response($translation_result, $edited_post_data);
 
-        // Restore HTML tags and URLs from placeholders
-        if (!empty($parsed_translation) && !empty($placeholders_map)) {
+        // Re-inject original URLs: by context (src/href) for HTML fields; by order for plain text
+        if (!empty($parsed_translation)) {
             foreach ($parsed_translation as $field => $value) {
-                if (isset($placeholders_map[$field]) && !empty($placeholders_map[$field])) {
-                    $parsed_translation[$field] = $this->restore_html_and_urls($value, $placeholders_map[$field]);
+                if (!isset($edited_post_data[$field]) || !is_string($edited_post_data[$field]) || !is_string($value)) {
+                    continue;
+                }
+                $orig = $edited_post_data[$field];
+                if ($field === 'content' || strpos($orig, 'src=') !== false || strpos($orig, 'href=') !== false) {
+                    $parsed_translation[$field] = $this->restore_urls_by_context($value, $orig);
+                } else {
+                    $ordered_urls = $this->extract_urls_from_content($orig);
+                    if (!empty($ordered_urls)) {
+                        $parsed_translation[$field] = $this->restore_corrupted_urls_in_order($value, $ordered_urls);
+                    }
                 }
             }
         }
