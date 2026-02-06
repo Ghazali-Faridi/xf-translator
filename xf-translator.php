@@ -218,58 +218,11 @@ function xf_translator_register_hooks() {
 	return $handle;
 }, PHP_INT_MAX, 3); // Highest possible priority - runs after ALL plugins
 
-	/**
-	 * Unschedule any legacy translation cron events (processing is now via external workers).
-	 *
-	 * @since    1.0.0
-	 */
-	add_action('init', 'xf_translator_unschedule_legacy_cron_events', 1);
 }
 
 // Register hooks after WordPress is loaded (but early enough for filters to work)
 if (function_exists('add_action')) {
 	add_action('plugins_loaded', 'xf_translator_register_hooks', 1);
-}
-
-/**
- * Compatibility function to unschedule all events for a hook
- * Works with both old and new WordPress versions
- *
- * @param string $hook The hook name
- * @since    1.0.0
- */
-function xf_translator_unschedule_all_events($hook) {
-	// Use WordPress 5.1+ function if available
-	if (function_exists('wp_unschedule_all_events')) {
-		wp_unschedule_all_events($hook);
-		return;
-	}
-	
-	// Fallback for older WordPress versions
-	// Get all scheduled events for this hook and unschedule them one by one
-	// Use wp_get_scheduled_event() in a loop until no more events are found
-	$max_iterations = 100; // Safety limit to prevent infinite loops
-	$iterations = 0;
-	
-	while ($iterations < $max_iterations) {
-		$timestamp = wp_next_scheduled($hook);
-		if ($timestamp === false) {
-			// No more scheduled events found
-			break;
-		}
-		wp_unschedule_event($timestamp, $hook);
-		$iterations++;
-	}
-}
-
-/**
- * Unschedule legacy translation cron events. Processing is done by external workers.
- *
- * @since    1.0.0
- */
-function xf_translator_unschedule_legacy_cron_events() {
-	xf_translator_unschedule_all_events('xf_translator_process_new_cron');
-	xf_translator_unschedule_all_events('xf_translator_process_old_cron');
 }
 
 /**

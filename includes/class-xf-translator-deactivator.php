@@ -30,15 +30,10 @@ class Xf_Translator_Deactivator {
 	 * @since    1.0.0
 	 */
 	public static function deactivate() {
-		// Unschedule cron events when plugin is deactivated
-		$timestamp = wp_next_scheduled('xf_translator_process_new_cron');
-		if ($timestamp) {
-			wp_unschedule_event($timestamp, 'xf_translator_process_new_cron');
-		}
-		
-		$timestamp = wp_next_scheduled('xf_translator_process_old_cron');
-		if ($timestamp) {
-			wp_unschedule_event($timestamp, 'xf_translator_process_old_cron');
+		// Clean up any legacy translation cron events if they exist (e.g. from older plugin versions)
+		if (function_exists('wp_unschedule_all_events')) {
+			wp_unschedule_all_events('xf_translator_process_new_cron');
+			wp_unschedule_all_events('xf_translator_process_old_cron');
 		}
 	}
 

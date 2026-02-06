@@ -3080,7 +3080,7 @@ class Xf_Translator_Processor
                     error_log('XF Translator: ERROR - Failed to update slug in database. WP_Error: ' . $wpdb->last_error);
                 }
             } else {
-                error_log('XF Translator: Slug is correct: ' . $saved_post->post_name);
+                // error_log('XF Translator: Slug is correct: ' . $saved_post->post_name);
             }
         } else {
             error_log('XF Translator: ERROR - Could not retrieve saved post to verify slug');
@@ -3300,7 +3300,7 @@ class Xf_Translator_Processor
                     $processed_count++;
                 }
                 
-                error_log('XF Translator: Completed ACF field processing. Processed ' . $processed_count . ' field(s)');
+               // error_log('XF Translator: Completed ACF field processing. Processed ' . $processed_count . ' field(s)');
             }
         }
 
@@ -4637,7 +4637,7 @@ class Xf_Translator_Processor
         $parsed_translation = $this->parse_translation_response($translation_result, $user_data);
         
         if (!$parsed_translation) {
-            error_log('XF Translator: Failed to parse user meta translation response for user ID: ' . $user_id);
+            // error_log('XF Translator: Failed to parse user meta translation response for user ID: ' . $user_id);
             return false;
         }
         

@@ -23,8 +23,6 @@ $selected_model = $settings->get('selected_model', 'gpt-4o');
 $processing_delay_minutes = $settings->get('processing_delay_minutes', 0);
 $max_concurrent_processing = $settings->get('max_concurrent_processing', 20);
 $worker_api_token = $settings->get('worker_api_token', '');
-$enable_new_cron = $settings->get('enable_new_translations_cron', true);
-$enable_old_cron = $settings->get('enable_old_translations_cron', true);
 ?>
 
 <div class="wrap api-translator-settings">

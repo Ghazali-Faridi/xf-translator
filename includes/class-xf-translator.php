@@ -234,9 +234,6 @@ class Xf_Translator {
         // Hook to process batched field updates
         add_action('xf_translator_process_pending_fields', array($plugin_admin, 'process_pending_acf_fields'), 10, 1);
         
-        // Hook to check custom fields after post update (delayed check)
-        add_action('xf_translator_check_custom_fields', array($plugin_admin, 'check_custom_fields_after_update'), 10, 1);
-        
         // Allow duplicate slugs for translated posts - use high priority to run early
         // This filter now handles both translated posts AND original posts to prevent conflicts
         // WordPress passes 6 arguments: null (override_slug), slug, post_id, post_status, post_type, post_parent

@@ -120,9 +120,9 @@ class Xf_Translator_Admin {
 		
 		// Debug: Log if WP_DEBUG is enabled
 		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-			error_log( 'XF Translator: Scripts enqueued on hook: ' . $hook );
-			error_log( 'XF Translator: AJAX URL: ' . admin_url( 'admin-ajax.php' ) );
-			error_log( 'XF Translator: Nonce created: ' . ( ! empty( $nonce ) ? 'Yes' : 'No' ) );
+			// error_log( message: 'XF Translator: Scripts enqueued on hook: ' . $hook );
+			// error_log( 'XF Translator: AJAX URL: ' . admin_url( 'admin-ajax.php' ) );
+			// error_log( 'XF Translator: Nonce created: ' . ( ! empty( $nonce ) ? 'Yes' : 'No' ) );
 		}
 
 	}
@@ -431,27 +431,7 @@ class Xf_Translator_Admin {
             $this->settings->update('worker_api_token', sanitize_text_field($_POST['worker_api_token']));
         }
         
-        // Save cron enable/disable settings (deprecated; processing is via external workers)
-        $enable_new_cron = isset($_POST['enable_new_translations_cron']) ? true : false;
-        $enable_old_cron = isset($_POST['enable_old_translations_cron']) ? true : false;
-        
-        $this->settings->update('enable_new_translations_cron', $enable_new_cron);
-        $this->settings->update('enable_old_translations_cron', $enable_old_cron);
-        
-        // Never schedule translation cron; only unschedule any legacy events
-        $this->unschedule_legacy_translation_cron();
-        
         $this->add_notice(__('Settings saved successfully.', 'api-translator'), 'success');
-    }
-    
-    /**
-     * Unschedule any legacy translation cron events. Processing is done by external workers.
-     */
-    private function unschedule_legacy_translation_cron() {
-        if (function_exists('xf_translator_unschedule_all_events')) {
-            xf_translator_unschedule_all_events('xf_translator_process_new_cron');
-            xf_translator_unschedule_all_events('xf_translator_process_old_cron');
-        }
     }
     
     /**
@@ -1392,7 +1372,7 @@ class Xf_Translator_Admin {
         if (class_exists('Xf_Translator_Logger')) {
             Xf_Translator_Logger::info('Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Previous status: ' . $queue_entry['status'] . ')');
         } else {
-            error_log('XF Translator: Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Previous status: ' . $queue_entry['status'] . ')');
+          //  error_log('XF Translator: Retrying queue entry #' . $queue_entry_id . ' (Post ID: ' . $queue_entry['parent_post_id'] . ', Language: ' . $queue_entry['lng'] . ', Previous status: ' . $queue_entry['status'] . ')');
         }
         
         // Increase PHP execution time limit significantly for retry operations
@@ -1442,7 +1422,7 @@ class Xf_Translator_Admin {
                 if (class_exists('Xf_Translator_Logger')) {
                     Xf_Translator_Logger::warning('Retry processing took ' . $processing_time . ' seconds (may have timed out)');
                 } else {
-                    error_log('XF Translator: Retry processing took ' . $processing_time . ' seconds (may have timed out)');
+                //    error_log('XF Translator: Retry processing took ' . $processing_time . ' seconds (may have timed out)');
                 }
             }
             
@@ -1756,13 +1736,6 @@ class Xf_Translator_Admin {
             }
         }
         
-        // Check WordPress native custom fields
-        // Use a delayed check because custom fields might be saved after post_updated fires
-        // Schedule a check after a short delay to ensure all meta is saved
-        if (!wp_next_scheduled('xf_translator_check_custom_fields', array($post_id))) {
-            wp_schedule_single_event(time() + 1, 'xf_translator_check_custom_fields', array($post_id));
-        }
-        
         // If no fields changed, return
         if (empty($edited_fields)) {
             return;
@@ -1870,7 +1843,7 @@ class Xf_Translator_Admin {
             // Store normalized value for consistent comparison
             $value_to_store = $this->normalize_value_for_comparison($current_value);
             update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $value_to_store);
-            error_log('XF Translator: Stored previous value for custom field ' . $meta_key . ' on post ' . $post_id . ': ' . substr($value_to_store, 0, 50));
+           // error_log('XF Translator: Stored previous value for custom field ' . $meta_key . ' on post ' . $post_id . ': ' . substr($value_to_store, 0, 50));
         }
         
         // Return null to allow the update to proceed
@@ -2104,87 +2077,6 @@ class Xf_Translator_Admin {
             $this->create_edit_queue_entries($post_id, $edited_fields);
         } else {
             error_log('XF Translator: No change detected for ' . ($is_acf_field ? 'ACF' : 'custom') . ' field ' . $meta_key . ' for post ' . $post_id);
-        }
-    }
-    
-    /**
-     * Check custom fields after post update (delayed check)
-     * This ensures we catch custom fields that might be saved after post_updated fires
-     *
-     * @param int $post_id Post ID
-     */
-    public function check_custom_fields_after_update($post_id) {
-        // DISABLED: Automatic translation on post edits is disabled
-        // To re-enable, remove or comment out this return statement
-        return;
-        
-        // Skip autosaves and revisions
-        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
-            return;
-        }
-        
-        if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) {
-            return;
-        }
-        
-        // Skip if we're currently creating a translated post
-        require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';
-        if (Xf_Translator_Processor::is_creating_translated_post()) {
-            return;
-        }
-        
-        $post = get_post($post_id);
-        if (!$post || $post->post_status !== 'publish') {
-            return;
-        }
-        
-        // Skip if this is already a translated post
-        if (get_post_meta($post_id, '_api_translator_original_post_id', true) || 
-            get_post_meta($post_id, '_xf_translator_original_post_id', true)) {
-            return;
-        }
-        
-        // Detect which WordPress native custom fields changed
-        $edited_fields = array();
-        
-        $all_meta_after = get_post_meta($post_id);
-        if ($all_meta_after && is_array($all_meta_after)) {
-            foreach ($all_meta_after as $meta_key => $meta_values) {
-                // Skip internal meta keys and our own meta keys
-                if (strpos($meta_key, '_') === 0) {
-                    continue;
-                }
-                
-                // Skip if it's an ACF field (we handle those separately)
-                if (function_exists('get_fields') && function_exists('get_field_object') && get_field_object($meta_key, $post_id)) {
-                    continue;
-                }
-                
-                // Get previous value from stored meta
-                $previous_value = get_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, true);
-                $current_value = isset($meta_values[0]) ? $meta_values[0] : '';
-                
-                // Normalize both values for consistent comparison
-                $previous_normalized = $this->normalize_value_for_comparison($previous_value);
-                $current_normalized = $this->normalize_value_for_comparison($current_value);
-                
-                // Compare normalized values
-                if ($previous_normalized !== $current_normalized && $previous_normalized !== '') {
-                    $edited_fields[] = 'meta_' . $meta_key;
-                    
-                    // Update stored value for next comparison (store normalized version)
-                    update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $current_normalized);
-                } elseif ($previous_normalized === '' && !empty($current_normalized)) {
-                    // First time tracking this field - store it for next time
-                    update_post_meta($post_id, '_xf_translator_prev_meta_' . $meta_key, $current_normalized);
-                }
-            }
-        }
-        
-        // If custom fields changed, create EDIT queue entries
-        if (!empty($edited_fields)) {
-            error_log('XF Translator: Detected custom field changes for post ' . $post_id . ': ' . implode(', ', $edited_fields));
-            $this->create_edit_queue_entries($post_id, $edited_fields);
         }
     }
     
@@ -3313,7 +3205,6 @@ class Xf_Translator_Admin {
         } catch (Exception $e) {
             // If there's an error, return args unchanged to prevent fatal error
             if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log('XF Translator: Error filtering terms by language: ' . $e->getMessage());
             }
             return $args;
         } catch (Error $e) {
@@ -5514,7 +5405,7 @@ class Xf_Translator_Admin {
                 
                 if ($original_post_id) {
                     // Confirmed: this is an existing translated post being updated
-                    error_log('XF Translator: Allowing duplicate slug for existing translated post (flag + meta check): ' . $slug);
+                    // error_log('XF Translator: Allowing duplicate slug for existing translated post (flag + meta check): ' . $slug);
                     return $slug;
                 } else {
                     // Flag is set but this is NOT a translated post - this shouldn't happen
@@ -5547,7 +5438,7 @@ class Xf_Translator_Admin {
                 // If we have a desired slug and it matches what we're trying to set, allow it
                 // BUT only if this is actually a translated post (we already checked above)
                 if (!empty($desired_slug) && $slug === $desired_slug) {
-                    error_log('XF Translator: Allowing duplicate slug for existing translated post (meta check only): ' . $slug);
+                    // error_log('XF Translator: Allowing duplicate slug for existing translated post (meta check only): ' . $slug);
                     return $slug;
                 }
             } else {
@@ -7378,7 +7269,7 @@ class Xf_Translator_Admin {
                                     });
                                 };
                                 
-                                // Start polling after 5 seconds (give cron time to process)
+                                // Start polling after 5 seconds (give workers time to process)
                                 setTimeout(pollStatus, 5000);
                             } else {
                                 $btn.prop('disabled', false);
@@ -7480,7 +7371,7 @@ class Xf_Translator_Admin {
         
         if (!$existing_queue) {
             // Create queue entry with very old timestamp to bypass delay checks
-            // This ensures it's eligible for immediate processing by cron
+            // This ensures it's eligible for immediate processing by workers
             $old_timestamp = date('Y-m-d H:i:s', strtotime('-1 year'));
             
             $result = $wpdb->insert(
@@ -7518,21 +7409,16 @@ class Xf_Translator_Admin {
             );
         }
         
-        // Trigger cron immediately if possible (so it processes right away)
-        if (function_exists('spawn_cron')) {
-            spawn_cron();
-        }
-        
-        // Return immediately - translation will be processed by next cron run
+        // Return immediately - translation will be picked up by external workers
         wp_send_json_success(array(
-            'message' => sprintf(__('Translation added to queue for %s. It will be processed by the next cron job.', 'xf-translator'), $target_language['name']),
+            'message' => sprintf(__('Translation added to queue for %s. It will be processed by external workers.', 'xf-translator'), $target_language['name']),
             'queue_id' => $queue_id,
             'status' => 'queued'
         ));
     }
     
     /**
-     * Process single translation in background (called by cron)
+     * Process single translation in background (called by xf_translator_process_single_translation action)
      */
     public function process_single_translation_background($queue_id) {
         require_once plugin_dir_path(dirname(__FILE__)) . 'includes/class-translation-processor.php';

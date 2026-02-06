@@ -30,9 +30,6 @@ class Xf_Translator_Activator {
 	 * @since    1.0.0
 	 */
 	public static function activate() {
-		// Translation processing is done by external workers (DigitalOcean). No wp-cron scheduling.
-		xf_translator_unschedule_all_events('xf_translator_process_new_cron');
-		xf_translator_unschedule_all_events('xf_translator_process_old_cron');
 		// Flush rewrite rules to register new author archive rules
 		flush_rewrite_rules();
 	}
