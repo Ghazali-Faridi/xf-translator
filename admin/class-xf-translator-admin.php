@@ -5367,7 +5367,7 @@ class Xf_Translator_Admin {
         $is_creating = Xf_Translator_Processor::is_creating_translated_post();
         
         // Add debug logging
-        error_log('XF Translator: pre_wp_unique_post_slug filter called. Slug: ' . $slug . ', Post ID: ' . $post_id . ', Status: ' . $post_status . ', Type: ' . $post_type . ', Is creating: ' . ($is_creating ? 'yes' : 'no'));
+        // error_log('XF Translator: pre_wp_unique_post_slug filter called. Slug: ' . $slug . ', Post ID: ' . $post_id . ', Status: ' . $post_status . ', Type: ' . $post_type . ', Is creating: ' . ($is_creating ? 'yes' : 'no'));
         
         // If slug is empty, try to get it from the post being updated
         if (empty($slug) && $post_id > 0) {

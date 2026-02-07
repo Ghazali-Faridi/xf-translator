@@ -2912,8 +2912,9 @@ class Xf_Translator_Processor
         if ($existing_translated_post_id && get_post($existing_translated_post_id)) {
             // Update existing translated post
             $post_data['ID'] = $existing_translated_post_id;
-            // For updates, keep original status (don't change to draft)
-            $post_data['post_status'] = $original_post_status;
+            // Use draft first if original is published, so theme "featured image required" doesn't block wp_update_post.
+            // Featured image is copied later, then status is set back to publish (same as create path).
+            $post_data['post_status'] = ($original_post_status === 'publish') ? 'draft' : $original_post_status;
             // Preserve original post date on updates too
             $post_data['post_date'] = $original_post->post_date;
             $post_data['post_date_gmt'] = $original_post->post_date_gmt;
@@ -3145,7 +3146,12 @@ class Xf_Translator_Processor
                 // error_log('XF Translator: Failed to set featured image for translated post ID: ' . $translated_post_id . ' from original post ID: ' . $original_post_id);
             }
         } else {
-            // error_log('XF Translator: Original post ID: ' . $original_post_id . ' does not have a featured image. Translated post may fail to publish if featured image is required.');
+            // Original has no featured image - if site requires one to publish, fail the job now to avoid retry loop
+            if ($original_post_status === 'publish') {
+                $this->last_error = 'Original post has no featured image. This site requires a featured image to publish.';
+                error_log('XF Translator: ' . $this->last_error . ' (original_post_id=' . $original_post_id . ')');
+                return false;
+            }
         }
 
         // If original post was published, update status back to publish (after featured image is set)
@@ -3166,7 +3172,15 @@ class Xf_Translator_Processor
             ), true);
 
             if (is_wp_error($update_result)) {
-                error_log('XF Translator: Failed to update post status to publish. Error: ' . $update_result->get_error_message());
+                $err_msg = $update_result->get_error_message();
+                error_log('XF Translator: Failed to update post status to publish. Error: ' . $err_msg);
+                // Mark as failed with clear message so job is not retried in a loop (e.g. "You cannot publish without a featured image")
+                if (stripos($err_msg, 'featured image') !== false || stripos($err_msg, 'thumbnail') !== false) {
+                    $this->last_error = 'Cannot publish: this site requires a featured image. Original post has no featured image. Add a featured image to the original post and retry the job.';
+                } else {
+                    $this->last_error = 'Failed to publish translated post: ' . $err_msg;
+                }
+                return false;
             }
         }
 
