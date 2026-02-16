@@ -5,19 +5,16 @@
  */
 
 // Immediate check - will run even if jQuery isn't ready
-console.log('XF Translator Admin JS: Script loaded');
 
 (function($) {
     'use strict';
     
-    console.log('XF Translator Admin JS: jQuery wrapper executing');
-    console.log('XF Translator Admin JS: apiTranslator defined?', typeof apiTranslator !== 'undefined');
+ 
     if (typeof apiTranslator !== 'undefined') {
         console.log('XF Translator Admin JS: apiTranslator.ajaxUrl =', apiTranslator.ajaxUrl);
     }
     
     $(document).ready(function() {
-        console.log('XF Translator Admin JS: Document ready');
         
         // Edit Language Modal
         $('.edit-language').on('click', function() {
@@ -536,7 +533,6 @@ console.log('XF Translator Admin JS: Script loaded');
         };
         
         function loadTranslationJobs() {
-            console.log('XF Translator: loadTranslationJobs called');
             
             // Check if apiTranslator is available
             if (typeof apiTranslator === 'undefined') {
@@ -546,7 +542,6 @@ console.log('XF Translator Admin JS: Script loaded');
                 return;
             }
             
-            console.log('XF Translator: Making AJAX request to', apiTranslator.ajaxUrl);
             
             var $loading = $('#jobs-loading');
             var $tableBody = $('#jobs-table-body');
@@ -774,13 +769,10 @@ console.log('XF Translator Admin JS: Script loaded');
             translationJobsInitAttempts++;
             var $table = $('#translation-jobs-table');
             if ($table.length) {
-                console.log('XF Translator: Found translation jobs table, initializing... (attempt ' + translationJobsInitAttempts + ')');
                 if (typeof apiTranslator !== 'undefined') {
-                    console.log('XF Translator: apiTranslator is defined, calling loadTranslationJobs');
                     loadTranslationJobs();
                 } else {
                     if (translationJobsInitAttempts < maxInitAttempts) {
-                        console.warn('XF Translator: apiTranslator not ready, retrying in 200ms...');
                         setTimeout(initTranslationJobs, 200);
                     } else {
                         console.error('XF Translator: Failed to initialize after ' + maxInitAttempts + ' attempts. apiTranslator is not defined.');
@@ -794,25 +786,21 @@ console.log('XF Translator Admin JS: Script loaded');
         }
         
         // Try immediate initialization
-        console.log('XF Translator: Attempting initial load of translation jobs');
         initTranslationJobs();
         
         // Also try after a short delay (for slow loading)
         setTimeout(function() {
-            console.log('XF Translator: Retrying translation jobs load after 100ms');
             initTranslationJobs();
         }, 100);
         
         // And on window load as fallback
         $(window).on('load', function() {
-            console.log('XF Translator: Window loaded, retrying translation jobs load');
             setTimeout(initTranslationJobs, 50);
         });
         
         // Timeout fallback - show error if nothing happens after 5 seconds
         setTimeout(function() {
             if ($('#jobs-table-body').html().indexOf('Loading jobs...') !== -1) {
-                console.error('XF Translator: Timeout - jobs still loading after 5 seconds');
                 $('#jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232; font-weight: bold;">Error: Request timed out. Please check your browser console for errors and refresh the page.</td></tr>');
                 $('#jobs-loading').hide();
             }
@@ -827,7 +815,6 @@ console.log('XF Translator Admin JS: Script loaded');
         };
         
         function loadExistingJobs() {
-            console.log('XF Translator: loadExistingJobs called');
             
             // Check if apiTranslator is available
             if (typeof apiTranslator === 'undefined') {
@@ -837,7 +824,6 @@ console.log('XF Translator Admin JS: Script loaded');
                 return;
             }
             
-            console.log('XF Translator: Making AJAX request to', apiTranslator.ajaxUrl);
             
             var $loading = $('#existing-jobs-loading');
             var $tableBody = $('#existing-jobs-table-body');
@@ -1056,16 +1042,12 @@ console.log('XF Translator Admin JS: Script loaded');
             existingJobsInitAttempts++;
             var $table = $('#existing-translation-jobs-table');
             if ($table.length) {
-                console.log('XF Translator: Found existing jobs table, initializing... (attempt ' + existingJobsInitAttempts + ')');
                 if (typeof apiTranslator !== 'undefined') {
-                    console.log('XF Translator: apiTranslator is defined, calling loadExistingJobs');
                     loadExistingJobs();
                 } else {
                     if (existingJobsInitAttempts < maxExistingInitAttempts) {
-                        console.warn('XF Translator: apiTranslator not ready, retrying in 200ms...');
                         setTimeout(initExistingJobs, 200);
                     } else {
-                        console.error('XF Translator: Failed to initialize after ' + maxExistingInitAttempts + ' attempts. apiTranslator is not defined.');
                         $('#existing-jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232; font-weight: bold;">Error: JavaScript configuration failed to load. The apiTranslator object is missing. Please refresh the page.</td></tr>');
                         $('#existing-jobs-loading').hide();
                     }
@@ -1076,12 +1058,10 @@ console.log('XF Translator Admin JS: Script loaded');
         }
         
         // Try immediate initialization
-        console.log('XF Translator: Attempting initial load of existing jobs');
         initExistingJobs();
         
         // Also try after a short delay (for slow loading)
         setTimeout(function() {
-            console.log('XF Translator: Retrying existing jobs load after 100ms');
             initExistingJobs();
         }, 100);
         
@@ -1094,7 +1074,6 @@ console.log('XF Translator Admin JS: Script loaded');
         // Timeout fallback - show error if nothing happens after 5 seconds
         setTimeout(function() {
             if ($('#existing-jobs-table-body').html().indexOf('Loading jobs...') !== -1) {
-                console.error('XF Translator: Timeout - existing jobs still loading after 5 seconds');
                 $('#existing-jobs-table-body').html('<tr><td colspan="6" style="text-align: center; padding: 20px; color: #dc3232; font-weight: bold;">Error: Request timed out. Please check your browser console for errors and refresh the page.</td></tr>');
                 $('#existing-jobs-loading').hide();
             }

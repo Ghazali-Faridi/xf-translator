@@ -186,7 +186,7 @@ $failed_old_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
         <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #0073aa;">
             <h3 style="margin-top: 0;"><?php _e('Reset Stuck Processing Jobs', 'xf-translator'); ?></h3>
             <p style="margin: 10px 0; color: #666;">
-                <?php _e('If any jobs are stuck in "processing" status for more than 5 minutes, you can reset them back to "pending" so they can be retried.', 'xf-translator'); ?>
+                <?php _e('If any jobs are stuck in "processing" status for more than 30 minutes, you can reset them back to "pending" so they can be retried.', 'xf-translator'); ?>
             </p>
             <form method="post" action="" style="margin-top: 10px;">
                 <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
@@ -197,6 +197,49 @@ $failed_old_count = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE statu
             </form>
         </div>
     <?php endif; ?>
+
+    <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #dc3232;">
+        <h3 style="margin-top: 0;"><?php _e('Reset Failed Queue (Existing Posts)', 'xf-translator'); ?></h3>
+        <p style="margin: 10px 0; color: #666;">
+            <?php _e('Reset all failed translation jobs (existing posts) back to "pending" status so they can be retried by the workers.', 'xf-translator'); ?>
+            <?php if ($failed_old_count > 0) : ?>
+                <strong><?php echo esc_html(sprintf(__('Currently: %d failed job(s).', 'xf-translator'), $failed_old_count)); ?></strong>
+            <?php endif; ?>
+        </p>
+        <form method="post" action="" style="margin-top: 10px;">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="reset_failed_queue_old">
+            <button type="submit" class="button button-secondary" onclick="return confirm('<?php echo esc_js(__('Reset all failed jobs (existing posts) back to pending status? They will be retried by the workers.', 'xf-translator')); ?>');">
+                <?php _e('Reset Failed to Pending', 'xf-translator'); ?>
+            </button>
+        </form>
+    </div>
+
+    <?php
+    // Count stale entries: deleted posts OR non-translatable post types
+    $non_translatable_types = "'oembed_cache','revision','nav_menu_item','attachment','customize_changeset','wp_block','wp_template','wp_template_part','wp_navigation','wp_global_styles','custom_css'";
+    $stale_count = (int) $wpdb->get_var(
+        "SELECT COUNT(*) FROM $table_name q
+         LEFT JOIN {$wpdb->posts} p ON p.ID = q.parent_post_id
+         WHERE p.ID IS NULL OR p.post_type IN ($non_translatable_types)"
+    );
+    ?>
+    <div style="margin-top: 20px; padding: 15px; background: #fff; border-left: 4px solid #856404;">
+        <h3 style="margin-top: 0;"><?php _e('Cleanup Stale Queue Entries', 'xf-translator'); ?></h3>
+        <p style="margin: 10px 0; color: #666;">
+            <?php _e('Remove queue entries whose original post no longer exists or has a non-translatable post type (e.g., oembed_cache, revision, nav_menu_item). These can never be translated.', 'xf-translator'); ?>
+            <?php if ($stale_count > 0) : ?>
+                <strong><?php echo esc_html(sprintf(__('Currently: %d stale entry(ies) found.', 'xf-translator'), $stale_count)); ?></strong>
+            <?php endif; ?>
+        </p>
+        <form method="post" action="" style="margin-top: 10px;">
+            <?php wp_nonce_field('api_translator_settings', 'api_translator_nonce'); ?>
+            <input type="hidden" name="api_translator_action" value="cleanup_stale_queue">
+            <button type="submit" class="button button-secondary" onclick="return confirm('<?php echo esc_js(__('Remove all stale queue entries (deleted posts and non-translatable post types)? This cannot be undone.', 'xf-translator')); ?>');">
+                <?php _e('Cleanup Stale Entries', 'xf-translator'); ?>
+            </button>
+        </form>
+    </div>
 </div>
 
 <div class="api-translator-section">

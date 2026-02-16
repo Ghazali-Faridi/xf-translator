@@ -21,7 +21,7 @@ class Xf_Translator_Rest {
      */
     public static function register_routes() {
         register_rest_route(self::NAMESPACE, 'claim-job', array(
-            'methods'             => WP_REST_Server::READABLE,
+            'methods'             => array(WP_REST_Server::READABLE, WP_REST_Server::CREATABLE),
             'callback'            => array(__CLASS__, 'claim_job'),
             'permission_callback' => array(__CLASS__, 'check_auth'),
         ));
@@ -89,6 +89,7 @@ class Xf_Translator_Rest {
         }
         $processor = new Xf_Translator_Processor();
         $result = $processor->claim_job_for_worker();
+        $result['request_id'] = uniqid('claim.', true);
         if (!empty($result['status']) && $result['status'] === 'success' && !empty($result['job'])) {
             $job = $result['job'];
             $result['lang'] = isset($job['lang']) ? $job['lang'] : (isset($job['language']) ? $job['language'] : '');

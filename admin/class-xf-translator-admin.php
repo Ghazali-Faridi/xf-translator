@@ -307,6 +307,14 @@ class Xf_Translator_Admin {
                 $this->handle_reset_failed_queue();
                 break;
                 
+            case 'cleanup_stale_queue':
+                $this->handle_cleanup_stale_queue();
+                break;
+                
+            case 'reset_failed_queue_old':
+                $this->handle_reset_failed_queue_old();
+                break;
+                
             case 'save_meta_fields':
                 $this->handle_save_meta_fields();
                 break;
@@ -1492,7 +1500,7 @@ class Xf_Translator_Admin {
     
     /**
      * Handle reset stuck processing queue entries
-     * Resets entries that have been in "processing" status for more than 5 minutes
+     * Resets entries that have been in "processing" status for more than 30 minutes
      *
      * @since    1.0.0
      */
@@ -1500,8 +1508,8 @@ class Xf_Translator_Admin {
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
         
-        // Calculate the cutoff time (5 minutes in processing = updated more than 5 minutes ago)
-        $cutoff_time = date('Y-m-d H:i:s', strtotime('-5 minutes'));
+        // Calculate the cutoff time (30 minutes in processing = updated more than 30 minutes ago)
+        $cutoff_time = date('Y-m-d H:i:s', strtotime('-30 minutes'));
         
         // Find all processing entries that have been in processing for more than 5 minutes (by updated time)
         $stuck_entries = $wpdb->get_results($wpdb->prepare(
@@ -1515,7 +1523,7 @@ class Xf_Translator_Admin {
         
         if (empty($stuck_entries)) {
             $this->add_notice(
-                __('No stuck processing jobs found. All processing jobs have been in progress for less than 5 minutes.', 'xf-translator'),
+                __('No stuck processing jobs found. All processing jobs have been in progress for less than 30 minutes.', 'xf-translator'),
                 'info'
             );
             return;
@@ -1651,6 +1659,126 @@ class Xf_Translator_Admin {
         } else {
             $this->add_notice(
                 __('Failed to reset failed queue entries. Please try again.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+    
+    /**
+     * Handle reset failed queue entries for OLD type (existing posts queue).
+     */
+    private function handle_reset_failed_queue_old() {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+
+        $failed_entries = $wpdb->get_results(
+            "SELECT id FROM $table_name WHERE status = 'failed' AND type = 'OLD' ORDER BY id ASC",
+            ARRAY_A
+        );
+
+        if (empty($failed_entries)) {
+            $this->add_notice(
+                __('No failed queue entries found (OLD posts).', 'xf-translator'),
+                'info'
+            );
+            return;
+        }
+
+        $reset_count = 0;
+        foreach ($failed_entries as $entry) {
+            $result = $wpdb->update(
+                $table_name,
+                array('status' => 'pending', 'error_message' => null),
+                array('id' => $entry['id']),
+                array('%s', '%s'),
+                array('%d')
+            );
+            if ($result !== false) {
+                $reset_count++;
+            }
+        }
+
+        if ($reset_count > 0) {
+            $this->add_notice(
+                sprintf(
+                    __('Successfully reset %d failed job(s) (existing posts) back to pending. They will be processed by the workers.', 'xf-translator'),
+                    $reset_count
+                ),
+                'success'
+            );
+        } else {
+            $this->add_notice(
+                __('Failed to reset failed queue entries. Please try again.', 'xf-translator'),
+                'error'
+            );
+        }
+    }
+    
+    /**
+     * Handle cleanup of stale queue entries (original post deleted or missing).
+     * Deletes queue rows where parent_post_id no longer exists in wp_posts.
+     */
+    private function handle_cleanup_stale_queue() {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'xf_translate_queue';
+        $posts_table = $wpdb->posts;
+
+        // Non-translatable post types (internal WordPress post types)
+        $non_translatable_types = array(
+            'oembed_cache',
+            'revision',
+            'nav_menu_item',
+            'attachment',
+            'customize_changeset',
+            'wp_block',
+            'wp_template',
+            'wp_template_part',
+            'wp_navigation',
+            'wp_global_styles',
+            'custom_css'
+        );
+        $types_placeholders = implode(',', array_fill(0, count($non_translatable_types), '%s'));
+
+        // Find entries where:
+        // 1. Parent post no longer exists (p.ID IS NULL)
+        // 2. OR parent post has a non-translatable post type
+        $query = $wpdb->prepare(
+            "SELECT q.id FROM $table_name q
+             LEFT JOIN $posts_table p ON p.ID = q.parent_post_id
+             WHERE p.ID IS NULL OR p.post_type IN ($types_placeholders)",
+            $non_translatable_types
+        );
+        $ids_to_delete = $wpdb->get_col($query);
+
+        if (empty($ids_to_delete)) {
+            $this->add_notice(
+                __('No stale queue entries found. All queue entries have a valid, translatable original post.', 'xf-translator'),
+                'info'
+            );
+            return;
+        }
+
+        $count = count($ids_to_delete);
+        $placeholders = implode(',', array_fill(0, $count, '%d'));
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM $table_name WHERE id IN ($placeholders)",
+            $ids_to_delete
+        ));
+
+        if ($deleted !== false && $deleted > 0) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: Cleaned up ' . $deleted . ' stale queue entries (missing or non-translatable post). IDs: ' . implode(', ', array_slice($ids_to_delete, 0, 50)) . ($count > 50 ? '...' : ''));
+            }
+            $this->add_notice(
+                sprintf(
+                    __('Removed %d stale queue entry(ies) (deleted posts or non-translatable post types like oembed_cache).', 'xf-translator'),
+                    $deleted
+                ),
+                'success'
+            );
+        } else {
+            $this->add_notice(
+                __('Failed to remove stale queue entries. Please try again.', 'xf-translator'),
                 'error'
             );
         }
@@ -5552,7 +5680,7 @@ class Xf_Translator_Admin {
             // If post_name is set in $postarr, preserve it exactly as provided
             if (isset($postarr['post_name']) && !empty($postarr['post_name'])) {
                 $data['post_name'] = $postarr['post_name'];
-                error_log('XF Translator: Preserving slug in wp_insert_post_data for translated post: ' . $postarr['post_name']);
+                // error_log('XF Translator: Preserving slug in wp_insert_post_data for translated post: ' . $postarr['post_name']);
             }
             return $data;
         }

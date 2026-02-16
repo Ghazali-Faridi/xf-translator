@@ -16,7 +16,7 @@
  * Plugin Name:       Unite.AI Translations
  * Plugin URI:        https://xfinitive.co
  * Description:       Serverside translation multilingual plugin 
- * Version:           1.1.2
+ * Version:           1.1.4
  * Author:            ghazali
  * Author URI:        https://xfinitive.co/
  * License:           GPL-2.0+
@@ -139,6 +139,17 @@ function xf_translator_register_hooks() {
 	if (!function_exists('add_filter') || !function_exists('add_action')) {
 		return;
 	}
+
+	/**
+	 * Prevent fatal: WpOrg\Requests expects body to be array|string, not boolean.
+	 * Some plugins (e.g. on save_post during submit-result) can pass body => true/false.
+	 */
+	add_filter('http_request_args', function($args, $url) {
+		if (isset($args['body']) && is_bool($args['body'])) {
+			$args['body'] = $args['body'] ? '1' : '';
+		}
+		return $args;
+	}, 1, 2);
 	
 	/**
 	 * Increase HTTP request timeout for translation API calls

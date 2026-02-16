@@ -242,19 +242,12 @@ class Xf_Translator_Processor
         $this->db_reconnect_if_needed();
 
         if (!$post_data) {
-            $this->last_error = "Post data not found for post ID: {$post_id}";
-            error_log('XF Translator Error: ' . $this->last_error);
-            // Update status to failed with error message (only if still in progress)
-            $wpdb->update(
-                $table_name,
-                array(
-                    'status' => 'failed',
-                    'error_message' => $this->last_error
-                ),
-                array('id' => $queue_entry['id'], 'status' => 'processing'),
-                array('%s', '%s'),
-                array('%d', '%s')
-            );
+            // Source post was deleted; remove queue entry (terminal, non-recoverable)
+            $wpdb->delete($table_name, array('id' => $queue_entry['id']), array('%d'));
+            $this->last_error = "Post data not found for post ID: {$post_id} (source post deleted; queue entry removed)";
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: ' . $this->last_error);
+            }
             return false;
         }
 
@@ -443,16 +436,19 @@ class Xf_Translator_Processor
         global $wpdb;
         $table_name = $wpdb->prefix . 'xf_translate_queue';
 
+        // Reconnect so the next query is on a fresh connection; then run a write first so
+        // read/write split routes this request to the primary (otherwise SELECT can see stale replica data).
         $this->db_reconnect_if_needed();
+        $wpdb->query("UPDATE $table_name SET updated = updated WHERE 1 = 0");
 
-        $max_runtime_minutes = (int) $this->settings->get('translation_job_max_runtime_minutes', 15);
-        if ($max_runtime_minutes > 0) {
-            $reclaim_before = date('Y-m-d H:i:s', strtotime("-{$max_runtime_minutes} minutes"));
-            $wpdb->query($wpdb->prepare(
-                "UPDATE $table_name SET status = 'pending', error_message = NULL WHERE status = 'processing' AND updated < %s",
-                $reclaim_before
-            ));
-        }
+        // Mark jobs stuck in processing for more than 15 minutes as pending (worker may have crashed).
+        // Use WordPress time (same as updated column) so timezone matches and we only reclaim actually stuck jobs.
+        $reclaim_minutes = 30;
+        $reclaim_cutoff = date('Y-m-d H:i:s', current_time('timestamp') - (int) $reclaim_minutes * (defined('MINUTE_IN_SECONDS') ? MINUTE_IN_SECONDS : 60));
+        $wpdb->query($wpdb->prepare(
+            "UPDATE $table_name SET status = 'pending', error_message = NULL WHERE status = 'processing' AND updated <= %s",
+            $reclaim_cutoff
+        ));
 
         $max_concurrent_processing = (int) $this->settings->get('max_concurrent_processing', 20);
         $current_processing_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'processing'");
@@ -538,13 +534,11 @@ class Xf_Translator_Processor
             $post_id = (int) $queue_entry['parent_post_id'];
             $post_data = $this->get_post_data($post_id);
             if (!$post_data) {
-                $wpdb->update(
-                    $table_name,
-                    array('status' => 'failed', 'error_message' => 'Post data not found'),
-                    array('id' => $claimed_id),
-                    array('%s', '%s'),
-                    array('%d')
-                );
+                // Source post was deleted; remove queue entry (terminal, non-recoverable)
+                $wpdb->delete($table_name, array('id' => $claimed_id), array('%d'));
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('XF Translator: Removed stale queue entry #' . $claimed_id . ' (source post ' . $post_id . ' no longer exists).');
+                }
                 continue;
             }
 
@@ -630,14 +624,12 @@ class Xf_Translator_Processor
         $target_language_name = $queue_entry['lng'];
         $original_data = $this->get_post_data($post_id);
         if (!$original_data) {
-            $wpdb->update(
-                $table_name,
-                array('status' => 'failed', 'error_message' => 'Original post data not found'),
-                array('id' => $queue_id),
-                array('%s', '%s'),
-                array('%d')
-            );
-            return array('success' => false, 'message' => 'Original post data not found.', 'translated_post_id' => null);
+            // Source post was deleted; remove queue entry (terminal, non-recoverable)
+            $wpdb->delete($table_name, array('id' => $queue_id), array('%d'));
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: Removed stale queue entry #' . $queue_id . ' (source post ' . $post_id . ' no longer exists).');
+            }
+            return array('success' => false, 'message' => 'Source post was deleted; queue entry removed.', 'translated_post_id' => null);
         }
 
         // Debug: log raw response from translation API (define XF_TRANSLATOR_DEBUG_TRANSLATION in wp-config.php to enable)
@@ -673,6 +665,20 @@ class Xf_Translator_Processor
                     $translated_content[$field] = $this->restore_corrupted_urls_in_order($value, $ordered_urls);
                 }
             }
+        }
+
+        // Do not create a post when the translation API returned a refusal (e.g. "I'm sorry, I can't assist with that request.")
+        if ($this->is_translation_refusal($translated_content)) {
+            $refusal_message = __("Translation rejected: API returned a refusal message (e.g. \"I'm sorry, I can't assist with that request.\"). No post created. You can retry the job later.", 'xf-translator');
+            $this->last_error = $refusal_message;
+            $wpdb->update(
+                $table_name,
+                array('status' => 'failed', 'error_message' => $refusal_message),
+                array('id' => $queue_id, 'status' => 'processing'),
+                array('%s', '%s'),
+                array('%d', '%s')
+            );
+            return array('success' => false, 'message' => $refusal_message, 'translated_post_id' => null);
         }
 
         $translated_post_id = $this->create_translated_post($post_id, $target_language_name, $translated_content, $original_data);
@@ -2789,6 +2795,35 @@ class Xf_Translator_Processor
     }
 
     /**
+     * Check if parsed translation is an API refusal (e.g. "I'm sorry, I can't assist with that request.").
+     * When the API refuses to translate, we must not create a post with that title and original content.
+     *
+     * @param array $translated_data Parsed translated data with at least 'title' and optionally 'content'
+     * @return bool True if the translation appears to be a refusal message
+     */
+    private function is_translation_refusal($translated_data) {
+        $refusal_indicators = array(
+            "I'm sorry, I can't assist with that request.",
+            "I'm sorry, I can't assist",
+            "I cannot assist with that request",
+            "I can't assist with that request",
+        );
+        $title = isset($translated_data['title']) && is_string($translated_data['title'])
+            ? trim($translated_data['title']) : '';
+        $content = isset($translated_data['content']) && is_string($translated_data['content'])
+            ? trim($translated_data['content']) : '';
+        foreach ($refusal_indicators as $indicator) {
+            if (stripos($title, $indicator) !== false) {
+                return true;
+            }
+            if ($content !== '' && stripos($content, $indicator) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Create a new WordPress post with translated content
      *
      * @param int $original_post_id Original post ID
@@ -2799,6 +2834,12 @@ class Xf_Translator_Processor
      */
     private function create_translated_post($original_post_id, $target_language, $translated_data, $original_data)
     {
+        // Do not create a post when the translation is an API refusal message
+        if ($this->is_translation_refusal($translated_data)) {
+            $this->last_error = __("Translation rejected: API returned a refusal message. No post created.", 'xf-translator');
+            return false;
+        }
+
         // Start output buffering if not already started (prevents 502 errors during long post creation)
         if (!ob_get_level()) {
             ob_start();
@@ -3833,18 +3874,12 @@ class Xf_Translator_Processor
         $this->db_reconnect_if_needed();
 
         if (!$post_data) {
-            $this->last_error = "Post data not found for post ID: {$post_id}";
-            error_log('XF Translator Error: ' . $this->last_error);
-            $wpdb->update(
-                $table_name,
-                array(
-                    'status' => 'failed',
-                    'error_message' => $this->last_error
-                ),
-                array('id' => $queue_entry_id, 'status' => 'processing'),
-                array('%s', '%s'),
-                array('%d', '%s')
-            );
+            // Source post was deleted; remove queue entry (terminal, non-recoverable)
+            $wpdb->delete($table_name, array('id' => $queue_entry_id), array('%d'));
+            $this->last_error = "Post data not found for post ID: {$post_id} (source post deleted; queue entry removed)";
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: ' . $this->last_error);
+            }
             return false;
         }
 
@@ -4054,18 +4089,12 @@ class Xf_Translator_Processor
         $this->db_reconnect_if_needed();
 
         if (!$full_post_data) {
-            $this->last_error = "Post data not found for post ID: {$post_id}";
-            error_log('XF Translator Error: ' . $this->last_error);
-            $wpdb->update(
-                $table_name,
-                array(
-                    'status' => 'failed',
-                    'error_message' => $this->last_error
-                ),
-                array('id' => $queue_entry['id'], 'status' => 'processing'),
-                array('%s', '%s'),
-                array('%d', '%s')
-            );
+            // Source post was deleted; remove queue entry (terminal, non-recoverable)
+            $wpdb->delete($table_name, array('id' => $queue_entry['id']), array('%d'));
+            $this->last_error = "Post data not found for post ID: {$post_id} (source post deleted; queue entry removed)";
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('XF Translator: ' . $this->last_error);
+            }
             return false;
         }
 
